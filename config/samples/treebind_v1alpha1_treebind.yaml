@@ -1,0 +1,9 @@
+apiVersion: treebind.example.org/v1alpha1
+kind: Treebind
+metadata:
+  labels:
+    app.kubernetes.io/name: treebind
+    app.kubernetes.io/managed-by: kustomize
+  name: treebind-sample
+spec:
+  # TODO(user): Add fields here

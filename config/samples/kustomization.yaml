@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- treebind_v1alpha1_treebind.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
