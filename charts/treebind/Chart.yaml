@@ -1,0 +1,24 @@
+apiVersion: v2
+name: treebind
+description: Kubernetes operator that keeps a Git repository and an application's files in sync through a shared PVC
+type: application
+
+# The release workflow sets version and appVersion from the tag, without the
+# leading "v". The values below only apply to a chart installed from a checkout.
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
+
+kubeVersion: ">=1.35.0-0"
+
+home: https://github.com/mohanedmoh/treebind
+sources:
+  - https://github.com/mohanedmoh/treebind
+keywords:
+  - kubernetes
+  - operator
+  - git
+  - gitops
+  - pvc
+maintainers:
+  - name: mohanedmoh
+    url: https://github.com/mohanedmoh
