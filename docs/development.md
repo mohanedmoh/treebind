@@ -14,7 +14,8 @@ A contributor needs a laptop, a container runtime and no cloud account.
 | kubectl | Within one minor version of the cluster | Talks to the cluster |
 | make | GNU make | Every task has a target |
 | kubebuilder | v4.16, only when you scaffold a new API | Code generation for new types |
-| Helm, ko (planned) | Helm 3.x or 4.x | Needed once the chart and image build land |
+| Helm (optional) | 4.x | Lint and render the chart in `charts/treebind` (`helm lint charts/treebind`) |
+| ko, cosign | Pinned in `release.yml` | Used only by the release workflow; see [releasing.md](releasing.md) |
 
 The Kubernetes versions under test are 1.35 to 1.37. The CI matrix moves up as
 versions leave support (1.35 reaches end of life on 28 February 2027). Tools such

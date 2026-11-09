@@ -1,0 +1,266 @@
+name: Release
+
+# Runs when a release tag is pushed (v1.2.3, or a pre-release such as
+# v1.2.3-rc.1). Like every workflow here it waits for the owner's approval
+# first. It is the only workflow that gets packages: write and id-token: write,
+# and it runs in the "release" environment, which only accepts v* tags.
+#
+# It builds both images with ko, signs every digest keylessly with the
+# workflow's own identity, attaches SPDX SBOMs, pushes and signs the Helm chart,
+# renders install.yaml with the image digests, and publishes a GitHub release.
+# The release is created as a draft, every asset is attached, and only then is
+# it published, because an immutable release cannot change afterwards.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# A tag run never cancels; a second tag waits its turn.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Nothing runs until the owner approves (Checks tab, "Review pending
+  # deployments"). Every other job waits for it.
+  approve:
+    name: approve
+    runs-on: ubuntu-latest
+    environment: ci
+    steps:
+      - name: Approved to run
+        run: echo "Approved."
+
+  # 1. The tag must be v plus a semantic version, and its commit must be on main.
+  verify:
+    name: verify tag
+    needs: approve
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag and the commit
+        id: check
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.[0-9]+)?$'
+          if ! [[ "$TAG" =~ $semver ]]; then
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH, optionally with -alpha.N, -beta.N or -rc.N."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::Commit $SHA is not on main. Release tags are created from main."
+            exit 1
+          fi
+          prerelease=false
+          if [[ "$TAG" == *-* ]]; then prerelease=true; fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  # 2. The full test suite runs again on the tagged commit.
+  test:
+    name: test
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Lint and test
+        run: |
+          make lint-config
+          make lint
+          make test
+
+  e2e:
+    name: e2e
+    needs: verify
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+
+  publish:
+    name: publish
+    needs: [verify, test, e2e]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # create the GitHub release
+      packages: write # push images and the chart to GHCR
+      id-token: write # keyless signing with the workflow identity
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+      # Release tools are pinned by version and by the SHA-256 of the download.
+      KO_VERSION: "0.19.1"
+      KO_SHA256: 635ac6ea3fd376c935fee597fbb29ab2c2449f49ef1655085fe3aa9c25fed7a5
+      COSIGN_VERSION: v3.1.4
+      COSIGN_SHA256: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+      HELM_VERSION: v4.3.1
+      HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install ko, cosign and Helm
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSLo ko.tar.gz "https://github.com/ko-build/ko/releases/download/v${KO_VERSION}/ko_${KO_VERSION}_Linux_x86_64.tar.gz"
+          echo "${KO_SHA256}  ko.tar.gz" | sha256sum -c -
+          tar -xzf ko.tar.gz ko
+          curl -fsSLo cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  cosign" | sha256sum -c -
+          chmod +x cosign
+          curl -fsSLo helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          mv linux-amd64/helm helm
+          echo "$tools" >> "$GITHUB_PATH"
+
+      # The workflow token is the only credential; nothing long-lived is read.
+      - name: Log in to ghcr.io
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          echo "$REGISTRY_TOKEN" | ko login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          echo "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+
+      # 3. Both images for linux/amd64 and linux/arm64, pushed by digest, each
+      #    with an SPDX SBOM attached to the image. Each image has its own
+      #    repository under ghcr.io/<owner>/.
+      - name: Build and push the images
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          mkdir -p out/assets out/sbom
+          labels="org.opencontainers.image.source=https://github.com/${REPO},org.opencontainers.image.revision=${SHA},org.opencontainers.image.version=${TAG},org.opencontainers.image.licenses=Apache-2.0"
+          # The source annotation replaces the one inherited from the base image
+          # (which names the distroless repository), so that GHCR links the
+          # package to this repository. ko prints one line to stdout:
+          # <repo>:<tag>@sha256:<digest> of the multi-platform index. Keep only
+          # the digest, so every later step refers to the image by digest.
+          build() {
+            local repo="ghcr.io/${owner}/treebind-$1" published
+            published="$(KO_DOCKER_REPO="$repo" ko build --bare \
+              --platform=linux/amd64,linux/arm64 --tags "$TAG" \
+              --sbom=spdx --sbom-dir "out/sbom/$1" \
+              --image-label "$labels" \
+              --image-annotation "org.opencontainers.image.source=https://github.com/${REPO}" \
+              "$2")"
+            if ! [[ "$published" =~ @(sha256:[0-9a-f]{64})$ ]]; then
+              echo "::error::Unexpected ko output for $1: $published"
+              exit 1
+            fi
+            echo "${repo}@${BASH_REMATCH[1]}" > "out/$1.ref"
+          }
+          build operator ./cmd
+          build agent ./cmd/agent
+          echo "Operator image: $(cat out/operator.ref)"
+          echo "Agent image:    $(cat out/agent.ref)"
+
+      # 4. Sign each image digest, keyless, with the workflow's OIDC identity.
+      - name: Sign the images
+        run: |
+          set -euo pipefail
+          for name in operator agent; do
+            cosign sign --yes "$(cat "out/${name}.ref")"
+          done
+
+      # 6. Package the chart with version and appVersion set to the release
+      #    without the v, push it to ghcr.io/<owner>/charts, and sign it.
+      - name: Package, push and sign the Helm chart
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          helm lint charts/treebind --strict
+          helm package charts/treebind --version "$VERSION" --app-version "$VERSION" --destination out
+          helm push "out/treebind-${VERSION}.tgz" "oci://ghcr.io/${owner}/charts" 2>&1 | tee out/helm-push.log
+          digest="$(sed -n 's/^Digest: *//p' out/helm-push.log | head -n 1)"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not read the chart digest from the helm push output."
+            exit 1
+          fi
+          cosign sign --yes "ghcr.io/${owner}/charts/treebind@${digest}"
+          echo "Chart: ghcr.io/${owner}/charts/treebind:${VERSION}@${digest}"
+
+      # 7. install.yaml from config/default, with the operator image digest.
+      - name: Render install.yaml
+        run: |
+          set -euo pipefail
+          make build-installer IMG="$(cat out/operator.ref)"
+          cp dist/install.yaml out/assets/install.yaml
+
+      # 5 and 8. SBOMs and checksums, then the GitHub release: a draft first,
+      #    every asset attached, and only then published.
+      # ko writes three SBOMs per image: one for the multi-platform index and
+      # one for each architecture (for example cmd-index.spdx.json and
+      # cmd-linux-amd64.spdx.json). They are attached to the release as
+      # treebind-<image>-<index|linux-amd64|linux-arm64-v8>.spdx.json.
+      - name: Collect SBOMs and checksums
+        run: |
+          set -euo pipefail
+          for name in operator agent; do
+            count=0
+            for file in "out/sbom/${name}"/*.spdx.json; do
+              base="$(basename "$file" .spdx.json)"
+              cp "$file" "out/assets/treebind-${name}-${base#*-}.spdx.json"
+              count=$((count + 1))
+            done
+            if [ "$count" -ne 3 ]; then
+              echo "::error::Expected 3 SBOMs for ${name}, found ${count}."
+              exit 1
+            fi
+          done
+          cd out/assets
+          sha256sum install.yaml *.spdx.json > checksums.txt
+          cat checksums.txt
+
+      - name: Create and publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          flags=(--draft --verify-tag --generate-notes --title "$TAG")
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}"
+          gh release upload "$TAG" out/assets/*
+          gh release edit "$TAG" --draft=false
