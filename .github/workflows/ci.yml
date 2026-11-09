@@ -10,16 +10,30 @@ on:
 permissions:
   contents: read
 
-# Pull requests cancel their own earlier runs. Runs on main never cancel.
+# Pull requests cancel their own earlier runs. Runs on main never cancel: each
+# push has its own group (the commit SHA), so a queued run is never replaced.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Nothing runs until the owner approves. The "ci" environment requires the
+  # owner as reviewer, so this job pauses; on the pull request, open the Checks
+  # tab and choose "Review pending deployments". Every other job waits for it,
+  # so one approval starts the whole run.
+  approve:
+    name: approve
+    runs-on: ubuntu-latest
+    environment: ci
+    steps:
+      - name: Approved to run
+        run: echo "Approved."
+
   # Decides whether the slow end-to-end suite is needed. A pull request that
   # touches only documentation and repository metadata skips it.
   changes:
     name: changes
+    needs: approve
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
@@ -51,6 +65,7 @@ jobs:
 
   lint:
     name: lint
+    needs: approve
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -86,6 +101,7 @@ jobs:
 
   unit:
     name: unit
+    needs: approve
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -105,6 +121,7 @@ jobs:
 
   envtest:
     name: envtest
+    needs: approve
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -122,6 +139,7 @@ jobs:
 
   build:
     name: build (${{ matrix.arch }})
+    needs: approve
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -153,6 +171,7 @@ jobs:
   # as passing, which keeps the required check satisfied.
   dco:
     name: dco
+    needs: approve
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -173,6 +192,7 @@ jobs:
   # environment, never interpolated into the script.
   pr-title:
     name: pr-title
+    needs: approve
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -208,7 +228,7 @@ jobs:
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [changes, lint, unit, envtest, build, dco, pr-title, e2e]
+    needs: [approve, changes, lint, unit, envtest, build, dco, pr-title, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled

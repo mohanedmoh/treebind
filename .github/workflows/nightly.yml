@@ -1,10 +1,12 @@
 name: Nightly
 
 # Runs the end-to-end suite against every Kubernetes version in the support
-# window (1.35 to 1.37). Scheduled runs happen on the default branch only.
+# window (1.35 to 1.37). It is manual for now: start it from the Actions tab
+# with "Run workflow". To run it every night again, add back
+#   schedule:
+#     - cron: "17 3 * * *"
+# under `on:` (scheduled runs happen on the default branch only).
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
