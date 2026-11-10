@@ -49,6 +49,7 @@ planned, so the sample works with no Git host account.
 | `make test-e2e` | End-to-end suite on a kind cluster, created if missing | Available |
 | `make cleanup-test-e2e` | Deletes the kind cluster used by the e2e suite | Available |
 | `make install` / `make uninstall` | Installs or removes the CRD in the current cluster | Available |
+| `make build` | Builds the operator (`cmd/operator`) and agent (`cmd/agent`) binaries into `bin/` | Available |
 | `make run` | Runs the operator from your machine | Available |
 | `make docker-build` | Builds the operator image | Available |
 | `make dev` | kind cluster, images built and loaded, operator deployed | Planned |

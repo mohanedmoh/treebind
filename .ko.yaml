@@ -1,5 +1,5 @@
 # ko builds the two release images without Dockerfiles. release.yml builds the
-# operator from ./cmd and the agent from ./cmd/agent, each into its own
+# operator from ./cmd/operator and the agent from ./cmd/agent, each into its own
 # repository, for linux/amd64 and linux/arm64.
 
 # distroless static, nonroot, pinned by the digest of its multi-platform index.
@@ -13,7 +13,7 @@ defaultPlatforms:
 
 builds:
   - id: operator
-    main: ./cmd
+    main: ./cmd/operator
     env:
       - CGO_ENABLED=0
     flags:

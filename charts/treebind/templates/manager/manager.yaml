@@ -87,8 +87,6 @@ spec:
         {{- range .Values.manager.args }}
         - {{ tpl . $ }}
         {{- end }}
-        command:
-        - /manager
         image: "{{ .Values.manager.image.repository | default "controller" }}{{- if not (contains "@" (.Values.manager.image.repository | default "controller")) }}:{{ .Values.manager.image.tag | default (printf "v%s" .Chart.AppVersion) }}{{- end }}"
         {{- with .Values.manager.image.pullPolicy }}
         imagePullPolicy: {{ . }}

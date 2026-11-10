@@ -198,7 +198,7 @@ jobs:
             fi
             echo "${repo}@${BASH_REMATCH[1]}" > "out/$1.ref"
           }
-          build operator ./cmd
+          build operator ./cmd/operator
           build agent ./cmd/agent
           echo "Operator image: $(cat out/operator.ref)"
           echo "Agent image:    $(cat out/agent.ref)"
@@ -246,8 +246,8 @@ jobs:
       # 5 and 8. SBOMs and checksums, then the GitHub release: a draft first,
       #    every asset attached, and only then published.
       # ko writes three SBOMs per image: one for the multi-platform index and
-      # one for each architecture (for example cmd-index.spdx.json and
-      # cmd-linux-amd64.spdx.json). They are attached to the release as
+      # one for each architecture (for example operator-index.spdx.json and
+      # operator-linux-amd64.spdx.json). They are attached to the release as
       # treebind-<image>-<index|linux-amd64|linux-arm64-v8>.spdx.json.
       - name: Collect SBOMs and checksums
         run: |

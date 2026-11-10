@@ -166,6 +166,49 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -o "$RUNNER_TEMP/bin/" ./cmd/...
 
+  # The release builds the images with ko. This job runs the same build on the
+  # pull request commit without pushing, so a broken image build fails here and
+  # not on the release tag. KO_DOCKER_REPO only names the images: nothing is
+  # pushed, and no registry credentials are involved. The import paths come
+  # from go list, so the job follows the main packages under cmd/ as they move.
+  image:
+    name: image
+    needs: approve
+    runs-on: ubuntu-latest
+    env:
+      # The same ko as release.yml, pinned by version and by the SHA-256 of the
+      # download.
+      KO_VERSION: "0.19.1"
+      KO_SHA256: 635ac6ea3fd376c935fee597fbb29ab2c2449f49ef1655085fe3aa9c25fed7a5
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install ko
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSLo ko.tar.gz "https://github.com/ko-build/ko/releases/download/v${KO_VERSION}/ko_${KO_VERSION}_Linux_x86_64.tar.gz"
+          echo "${KO_SHA256}  ko.tar.gz" | sha256sum -c -
+          tar -xzf ko.tar.gz ko
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Build both images for linux/amd64 and linux/arm64 without pushing
+        env:
+          KO_DOCKER_REPO: ci.invalid/treebind
+        run: |
+          set -euo pipefail
+          ko build --push=false --platform=linux/amd64,linux/arm64 $(go list ./cmd/...)
+
   # Every commit needs a Signed-off-by line. Dependabot does not add one, so
   # its pull requests skip the job; a job skipped by its own condition counts
   # as passing, which keeps the required check satisfied.
@@ -228,7 +271,7 @@ jobs:
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [approve, changes, lint, unit, envtest, build, dco, pr-title, e2e]
+    needs: [approve, changes, lint, unit, envtest, build, image, dco, pr-title, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled
