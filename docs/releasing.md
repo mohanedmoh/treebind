@@ -79,12 +79,17 @@ re-pointed by whoever can push to the registry; the digest cannot.
 
 ## Packages
 
-The first push creates each GHCR package as private. Linking to this repository
-happens by itself, because the images and the chart carry the repository as
-their source. Making a package public is a setting that has no API, so do it
-once per package under your profile's **Packages**: open the package, then
-**Package settings**, then **Change visibility**, then **Public**. The packages
-are `treebind-operator`, `treebind-agent` and `charts/treebind`.
+The workflow publishes three GHCR packages: `treebind-operator`,
+`treebind-agent` and `charts/treebind`. A package that a workflow creates is
+linked to this repository and takes its visibility, so while the repository is
+public the packages are public too. After the first release, check each one
+under your profile's **Packages**. If one is private, open it, then **Package
+settings**, then **Change visibility**, then **Public**; GHCR has no API for
+that setting.
+
+Right after GHCR creates a new package it can briefly refuse the next write, so
+the workflow retries registry writes (the image builds, the chart push and the
+signatures) with a growing delay.
 
 ## Maintainers: changing the release tools
 

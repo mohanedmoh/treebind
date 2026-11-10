@@ -170,6 +170,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          source hack/retry.sh
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           mkdir -p out/assets out/sbom
           labels="org.opencontainers.image.source=https://github.com/${REPO},org.opencontainers.image.revision=${SHA},org.opencontainers.image.version=${TAG},org.opencontainers.image.licenses=Apache-2.0"
@@ -178,9 +179,14 @@ jobs:
           # package to this repository. ko prints one line to stdout:
           # <repo>:<tag>@sha256:<digest> of the multi-platform index. Keep only
           # the digest, so every later step refers to the image by digest.
+          #
+          # ko pushes several manifests at once. Right after GHCR creates a new
+          # package it can refuse one of them ("denied: requested access to the
+          # resource is denied"), so the build is retried. The retry finds the
+          # package in place and produces the same digests.
           build() {
             local repo="ghcr.io/${owner}/treebind-$1" published
-            published="$(KO_DOCKER_REPO="$repo" ko build --bare \
+            published="$(retry 4 env KO_DOCKER_REPO="$repo" ko build --bare \
               --platform=linux/amd64,linux/arm64 --tags "$TAG" \
               --sbom=spdx --sbom-dir "out/sbom/$1" \
               --image-label "$labels" \
@@ -201,8 +207,9 @@ jobs:
       - name: Sign the images
         run: |
           set -euo pipefail
+          source hack/retry.sh
           for name in operator agent; do
-            cosign sign --yes "$(cat "out/${name}.ref")"
+            retry 3 cosign sign --yes "$(cat "out/${name}.ref")"
           done
 
       # 6. Package the chart with version and appVersion set to the release
@@ -210,16 +217,23 @@ jobs:
       - name: Package, push and sign the Helm chart
         run: |
           set -euo pipefail
+          source hack/retry.sh
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           helm lint charts/treebind --strict
           helm package charts/treebind --version "$VERSION" --app-version "$VERSION" --destination out
-          helm push "out/treebind-${VERSION}.tgz" "oci://ghcr.io/${owner}/charts" 2>&1 | tee out/helm-push.log
+          # The chart is a new package on its first release, so its push is
+          # retried like the images. Each attempt rewrites the log that the
+          # digest is read from.
+          push_chart() {
+            helm push "out/treebind-${VERSION}.tgz" "oci://ghcr.io/${owner}/charts" 2>&1 | tee out/helm-push.log
+          }
+          retry 4 push_chart
           digest="$(sed -n 's/^Digest: *//p' out/helm-push.log | head -n 1)"
           if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::Could not read the chart digest from the helm push output."
             exit 1
           fi
-          cosign sign --yes "ghcr.io/${owner}/charts/treebind@${digest}"
+          retry 3 cosign sign --yes "ghcr.io/${owner}/charts/treebind@${digest}"
           echo "Chart: ghcr.io/${owner}/charts/treebind:${VERSION}@${digest}"
 
       # 7. install.yaml from config/default, with the operator image digest.
@@ -257,6 +271,7 @@ jobs:
       - name: Create and publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           flags=(--draft --verify-tag --generate-notes --title "$TAG")
