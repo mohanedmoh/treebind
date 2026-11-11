@@ -55,7 +55,31 @@ const (
 	syncKeySecretName   = "e2e-sync-key"
 	syncHostsMapName    = "e2e-sync-hosts"
 	syncStatefulSetName = syncTreebindName + "-sync"
+	syncMarkerPodName   = "e2e-sync-marker"
+	syncMarkerContent   = "kept"
 )
+
+// syncMarkerManifest is a second pod that writes a file to the claim, so a test
+// can check that the data is still there after the Treebind is gone.
+const syncMarkerManifest = `apiVersion: v1
+kind: Pod
+metadata:
+  name: ` + syncMarkerPodName + `
+  namespace: ` + syncNamespace + `
+spec:
+  containers:
+  - name: marker
+    image: curlimages/curl:latest
+    command: ["/bin/sh", "-c", "echo ` + syncMarkerContent + ` > /data/marker && sleep 3600"]
+    securityContext:
+      runAsUser: 0
+    volumeMounts:
+    - {name: data, mountPath: /data}
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: ` + syncClaimName + `
+`
 
 // syncManifest is the claim, the SSH key and known hosts an ssh:// repository
 // needs, and the smallest Treebind that names them.
@@ -344,9 +368,12 @@ var _ = Describe("Manager", Ordered, func() {
 	// that the StatefulSet exists and is owned, not that its pod is ready.
 	Context("Sync workload", func() {
 		AfterAll(func() {
-			By("removing the Treebind, the claim and the credentials of the sync workload")
+			By("removing the Treebind, the marker pod, the claim and the credentials of the sync workload")
 			cmd := exec.Command("kubectl", "delete", "treebind", syncTreebindName, "-n", syncNamespace,
 				"--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pod", syncMarkerPodName, "-n", syncNamespace,
+				"--ignore-not-found", "--now")
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "pvc", syncClaimName, "-n", syncNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
@@ -358,7 +385,7 @@ var _ = Describe("Manager", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 
-		It("should create the sync StatefulSet owned by the Treebind and remove it with the Treebind", func() {
+		It("should own the sync StatefulSet and keep the claim and its data when the Treebind is deleted", func() {
 			By("creating a claim and a Treebind")
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(syncManifest)
@@ -382,6 +409,21 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyStatefulSet).Should(Succeed())
 
+			By("writing a file to the claim from a second pod")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(syncMarkerManifest)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the marker pod")
+
+			verifyMarker := func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", syncMarkerPodName, "-n", syncNamespace, "--",
+					"cat", "/data/marker")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(output)).To(Equal(syncMarkerContent))
+			}
+			Eventually(verifyMarker).Should(Succeed())
+
 			By("deleting the Treebind")
 			cmd = exec.Command("kubectl", "delete", "treebind", syncTreebindName, "-n", syncNamespace)
 			_, err = utils.Run(cmd)
@@ -395,6 +437,27 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).NotTo(ContainSubstring(syncStatefulSetName))
 			}
 			Eventually(verifyStatefulSetGone).Should(Succeed())
+
+			By("checking that the claim is bound, has no owner, is not being deleted and still holds the file")
+			// A claim that a pod uses stays in place while a deletion is pending, still
+			// Bound, so only an empty deletionTimestamp shows that nobody asked for it.
+			cmd = exec.Command("kubectl", "get", "pvc", syncClaimName, "-n", syncNamespace,
+				"-o", "jsonpath={.status.phase}/{.metadata.ownerReferences}/{.metadata.deletionTimestamp}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "The claim is gone")
+			Expect(output).To(Equal("Bound//"))
+			Eventually(verifyMarker).Should(Succeed())
+
+			By("asking the API server what the operator may delete")
+			asOperator := fmt.Sprintf("--as=system:serviceaccount:%s:%s", namespace, serviceAccountName)
+			cmd = exec.Command("kubectl", "auth", "can-i", "delete", "statefulsets", "-n", syncNamespace, asOperator)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "The check cannot tell what the operator may do")
+			Expect(strings.TrimSpace(output)).To(Equal("yes"))
+			cmd = exec.Command("kubectl", "auth", "can-i", "delete", "persistentvolumeclaims", "-n", syncNamespace,
+				asOperator)
+			output, _ = utils.Run(cmd)
+			Expect(strings.TrimSpace(output)).To(Equal("no"))
 		})
 	})
 })
