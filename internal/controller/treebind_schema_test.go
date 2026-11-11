@@ -33,6 +33,10 @@ import (
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
 )
 
+// existingSubPath is the target.subPath the immutability tests create with and
+// then try to change.
+const existingSubPath = "grafana"
+
 // newTreebind returns the smallest Treebind the CRD schema accepts, so that a
 // test which cares about one field starts from a valid object.
 func newTreebind(name string) *treebindv1alpha1.Treebind {
@@ -107,7 +111,7 @@ var _ = Describe("Treebind schema", func() {
 
 	It("rejects updates to the immutable target fields", func() {
 		tb := newTreebind("schema-immutable")
-		tb.Spec.Target.SubPath = "grafana"
+		tb.Spec.Target.SubPath = existingSubPath
 		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
 
@@ -134,13 +138,13 @@ var _ = Describe("Treebind schema", func() {
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, withoutSubPath)).To(Succeed()) })
 
 		added := withoutSubPath.DeepCopy()
-		added.Spec.Target.SubPath = "grafana"
+		added.Spec.Target.SubPath = existingSubPath
 		err := k8sClient.Update(ctx, added)
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
 		Expect(err).To(MatchError(ContainSubstring("subPath is immutable")))
 
 		withSubPath := newTreebind("schema-subpath-set")
-		withSubPath.Spec.Target.SubPath = "grafana"
+		withSubPath.Spec.Target.SubPath = existingSubPath
 		Expect(k8sClient.Create(ctx, withSubPath)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, withSubPath)).To(Succeed()) })
 
