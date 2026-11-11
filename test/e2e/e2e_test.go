@@ -20,7 +20,12 @@ limitations under the License.
 package e2e
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +35,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/mohanedmoh/treebind/test/utils"
 )
@@ -134,6 +142,14 @@ const (
 	restrictedNamespace = "treebind-restricted-e2e"
 	restrictedName      = "e2e-restricted"
 	restrictedPodName   = restrictedName + "-sync-0"
+	restrictedKeyName   = restrictedName + "-key"
+	restrictedKeyFile   = "id_ecdsa"
+
+	// keyReaderPodName runs the pod template of the operator with an image that
+	// has ssh-keygen, as a non-root user the image has a passwd entry for.
+	keyReaderPodName = restrictedName + "-key-reader"
+	keyReaderImage   = "alpine/git:v2.54.0"
+	nonRootUID       = int64(65534)
 )
 
 const restrictedManifest = `apiVersion: v1
@@ -155,14 +171,6 @@ spec:
       storage: 1Gi
 ---
 apiVersion: v1
-kind: Secret
-metadata:
-  name: ` + restrictedName + `-key
-  namespace: ` + restrictedNamespace + `
-stringData:
-  id_ed25519: not-a-real-key
----
-apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ` + restrictedName + `-hosts
@@ -180,7 +188,7 @@ spec:
     url: ssh://git@github.com/example/dashboards.git
     branch: main
     auth:
-      sshKeySecretRef: {name: ` + restrictedName + `-key, key: id_ed25519}
+      sshKeySecretRef: {name: ` + restrictedKeyName + `, key: ` + restrictedKeyFile + `}
       knownHostsConfigMapRef: {name: ` + restrictedName + `-hosts, key: known_hosts}
   target:
     claimName: ` + restrictedName + `-data
@@ -535,9 +543,23 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	// The agent image cannot be pulled here either, so the pod never starts. It
-	// still only exists if the restricted level admitted it.
+	// The agent image cannot be pulled here either, so the sync pod never starts.
+	// It still only exists if the restricted level admitted it.
 	Context("Pod Security", func() {
+		BeforeAll(func() {
+			By("creating a namespace that enforces the restricted level, with a Treebind in it")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(restrictedManifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace and the Treebind")
+
+			By("creating the Secret with a key that exists only for this test")
+			cmd = exec.Command("kubectl", "create", "secret", "generic", restrictedKeyName, "-n", restrictedNamespace,
+				"--from-literal="+restrictedKeyFile+"="+throwawayPrivateKey())
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the Secret")
+		})
+
 		AfterAll(func() {
 			By("removing the namespace that enforces the restricted level")
 			cmd := exec.Command("kubectl", "delete", "ns", restrictedNamespace, "--ignore-not-found")
@@ -545,14 +567,8 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		It("should admit the sync pod in a namespace that enforces the restricted level", func() {
-			By("creating a namespace that enforces the restricted level, with a Treebind in it")
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(restrictedManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace and the Treebind")
-
 			By("checking that the namespace refuses a privileged pod, so the level is really enforced")
-			cmd = exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+			cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
 			cmd.Stdin = strings.NewReader(privilegedPodManifest)
 			output, err := utils.Run(cmd)
 			Expect(err).To(HaveOccurred(), "A privileged pod was accepted")
@@ -575,8 +591,65 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "Failed to read the events")
 			Expect(output).NotTo(ContainSubstring("PodSecurity"))
 		})
+
+		It("should let a non-root user read the SSH key the operator mounts", func() {
+			By("taking the pod template of the sync StatefulSet")
+			cmd := exec.Command("kubectl", "get", "statefulset", restrictedName+"-sync", "-n", restrictedNamespace,
+				"-o", "json")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to read the StatefulSet")
+			var statefulSet appsv1.StatefulSet
+			Expect(json.Unmarshal([]byte(output), &statefulSet)).To(Succeed())
+
+			By("running it as a non-root user, with an image that can load the key")
+			spec := statefulSet.Spec.Template.Spec
+			spec.RestartPolicy = corev1.RestartPolicyNever
+			uid := nonRootUID
+			spec.SecurityContext.RunAsUser = &uid
+			spec.SecurityContext.RunAsGroup = &uid
+			spec.Containers[0].Image = keyReaderImage
+			spec.Containers[0].Command = []string{"ssh-keygen", "-y", "-f", "/etc/treebind/ssh/" + restrictedKeyFile}
+			pod := corev1.Pod{
+				TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+				ObjectMeta: metav1.ObjectMeta{Name: keyReaderPodName, Namespace: restrictedNamespace},
+				Spec:       spec,
+			}
+			manifest, err := json.Marshal(pod)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(string(manifest))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the pod that loads the key")
+
+			By("waiting for ssh-keygen to load the key")
+			var phase string
+			verifyDone := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", keyReaderPodName, "-n", restrictedNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				phase = output
+				g.Expect(phase).To(Or(Equal(string(corev1.PodSucceeded)), Equal(string(corev1.PodFailed))))
+			}
+			Eventually(verifyDone).Should(Succeed())
+
+			cmd = exec.Command("kubectl", "logs", keyReaderPodName, "-n", restrictedNamespace)
+			logs, _ := utils.Run(cmd)
+			Expect(phase).To(Equal(string(corev1.PodSucceeded)), "ssh-keygen could not load the key: %s", logs)
+		})
 	})
 })
+
+// throwawayPrivateKey returns a PEM encoded private key that is generated for one
+// test run and never leaves it. It is generated, not committed, so that no private
+// key sits in the repository.
+func throwawayPrivateKey() string {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	der, err := x509.MarshalECPrivateKey(key)
+	Expect(err).NotTo(HaveOccurred())
+	return string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}))
+}
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
 // It uses the Kubernetes TokenRequest API to generate a token by directly sending a request

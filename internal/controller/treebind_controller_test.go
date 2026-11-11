@@ -255,7 +255,7 @@ var _ = Describe("Treebind Controller", func() {
 			secret := pod.Volumes[1].Secret
 			Expect(secret.SecretName).To(Equal(testSSHKeyName))
 			Expect(secret.Items).To(ConsistOf(corev1.KeyToPath{Key: testSSHKeyKey, Path: testSSHKeyKey}))
-			Expect(secret.DefaultMode).To(HaveValue(Equal(sshKeyFileMode)))
+			Expect(secret.DefaultMode).To(HaveValue(Equal(int32(0o444))))
 			configMap := pod.Volumes[2].ConfigMap
 			Expect(configMap.Name).To(Equal(testHostsName))
 			Expect(configMap.Items).To(ConsistOf(corev1.KeyToPath{Key: testHostsKey, Path: testHostsKey}))
