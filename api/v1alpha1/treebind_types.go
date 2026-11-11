@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -45,6 +46,20 @@ const (
 	ConflictPolicyFollowRemote ConflictPolicy = "followRemote"
 	// ConflictPolicyFollowLocal keeps the version on the volume.
 	ConflictPolicyFollowLocal ConflictPolicy = "followLocal"
+)
+
+// PlacementMode says where the sync pod runs in relation to the application
+// that uses the volume.
+// +kubebuilder:validation:Enum=standalone;sidecar
+type PlacementMode string
+
+const (
+	// PlacementModeStandalone runs the sync pod on its own, next to the
+	// application's pods when the claim is ReadWriteOnce.
+	PlacementModeStandalone PlacementMode = "standalone"
+	// PlacementModeSidecar runs the sync container inside the application's own
+	// pods, which is how a ReadWriteOncePod claim can be shared.
+	PlacementModeSidecar PlacementMode = "sidecar"
 )
 
 // KeySelector names a key in a Secret or ConfigMap. The object is always in
@@ -213,6 +228,78 @@ type PathsSpec struct {
 	Exclude []string `json:"exclude,omitempty"`
 }
 
+// PlacementSpec says where the sync pod runs. The field is accepted now and
+// takes effect once the placement work lands; until then the operator reports
+// a value that is not implemented in the SpecSupported condition.
+type PlacementSpec struct {
+	// mode is standalone to run the sync pod on its own, or sidecar to run the
+	// sync container inside the application's pods.
+	// +optional
+	// +kubebuilder:default=standalone
+	Mode PlacementMode `json:"mode,omitempty"`
+}
+
+// AgentSpec overrides how the sync pod is scheduled and run. Every field is
+// accepted now and takes effect once the placement work lands; until then the
+// operator ignores them and reports each one that is set in the SpecSupported
+// condition.
+type AgentSpec struct {
+	// resources are the compute resources of the sync container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// nodeSelector restricts the nodes the sync pod can run on.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=32
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// tolerations lets the sync pod run on nodes with matching taints.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// priorityClassName is the priority class of the sync pod.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// imagePullSecrets names the Secrets in the Treebind's namespace used to
+	// pull the agent image.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:XValidation:rule="size(self.name) > 0",message="imagePullSecrets entries need a name"
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// labels are added to the sync pod.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=32
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// annotations are added to the sync pod.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=32
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// runAsUser is the user ID the sync container runs as.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
+	// runAsGroup is the group ID the sync container runs as.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RunAsGroup *int64 `json:"runAsGroup,omitempty"`
+
+	// fsGroup is the group ID that owns the mounted volume, so the sync
+	// container can write to a claim that the application's user created.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	FSGroup *int64 `json:"fsGroup,omitempty"`
+}
+
 // TreebindSpec defines the desired state of Treebind.
 type TreebindSpec struct {
 	// repository is the Git repository to sync with.
@@ -234,6 +321,16 @@ type TreebindSpec struct {
 	// paths limits which files are synced.
 	// +optional
 	Paths *PathsSpec `json:"paths,omitempty"`
+
+	// placement says where the sync pod runs. It is defaulted as a whole so a
+	// Treebind without it reads back as standalone.
+	// +optional
+	// +kubebuilder:default={mode: standalone}
+	Placement PlacementSpec `json:"placement,omitzero"`
+
+	// agent overrides how the sync pod is scheduled and run.
+	// +optional
+	Agent *AgentSpec `json:"agent,omitempty"`
 }
 
 // TreebindStatus defines the observed state of Treebind.
@@ -260,6 +357,18 @@ type TreebindStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
+
+const (
+	// ConditionSpecSupported is the type of the condition that says whether the
+	// operator implements every field set in the spec.
+	ConditionSpecSupported = "SpecSupported"
+
+	// ReasonSupported means every field set in the spec is implemented.
+	ReasonSupported = "Supported"
+	// ReasonNotImplemented means the spec sets a field that is accepted but
+	// not implemented yet, so the operator ignores it.
+	ReasonNotImplemented = "NotImplemented"
+)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

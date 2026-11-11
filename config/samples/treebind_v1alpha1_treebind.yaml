@@ -33,3 +33,30 @@ spec:
     exclude:
       - "*.tmp"
       - "*.swp"
+  placement:
+    mode: standalone
+  # The agent block is accepted but not implemented yet, so it stays commented out.
+  # agent:
+  #   resources:
+  #     requests:
+  #       cpu: 50m
+  #       memory: 64Mi
+  #     limits:
+  #       memory: 128Mi
+  #   nodeSelector:
+  #     kubernetes.io/os: linux
+  #   tolerations:
+  #     - key: dedicated
+  #       operator: Equal
+  #       value: storage
+  #       effect: NoSchedule
+  #   priorityClassName: background
+  #   imagePullSecrets:
+  #     - name: registry-credentials
+  #   labels:
+  #     team: storage
+  #   annotations:
+  #     owner: storage-team
+  #   runAsUser: 1000
+  #   runAsGroup: 1000
+  #   fsGroup: 2000

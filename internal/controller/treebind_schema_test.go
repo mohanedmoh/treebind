@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,8 +26,12 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -53,6 +58,33 @@ func newTreebind(name string) *treebindv1alpha1.Treebind {
 	}
 }
 
+// newAgentSpec returns an agent block with every field set. Tests that need one
+// field take it from here, so each value is spelled once and a shared slice or
+// map is never mutated by two tests.
+func newAgentSpec() *treebindv1alpha1.AgentSpec {
+	runAsUser, runAsGroup, fsGroup := int64(1000), int64(1000), int64(2000)
+	return &treebindv1alpha1.AgentSpec{
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+		},
+		NodeSelector: map[string]string{"disktype": "ssd"},
+		Tolerations: []corev1.Toleration{{
+			Key:      "dedicated",
+			Operator: corev1.TolerationOpEqual,
+			Value:    "storage",
+			Effect:   corev1.TaintEffectNoSchedule,
+		}},
+		PriorityClassName: "background",
+		ImagePullSecrets:  []corev1.LocalObjectReference{{Name: "registry-credentials"}},
+		Labels:            map[string]string{"team": "storage"},
+		Annotations:       map[string]string{"owner": "storage-team"},
+		RunAsUser:         &runAsUser,
+		RunAsGroup:        &runAsGroup,
+		FSGroup:           &fsGroup,
+	}
+}
+
 // These tests run against the CRD in config/crd/bases, which envtest installs,
 // so they check the generated schema and not only the Go types.
 var _ = Describe("Treebind schema", func() {
@@ -76,6 +108,20 @@ var _ = Describe("Treebind schema", func() {
 			MessageTemplate: "treebind: sync {{ .Count }} file(s)",
 		}
 		tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Exclude: []string{"*.tmp", "*.swp"}}
+		tb.Spec.Placement.Mode = treebindv1alpha1.PlacementModeStandalone
+
+		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
+
+		got := &treebindv1alpha1.Treebind{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tb), got)).To(Succeed())
+		Expect(got.Spec).To(Equal(tb.Spec))
+	})
+
+	It("accepts the reserved placement and agent fields and returns them unchanged", func() {
+		tb := newTreebind("schema-reserved")
+		tb.Spec.Placement.Mode = treebindv1alpha1.PlacementModeSidecar
+		tb.Spec.Agent = newAgentSpec()
 
 		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
@@ -107,6 +153,33 @@ var _ = Describe("Treebind schema", func() {
 		Expect(got.Spec.Sync.Interval).To(HaveValue(Equal(metav1.Duration{Duration: 30 * time.Second})))
 		Expect(got.Spec.Sync.SettleTime).To(HaveValue(Equal(metav1.Duration{Duration: 5 * time.Second})))
 		Expect(got.Spec.Sync.ConflictPolicy).To(Equal(treebindv1alpha1.ConflictPolicyFollowRemote))
+	})
+
+	It("defaults the placement to standalone and leaves the agent unset", func() {
+		tb := newTreebind("schema-placement-default")
+		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
+
+		got := &treebindv1alpha1.Treebind{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tb), got)).To(Succeed())
+		Expect(got.Spec.Placement.Mode).To(Equal(treebindv1alpha1.PlacementModeStandalone))
+		Expect(got.Spec.Agent).To(BeNil())
+	})
+
+	It("defaults the placement mode when the placement is an empty object", func() {
+		tb := newTreebind("schema-placement-empty")
+		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(tb)
+		Expect(err).NotTo(HaveOccurred())
+		u := &unstructured.Unstructured{Object: raw}
+		u.SetGroupVersionKind(treebindv1alpha1.GroupVersion.WithKind("Treebind"))
+		Expect(unstructured.SetNestedMap(u.Object, map[string]any{}, "spec", "placement")).To(Succeed())
+
+		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
+
+		got := &treebindv1alpha1.Treebind{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tb), got)).To(Succeed())
+		Expect(got.Spec.Placement.Mode).To(Equal(treebindv1alpha1.PlacementModeStandalone))
 	})
 
 	It("rejects updates to the immutable target fields", func() {
@@ -392,5 +465,37 @@ var _ = Describe("Treebind schema", func() {
 		Entry("with a .git segment in the subPath",
 			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = "grafana/.git" },
 			"spec.target.subPath"),
+		Entry("with a placement mode that is neither standalone nor sidecar",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Placement.Mode = "sideCar" },
+			"spec.placement.mode"),
+		Entry("with a negative runAsUser",
+			func(tb *treebindv1alpha1.Treebind) {
+				runAsUser := int64(-1)
+				tb.Spec.Agent = &treebindv1alpha1.AgentSpec{RunAsUser: &runAsUser}
+			},
+			"spec.agent.runAsUser"),
+		Entry("with more than 32 tolerations",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Agent = &treebindv1alpha1.AgentSpec{
+					Tolerations: make([]corev1.Toleration, 33),
+				}
+			},
+			"spec.agent.tolerations"),
+		Entry("with an imagePullSecrets entry that has no name",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Agent = &treebindv1alpha1.AgentSpec{
+					ImagePullSecrets: []corev1.LocalObjectReference{{}},
+				}
+			},
+			"spec.agent.imagePullSecrets[0]"),
+		Entry("with more than 32 labels",
+			func(tb *treebindv1alpha1.Treebind) {
+				labels := make(map[string]string, 33)
+				for i := range 33 {
+					labels[fmt.Sprintf("label-%d", i)] = "value"
+				}
+				tb.Spec.Agent = &treebindv1alpha1.AgentSpec{Labels: labels}
+			},
+			"spec.agent.labels"),
 	)
 })
