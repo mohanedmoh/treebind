@@ -36,6 +36,12 @@ for the full setup.
 Which storage classes Treebind works on, and how that was tested, will be
 listed in the [storage support matrix](docs/storage-support.md).
 
+## Pod Security and file ownership
+
+Both pods run under the `restricted` Pod Security level. What they set, and what
+a volume that another user wrote to needs, is in
+[docs/pod-security.md](docs/pod-security.md).
+
 ## Deleting a Treebind
 
 Deleting a Treebind removes its sync pod and Service. It never touches your

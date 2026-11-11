@@ -24,9 +24,12 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/mohanedmoh/treebind/internal/agent/umask"
 )
 
 func main() {
+	umask.Set()
 	fmt.Fprintln(os.Stderr, "treebind-agent: the sync agent is not implemented yet")
 	os.Exit(1)
 }
