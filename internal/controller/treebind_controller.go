@@ -50,12 +50,19 @@ type TreebindReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
+// awaitingReportMessage is the message of the Synced and Conflict conditions
+// until the sync agent's first report arrives.
+const awaitingReportMessage = "No report from the sync agent has been received yet"
+
 // Reconcile keeps the headless Service and the one-replica StatefulSet that
 // run the sync agent of a Treebind, and reports in the Ready condition whether
-// the sync pod is ready. It also reports in the SpecSupported condition which
-// fields of the spec are accepted but not implemented yet. It writes the
-// status only when a condition or the observed generation changed, so the
-// status update it makes does not trigger a reconcile that writes again.
+// the sync pod is ready and the volume is not known to be out of sync. It also
+// reports in the SpecSupported condition which fields of the spec are accepted
+// but not implemented yet. It adds the Synced and Conflict conditions as
+// Unknown the first time it sees a Treebind and never changes them afterwards:
+// the status poller owns them. It writes the status only when a condition or the
+// observed generation changed, so the status update it makes does not trigger
+// a reconcile that writes again.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
@@ -86,8 +93,10 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	changed = meta.SetStatusCondition(&treebind.Status.Conditions, readyCondition(statefulSet, treebind.Generation)) ||
-		changed
+	changed = addAwaitingReportConditions(treebind) || changed
+	synced := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionSynced)
+	changed = meta.SetStatusCondition(&treebind.Status.Conditions,
+		readyCondition(statefulSet, synced, treebind.Generation)) || changed
 
 	if treebind.Status.ObservedGeneration != treebind.Generation {
 		treebind.Status.ObservedGeneration = treebind.Generation
@@ -167,10 +176,36 @@ func specSupportedCondition(fields []string, generation int64) metav1.Condition 
 	}
 }
 
-// readyCondition builds the Ready condition from the StatefulSet status. A
-// ready count is only trusted once the StatefulSet controller has observed the
-// current generation, because before that it describes the previous template.
-func readyCondition(statefulSet *appsv1.StatefulSet, generation int64) metav1.Condition {
+// addAwaitingReportConditions adds the Synced and Conflict conditions as Unknown
+// when they are absent, and reports whether it added one. A condition that is
+// there is never touched, whatever its status, because the status poller wrote
+// it.
+func addAwaitingReportConditions(treebind *treebindv1alpha1.Treebind) bool {
+	added := false
+	for _, conditionType := range []string{treebindv1alpha1.ConditionSynced, treebindv1alpha1.ConditionConflict} {
+		if meta.FindStatusCondition(treebind.Status.Conditions, conditionType) != nil {
+			continue
+		}
+		meta.SetStatusCondition(&treebind.Status.Conditions, metav1.Condition{
+			Type:               conditionType,
+			Status:             metav1.ConditionUnknown,
+			Reason:             treebindv1alpha1.ReasonAwaitingAgentReport,
+			Message:            awaitingReportMessage,
+			ObservedGeneration: treebind.Generation,
+		})
+		added = true
+	}
+	return added
+}
+
+// readyCondition builds the Ready condition from the StatefulSet status and the
+// Synced condition, which is nil while it is absent. A ready count is only
+// trusted once the StatefulSet controller has observed the current generation,
+// because before that it describes the previous template. A ready pod makes
+// Ready False only when Synced is False; Unknown means no report yet and does
+// not. Conflict is not an input: with followRemote the sync keeps running while
+// a conflict waits for attention.
+func readyCondition(statefulSet *appsv1.StatefulSet, synced *metav1.Condition, generation int64) metav1.Condition {
 	var ready int32
 	if statefulSet.Status.ObservedGeneration >= statefulSet.Generation {
 		ready = statefulSet.Status.ReadyReplicas
@@ -183,10 +218,16 @@ func readyCondition(statefulSet *appsv1.StatefulSet, generation int64) metav1.Co
 		Message:            fmt.Sprintf("%d of 1 sync pods ready", ready),
 		ObservedGeneration: generation,
 	}
-	if ready >= 1 {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = treebindv1alpha1.ReasonSyncPodReady
+	if ready < 1 {
+		return condition
 	}
+	if synced != nil && synced.Status == metav1.ConditionFalse {
+		condition.Reason = treebindv1alpha1.ReasonNotSynced
+		condition.Message = fmt.Sprintf("%d of 1 sync pods ready, but Synced is False: %s", ready, synced.Reason)
+		return condition
+	}
+	condition.Status = metav1.ConditionTrue
+	condition.Reason = treebindv1alpha1.ReasonSyncPodReady
 	return condition
 }
 
