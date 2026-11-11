@@ -206,8 +206,9 @@ dev: ko ## Create a kind cluster, build the images into it, deploy the operator 
 	export KO_DOCKER_REPO=kind.local KIND_CLUSTER_NAME=$(KIND_DEV_CLUSTER); \
 	platform="linux/$$(go env GOARCH)"; \
 	operator_img="$$("$(KO)" build --base-import-paths --platform="$$platform" ./cmd/operator)"; \
-	"$(KO)" build --base-import-paths --platform="$$platform" ./cmd/agent; \
+	agent_img="$$("$(KO)" build --base-import-paths --platform="$$platform" ./cmd/agent)"; \
 	$(MAKE) install deploy IMG="$$operator_img"; \
+	"$(KUBECTL)" -n treebind-system set env deployment/treebind-controller-manager AGENT_IMAGE="$$agent_img"; \
 	"$(KUBECTL)" apply -k config/dev; \
 	"$(KUBECTL)" -n treebind-system rollout status deployment/treebind-controller-manager --timeout=180s; \
 	"$(KUBECTL)" -n treebind-dev rollout status deployment/git-remote --timeout=180s; \
@@ -215,6 +216,7 @@ dev: ko ## Create a kind cluster, build the images into it, deploy the operator 
 	echo "The dev cluster is ready. Next steps:"; \
 	echo ""; \
 	echo "  kubectl apply -f config/samples/treebind_v1alpha1_treebind.yaml"; \
+	echo "  kubectl get treebind,statefulset,service"; \
 	echo "  kubectl -n treebind-system logs deploy/treebind-controller-manager -f"; \
 	echo ""; \
 	echo "  kubectl -n treebind-dev port-forward svc/git-remote 9418:9418 &"; \

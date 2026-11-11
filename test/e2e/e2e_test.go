@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -44,6 +45,42 @@ const metricsServiceName = "treebind-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "treebind-metrics-binding"
+
+// The objects of the sync workload spec, which runs in the default namespace
+// because the pod of a Treebind has to share the namespace of its claim.
+const (
+	syncNamespace       = "default"
+	syncTreebindName    = "e2e-sync"
+	syncClaimName       = "e2e-sync-data"
+	syncStatefulSetName = syncTreebindName + "-sync"
+)
+
+// syncManifest is the claim and the smallest Treebind that names it.
+const syncManifest = `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ` + syncClaimName + `
+  namespace: ` + syncNamespace + `
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: treebind.example.org/v1alpha1
+kind: Treebind
+metadata:
+  name: ` + syncTreebindName + `
+  namespace: ` + syncNamespace + `
+spec:
+  repository:
+    url: ssh://git@github.com/example/dashboards.git
+    branch: main
+  target:
+    claimName: ` + syncClaimName + `
+  sync:
+    direction: pull
+`
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -279,6 +316,58 @@ var _ = Describe("Manager", Ordered, func() {
 		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
 		//    strings.ToLower(<Kind>),
 		// ))
+	})
+
+	// The stub agent exits and its image cannot be pulled here, so this checks
+	// that the StatefulSet exists and is owned, not that its pod is ready.
+	Context("Sync workload", func() {
+		AfterAll(func() {
+			By("removing the Treebind and the claim of the sync workload")
+			cmd := exec.Command("kubectl", "delete", "treebind", syncTreebindName, "-n", syncNamespace,
+				"--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pvc", syncClaimName, "-n", syncNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should create the sync StatefulSet owned by the Treebind and remove it with the Treebind", func() {
+			By("creating a claim and a Treebind")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(syncManifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the claim and the Treebind")
+
+			cmd = exec.Command("kubectl", "get", "treebind", syncTreebindName, "-n", syncNamespace,
+				"-o", "jsonpath={.metadata.uid}")
+			treebindUID, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to read the Treebind")
+			Expect(treebindUID).NotTo(BeEmpty())
+
+			By("waiting for a one-replica StatefulSet that the Treebind owns")
+			verifyStatefulSet := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset", syncStatefulSetName, "-n", syncNamespace,
+					"-o", "jsonpath={.spec.replicas} {.metadata.ownerReferences[0].kind} "+
+						"{.metadata.ownerReferences[0].uid} {.metadata.ownerReferences[0].controller}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1 Treebind " + treebindUID + " true"))
+			}
+			Eventually(verifyStatefulSet).Should(Succeed())
+
+			By("deleting the Treebind")
+			cmd = exec.Command("kubectl", "delete", "treebind", syncTreebindName, "-n", syncNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the Treebind")
+
+			By("waiting for the garbage collector to remove the StatefulSet")
+			verifyStatefulSetGone := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset", "-n", syncNamespace, "-o", "name")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(ContainSubstring(syncStatefulSetName))
+			}
+			Eventually(verifyStatefulSetGone).Should(Succeed())
+		})
 	})
 })
 

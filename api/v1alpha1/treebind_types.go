@@ -368,6 +368,15 @@ const (
 	// ReasonNotImplemented means the spec sets a field that is accepted but
 	// not implemented yet, so the operator ignores it.
 	ReasonNotImplemented = "NotImplemented"
+
+	// ConditionReady is the type of the condition that says whether the sync
+	// pod is running and ready.
+	ConditionReady = "Ready"
+
+	// ReasonSyncPodReady means the sync StatefulSet reports its pod ready.
+	ReasonSyncPodReady = "SyncPodReady"
+	// ReasonSyncPodNotReady means the sync StatefulSet has no ready pod.
+	ReasonSyncPodNotReady = "SyncPodNotReady"
 )
 
 // +kubebuilder:object:root=true

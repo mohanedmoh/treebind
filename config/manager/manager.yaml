@@ -63,6 +63,9 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        env:
+        - name: AGENT_IMAGE
+          value: ghcr.io/mohanedmoh/treebind-agent:latest
         ports:
         - containerPort: 8081
           name: health

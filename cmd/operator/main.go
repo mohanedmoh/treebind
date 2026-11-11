@@ -40,6 +40,10 @@ import (
 	// +kubebuilder:scaffold:imports
 )
 
+// defaultAgentImage is the sync agent image used when neither --agent-image nor
+// the AGENT_IMAGE environment variable sets one.
+const defaultAgentImage = "ghcr.io/mohanedmoh/treebind-agent:latest"
+
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
@@ -52,6 +56,15 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// envOrDefault returns the value of the environment variable, or fallback when
+// it is unset or empty.
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -62,6 +75,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var agentImage string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -82,6 +96,8 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&agentImage, "agent-image", envOrDefault("AGENT_IMAGE", defaultAgentImage),
+		"The image of the sync agent container. Defaults to the AGENT_IMAGE environment variable.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -183,8 +199,9 @@ func main() {
 	}
 
 	if err := (&controller.TreebindReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		AgentImage: agentImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind")
 		os.Exit(1)

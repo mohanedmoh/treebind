@@ -51,12 +51,16 @@ again after a code change: the cluster is reused and the images are rebuilt.
 ```sh
 make dev
 kubectl apply -f config/samples/treebind_v1alpha1_treebind.yaml
-kubectl get treebind
+kubectl get treebind,statefulset,service,pod
 kubectl -n treebind-system logs deploy/treebind-controller-manager -f
 ```
 
-The sample still names a GitHub repository, so until the sync agent lands the
-operator only accepts and reconciles the resource and the log stays quiet.
+The operator creates a one-replica StatefulSet and a headless Service, both named
+`treebind-sample-sync`, and reports `Ready` in the Treebind's status. The sample
+names a claim, a key Secret and a known hosts ConfigMap that the dev cluster does
+not have, so the sync pod stays `Pending` until you create them. Once it runs,
+the sync agent is still a stub that exits, so the pod restarts and `Ready` stays
+`False` until the agent lands. The sample still names a GitHub repository.
 
 The Git remote serves one empty bare repository, `sample.git`, over the git
 protocol. Reach it from the terminal through a port-forward:
