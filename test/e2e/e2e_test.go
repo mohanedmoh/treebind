@@ -128,6 +128,80 @@ spec:
     direction: pull
 `
 
+// The objects of the Pod Security spec: a namespace that enforces the restricted
+// level, with the same kind of Treebind as the sync workload spec.
+const (
+	restrictedNamespace = "treebind-restricted-e2e"
+	restrictedName      = "e2e-restricted"
+	restrictedPodName   = restrictedName + "-sync-0"
+)
+
+const restrictedManifest = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: ` + restrictedNamespace + `
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ` + restrictedName + `-data
+  namespace: ` + restrictedNamespace + `
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ` + restrictedName + `-key
+  namespace: ` + restrictedNamespace + `
+stringData:
+  id_ed25519: not-a-real-key
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ` + restrictedName + `-hosts
+  namespace: ` + restrictedNamespace + `
+data:
+  known_hosts: github.com ssh-ed25519 AAAA
+---
+apiVersion: treebind.example.org/v1alpha1
+kind: Treebind
+metadata:
+  name: ` + restrictedName + `
+  namespace: ` + restrictedNamespace + `
+spec:
+  repository:
+    url: ssh://git@github.com/example/dashboards.git
+    branch: main
+    auth:
+      sshKeySecretRef: {name: ` + restrictedName + `-key, key: id_ed25519}
+      knownHostsConfigMapRef: {name: ` + restrictedName + `-hosts, key: known_hosts}
+  target:
+    claimName: ` + restrictedName + `-data
+  sync:
+    direction: pull
+`
+
+// privilegedPodManifest is a pod the restricted level has to refuse.
+const privilegedPodManifest = `apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged
+  namespace: ` + restrictedNamespace + `
+spec:
+  containers:
+  - name: privileged
+    image: busybox
+    securityContext:
+      privileged: true
+`
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
@@ -458,6 +532,48 @@ var _ = Describe("Manager", Ordered, func() {
 				asOperator)
 			output, _ = utils.Run(cmd)
 			Expect(strings.TrimSpace(output)).To(Equal("no"))
+		})
+	})
+
+	// The agent image cannot be pulled here either, so the pod never starts. It
+	// still only exists if the restricted level admitted it.
+	Context("Pod Security", func() {
+		AfterAll(func() {
+			By("removing the namespace that enforces the restricted level")
+			cmd := exec.Command("kubectl", "delete", "ns", restrictedNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should admit the sync pod in a namespace that enforces the restricted level", func() {
+			By("creating a namespace that enforces the restricted level, with a Treebind in it")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(restrictedManifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace and the Treebind")
+
+			By("checking that the namespace refuses a privileged pod, so the level is really enforced")
+			cmd = exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+			cmd.Stdin = strings.NewReader(privilegedPodManifest)
+			output, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "A privileged pod was accepted")
+			Expect(output).To(ContainSubstring(`violates PodSecurity "restricted:`))
+
+			By("waiting for the StatefulSet to create its pod")
+			verifyPod := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", restrictedPodName, "-n", restrictedNamespace,
+					"-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(restrictedPodName))
+			}
+			Eventually(verifyPod).Should(Succeed())
+
+			By("checking that no pod was refused")
+			cmd = exec.Command("kubectl", "get", "events", "-n", restrictedNamespace,
+				"--field-selector", "reason=FailedCreate", "-o", "jsonpath={.items[*].message}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to read the events")
+			Expect(output).NotTo(ContainSubstring("PodSecurity"))
 		})
 	})
 })
