@@ -54,11 +54,13 @@ type KeySelector struct {
 	// name is the name of the Secret or ConfigMap.
 	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
 	// key is the key inside the Secret or ConfigMap that holds the value.
 	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Key string `json:"key"`
 }
 
@@ -79,19 +81,32 @@ type AuthSpec struct {
 // RepositorySpec describes the Git repository to sync with.
 type RepositorySpec struct {
 	// url is the address of the repository, for example
-	// ssh://git@github.com/acme/dashboards.git.
+	// ssh://git@github.com/acme/dashboards.git. The scheme must be explicit;
+	// the scp-style git@host:path shorthand is not accepted. Credentials never
+	// go in the URL: they are supplied through auth.
 	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getScheme() in ['ssh', 'https', 'http']",message="url must use an explicit ssh://, https:// or http:// scheme; scp-style host:path is not accepted"
+	// +kubebuilder:validation:XValidation:rule="!self.matches(r'[\\x00-\\x20\\x7f]')",message="url must not contain whitespace or control characters"
+	// +kubebuilder:validation:XValidation:rule="!self.matches('^[a-zA-Z][a-zA-Z0-9+.-]*://[^/@]*:[^/@]*@')",message="url must not embed a password; supply credentials through auth"
+	// +kubebuilder:validation:XValidation:rule="!self.matches('^https?://[^/]*@')",message="http and https urls must not embed credentials; supply credentials through auth"
 	URL string `json:"url"`
 
 	// branch is the branch to follow. The repository's default branch is used
 	// when it is empty.
 	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:XValidation:rule="!self.contains('..') && !self.contains('@{') && !self.startsWith('-') && !self.startsWith('/') && !self.endsWith('.lock') && !self.endsWith('/')",message="branch must not contain '..' or '@{', start with '-' or '/', or end with '.lock' or '/'"
+	// +kubebuilder:validation:XValidation:rule="!self.matches(r'[\\x00-\\x20\\x7f~^:?*\\[\\\\]') && !self.contains('//') && self != '@' && !self.matches(r'(^|/)\\.') && !self.endsWith('.')",message="branch must not contain whitespace, control characters, '~', '^', ':', '?', '*', '[' or a backslash, nor '//', a component that starts with '.', or a trailing '.'"
 	Branch string `json:"branch,omitempty"`
 
 	// path is a directory inside the repository. Only that directory is synced
 	// with the volume. The whole repository is used when it is empty.
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/') && self != '.' && !self.contains('\\\\') && !self.contains('//') && !('..' in self.split('/'))",message="path must be relative, must not be '.' and must not contain '..', '//' or a backslash"
+	// +kubebuilder:validation:XValidation:rule="!self.endsWith('/') && !('.' in self.split('/')) && !('.git' in self.split('/'))",message="path must not end with '/' or contain a '.' or '.git' segment"
 	Path string `json:"path,omitempty"`
 
 	// auth names the credentials for the repository.
@@ -99,22 +114,33 @@ type RepositorySpec struct {
 	Auth *AuthSpec `json:"auth,omitempty"`
 }
 
-// TargetSpec describes the volume the files live on.
+// TargetSpec describes the volume the files live on. claimName and subPath
+// are immutable because together they name the synced directory; retargeting
+// a live Treebind would mix the histories of two directories.
+// +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName",message="claimName is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.subPath) == has(oldSelf.subPath) && (!has(self.subPath) || self.subPath == oldSelf.subPath)",message="subPath is immutable"
 type TargetSpec struct {
 	// claimName is the name of an existing PersistentVolumeClaim in the same
-	// namespace as the Treebind.
+	// namespace as the Treebind. It cannot be changed after creation.
 	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	ClaimName string `json:"claimName"`
 
 	// subPath is a directory inside the claim. Only that directory is synced
-	// with the repository. The whole claim is used when it is empty.
+	// with the repository. The whole claim is used when it is empty. It cannot
+	// be changed after creation.
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/') && self != '.' && !self.contains('\\\\') && !self.contains('//') && !('..' in self.split('/'))",message="subPath must be relative, must not be '.' and must not contain '..', '//' or a backslash"
+	// +kubebuilder:validation:XValidation:rule="!self.endsWith('/') && !('.' in self.split('/')) && !('.git' in self.split('/'))",message="subPath must not end with '/' or contain a '.' or '.git' segment"
 	SubPath string `json:"subPath,omitempty"`
 
 	// mountPath is where the claim is mounted inside the sync container. It
 	// does not affect where the application mounts the claim.
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !('..' in self.split('/'))",message="mountPath must be an absolute path without '..'"
 	MountPath string `json:"mountPath,omitempty"`
 }
 
@@ -127,15 +153,24 @@ type SyncSpec struct {
 
 	// interval is how often the agent polls the repository for new commits.
 	// +optional
+	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="interval must be at least 1s"
 	Interval *metav1.Duration `json:"interval,omitempty"`
 
 	// settleTime is the quiet period after the last local edit before the agent
 	// commits, so a file that is still being written is not committed half done.
 	// +optional
+	// +kubebuilder:default="5s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="settleTime must be at least 1s"
 	SettleTime *metav1.Duration `json:"settleTime,omitempty"`
 
 	// conflictPolicy says which side wins when both changed the same file.
 	// +optional
+	// +kubebuilder:default=followRemote
 	ConflictPolicy ConflictPolicy `json:"conflictPolicy,omitempty"`
 }
 
@@ -161,12 +196,20 @@ type PathsSpec struct {
 	// the list is empty.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=512
+	// +kubebuilder:validation:items:XValidation:rule="!self.startsWith('/') && !('..' in self.split('/'))",message="patterns must be relative and must not contain '..'"
 	Include []string `json:"include,omitempty"`
 
 	// exclude lists the patterns of files to leave out, for example temporary
 	// and swap files.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=512
+	// +kubebuilder:validation:items:XValidation:rule="!self.startsWith('/') && !('..' in self.split('/'))",message="patterns must be relative and must not contain '..'"
 	Exclude []string `json:"exclude,omitempty"`
 }
 
@@ -220,6 +263,7 @@ type TreebindStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata.name) || self.metadata.name.size() <= 56",message="metadata.name must be at most 56 characters, so the sync pod name, the name plus '-sync-0', fits the 63-character DNS label limit"
 
 // Treebind is the Schema for the treebinds API
 type Treebind struct {
