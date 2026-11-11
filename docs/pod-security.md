@@ -27,6 +27,16 @@ which is UID 65532 and GID 65532. The sync image gets a fixed UID of its own in
 applied yet. A Treebind that sets them reports `SpecSupported=False` with the
 reason `NotImplemented`.
 
+## The SSH key
+
+The Secret with the SSH key is mounted at `/etc/treebind/ssh` with mode `0444`.
+The kubelet makes Secret files owned by root, and the agent runs as a non-root
+user without an `fsGroup`, so a stricter mode such as `0400` would leave the
+agent unable to read its key. OpenSSH accepts a key that root owns even when
+others can read it. The file is on a memory-backed volume that only the agent
+container mounts. The reasons and the alternatives are in
+[ADR 0007](adr/0007-ssh-key-is-mounted-readable-by-the-agent.md).
+
 ## What the volume needs
 
 The agent writes to the claim as UID 65532 and GID 65532, with umask 0002, so

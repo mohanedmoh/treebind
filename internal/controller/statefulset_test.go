@@ -58,7 +58,9 @@ func knownHostsRef() *treebindv1alpha1.KeySelector {
 }
 
 func TestDesiredStatefulSetVolumes(t *testing.T) {
-	mode := int32(0o400)
+	// Not 0400: the kubelet gives Secret files to root, so a non-root agent
+	// without an fsGroup could not read a key with that mode (ADR 0007).
+	mode := int32(0o444)
 	dataVolume := corev1.Volume{
 		Name: dataVolumeName,
 		VolumeSource: corev1.VolumeSource{
@@ -108,7 +110,7 @@ func TestDesiredStatefulSetVolumes(t *testing.T) {
 			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}},
 		},
 		{
-			name:        "an SSH key Secret is mounted read-only with mode 0400",
+			name:        "an SSH key Secret is mounted read-only with mode 0444",
 			auth:        &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef()},
 			wantVolumes: []corev1.Volume{dataVolume, sshVolume},
 			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, sshMount},

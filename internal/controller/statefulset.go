@@ -49,7 +49,13 @@ const (
 	sshVolumeName        = "ssh-key"
 	knownHostsVolumeName = "known-hosts"
 
-	sshKeyFileMode int32 = 0o400
+	// sshKeyFileMode is the mode of the SSH key in the pod. The kubelet creates
+	// Secret files owned by root, and the agent runs as a non-root user without
+	// an fsGroup, so a stricter mode would leave the agent unable to read its key.
+	// OpenSSH rejects a key that is readable by the group or others only when
+	// the user running it owns the file, and root does, so 0444 is accepted.
+	// See docs/adr/0007.
+	sshKeyFileMode int32 = 0o444
 )
 
 // syncName is the name of the headless Service and of the StatefulSet of a
