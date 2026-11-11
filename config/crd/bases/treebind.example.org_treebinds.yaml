@@ -302,7 +302,8 @@ spec:
                       knownHostsConfigMapRef:
                         description: |-
                           knownHostsConfigMapRef points to the ConfigMap key that holds the
-                          known_hosts entries used to verify the Git host.
+                          known_hosts entries used to verify the Git host. It is required when the
+                          repository url uses ssh://, because host keys are always verified.
                         properties:
                           key:
                             description: key is the key inside the Secret or ConfigMap
@@ -320,8 +321,9 @@ spec:
                         - name
                         type: object
                       sshKeySecretRef:
-                        description: sshKeySecretRef points to the Secret key that
-                          holds the private SSH key.
+                        description: |-
+                          sshKeySecretRef points to the Secret key that holds the private SSH key.
+                          It is required when the repository url uses ssh://.
                         properties:
                           key:
                             description: key is the key inside the Secret or ConfigMap
@@ -396,6 +398,11 @@ spec:
                 required:
                 - url
                 type: object
+                x-kubernetes-validations:
+                - message: an ssh:// repository needs auth.sshKeySecretRef and auth.knownHostsConfigMapRef;
+                    host keys are always verified
+                  rule: '!isURL(self.url) || url(self.url).getScheme() != ''ssh''
+                    || (has(self.auth) && has(self.auth.sshKeySecretRef) && has(self.auth.knownHostsConfigMapRef))'
               sync:
                 description: sync controls the direction and timing of the sync.
                 properties:

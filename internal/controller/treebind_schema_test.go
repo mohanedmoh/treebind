@@ -42,14 +42,24 @@ import (
 // then try to change.
 const existingSubPath = "grafana"
 
+// sshRepositoryURL is a repository URL that needs auth: the schema requires a
+// key and known hosts for every ssh:// repository.
+const sshRepositoryURL = "ssh://git@github.com/example/dashboards.git"
+
+// newSSHAuth returns the auth block an ssh:// repository needs.
+func newSSHAuth() *treebindv1alpha1.AuthSpec {
+	return &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef(), KnownHostsConfigMapRef: knownHostsRef()}
+}
+
 // newTreebind returns the smallest Treebind the CRD schema accepts, so that a
-// test which cares about one field starts from a valid object.
+// test which cares about one field starts from a valid object. It uses an
+// https URL, which needs no auth.
 func newTreebind(name string) *treebindv1alpha1.Treebind {
 	return &treebindv1alpha1.Treebind{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: treebindv1alpha1.TreebindSpec{
 			Repository: treebindv1alpha1.RepositorySpec{
-				URL:    "ssh://git@github.com/example/dashboards.git",
+				URL:    "https://github.com/example/dashboards.git",
 				Branch: "main",
 			},
 			Target: treebindv1alpha1.TargetSpec{ClaimName: "grafana-data"},
@@ -268,8 +278,16 @@ var _ = Describe("Treebind schema", func() {
 			Expect(k8sClient.Create(ctx, tb)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, tb)).To(Succeed())
 		},
-		Entry("with an ssh URL", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Repository.URL = "ssh://git@github.com/example/dashboards.git"
+		Entry("with an ssh URL, a key and known hosts", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.URL = sshRepositoryURL
+			tb.Spec.Repository.Auth = newSSHAuth()
+		}),
+		Entry("with an upper-case ssh scheme, a key and known hosts", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.URL = "SSH://git@github.com/example/dashboards.git"
+			tb.Spec.Repository.Auth = newSSHAuth()
+		}),
+		Entry("with an https URL and an unused key and known hosts", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.Auth = newSSHAuth()
 		}),
 		Entry("with an https URL", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Repository.URL = "https://github.com/example/dashboards.git"
@@ -497,5 +515,58 @@ var _ = Describe("Treebind schema", func() {
 				tb.Spec.Agent = &treebindv1alpha1.AgentSpec{Labels: labels}
 			},
 			"spec.agent.labels"),
+		Entry("with an ssh URL and no auth",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.URL = sshRepositoryURL },
+			"spec.repository"),
+		Entry("with an ssh URL and only the key",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = sshRepositoryURL
+				tb.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef()}
+			},
+			"spec.repository"),
+		Entry("with an ssh URL and only the known hosts",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = sshRepositoryURL
+				tb.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{KnownHostsConfigMapRef: knownHostsRef()}
+			},
+			"spec.repository"),
+		Entry("with an ssh URL and an empty auth block",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = sshRepositoryURL
+				tb.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{}
+			},
+			"spec.repository"),
+		Entry("with an upper-case ssh scheme and no auth",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "SSH://git@github.com/example/dashboards.git"
+			},
+			"spec.repository"),
 	)
+
+	It("tells the user what an ssh repository is missing", func() {
+		tb := newTreebind("schema-ssh-message")
+		tb.Spec.Repository.URL = sshRepositoryURL
+		tb.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef()}
+
+		err := k8sClient.Create(ctx, tb)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring(
+			"an ssh:// repository needs auth.sshKeySecretRef and auth.knownHostsConfigMapRef")))
+	})
+
+	It("applies the same rule when an existing object is edited into an ssh repository", func() {
+		tb := newTreebind("schema-ssh-edit")
+		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
+
+		bare := tb.DeepCopy()
+		bare.Spec.Repository.URL = sshRepositoryURL
+		err := k8sClient.Update(ctx, bare)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+
+		complete := tb.DeepCopy()
+		complete.Spec.Repository.URL = sshRepositoryURL
+		complete.Spec.Repository.Auth = newSSHAuth()
+		Expect(k8sClient.Update(ctx, complete)).To(Succeed())
+	})
 })

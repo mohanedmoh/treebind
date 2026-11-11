@@ -9,6 +9,10 @@ spec:
   repository:
     url: ssh://git@github.com/acme/dashboards.git
     branch: main
+    # An ssh:// repository needs both references, because host keys are always
+    # verified. Create the ConfigMap from the host's keys:
+    #   ssh-keyscan github.com > known_hosts
+    #   kubectl create configmap git-known-hosts --from-file=known_hosts
     auth:
       sshKeySecretRef:
         name: dashboards-deploy-key

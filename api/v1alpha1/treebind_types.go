@@ -84,16 +84,19 @@ type KeySelector struct {
 // reads their contents.
 type AuthSpec struct {
 	// sshKeySecretRef points to the Secret key that holds the private SSH key.
+	// It is required when the repository url uses ssh://.
 	// +optional
 	SSHKeySecretRef *KeySelector `json:"sshKeySecretRef,omitempty"`
 
 	// knownHostsConfigMapRef points to the ConfigMap key that holds the
-	// known_hosts entries used to verify the Git host.
+	// known_hosts entries used to verify the Git host. It is required when the
+	// repository url uses ssh://, because host keys are always verified.
 	// +optional
 	KnownHostsConfigMapRef *KeySelector `json:"knownHostsConfigMapRef,omitempty"`
 }
 
 // RepositorySpec describes the Git repository to sync with.
+// +kubebuilder:validation:XValidation:rule="!isURL(self.url) || url(self.url).getScheme() != 'ssh' || (has(self.auth) && has(self.auth.sshKeySecretRef) && has(self.auth.knownHostsConfigMapRef))",message="an ssh:// repository needs auth.sshKeySecretRef and auth.knownHostsConfigMapRef; host keys are always verified"
 type RepositorySpec struct {
 	// url is the address of the repository, for example
 	// ssh://git@github.com/acme/dashboards.git. The scheme must be explicit;
