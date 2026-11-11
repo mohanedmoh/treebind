@@ -45,7 +45,7 @@ planned, so the sample works with no Git host account.
 | :-- | :-- | :-- |
 | `make test` | Generates code, formats, vets, then runs unit tests and envtest | Available |
 | `make lint` | golangci-lint (`make lint-config` checks its configuration) | Available |
-| `make generate manifests` | Regenerates deepcopy code, CRDs and RBAC from the Go types | Available |
+| `make generate manifests` | Regenerates deepcopy code, CRDs, the chart's copy of the CRD and RBAC from the Go types | Available |
 | `make test-e2e` | End-to-end suite on a kind cluster, created if missing | Available |
 | `make cleanup-test-e2e` | Deletes the kind cluster used by the e2e suite | Available |
 | `make install` / `make uninstall` | Installs or removes the CRD in the current cluster | Available |

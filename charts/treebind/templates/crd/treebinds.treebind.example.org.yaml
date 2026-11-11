@@ -65,7 +65,13 @@ spec:
                       exclude lists the patterns of files to leave out, for example temporary
                       and swap files.
                     items:
+                      maxLength: 512
+                      minLength: 1
                       type: string
+                      x-kubernetes-validations:
+                      - message: patterns must be relative and must not contain '..'
+                        rule: '!self.startsWith(''/'') && !(''..'' in self.split(''/''))'
+                    maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
                   include:
@@ -73,7 +79,13 @@ spec:
                       include lists the patterns of files to sync. Everything is included when
                       the list is empty.
                     items:
+                      maxLength: 512
+                      minLength: 1
                       type: string
+                      x-kubernetes-validations:
+                      - message: patterns must be relative and must not contain '..'
+                        rule: '!self.startsWith(''/'') && !(''..'' in self.split(''/''))'
+                    maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object
@@ -91,10 +103,12 @@ spec:
                           key:
                             description: key is the key inside the Secret or ConfigMap
                               that holds the value.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           name:
                             description: name is the name of the Secret or ConfigMap.
+                            maxLength: 253
                             minLength: 1
                             type: string
                         required:
@@ -108,10 +122,12 @@ spec:
                           key:
                             description: key is the key inside the Secret or ConfigMap
                               that holds the value.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           name:
                             description: name is the name of the Secret or ConfigMap.
+                            maxLength: 253
                             minLength: 1
                             type: string
                         required:
@@ -123,18 +139,56 @@ spec:
                     description: |-
                       branch is the branch to follow. The repository's default branch is used
                       when it is empty.
+                    maxLength: 255
                     type: string
+                    x-kubernetes-validations:
+                    - message: branch must not contain '..' or '@{', start with '-'
+                        or '/', or end with '.lock' or '/'
+                      rule: '!self.contains(''..'') && !self.contains(''@{'') && !self.startsWith(''-'')
+                        && !self.startsWith(''/'') && !self.endsWith(''.lock'') &&
+                        !self.endsWith(''/'')'
+                    - message: branch must not contain whitespace, control characters,
+                        '~', '^', ':', '?', '*', '[' or a backslash, nor '//', a component
+                        that starts with '.', or a trailing '.'
+                      rule: '!self.matches(r''[\x00-\x20\x7f~^:?*\[\\]'') && !self.contains(''//'')
+                        && self != ''@'' && !self.matches(r''(^|/)\.'') && !self.endsWith(''.'')'
                   path:
                     description: |-
                       path is a directory inside the repository. Only that directory is synced
                       with the volume. The whole repository is used when it is empty.
+                    maxLength: 1024
                     type: string
+                    x-kubernetes-validations:
+                    - message: path must be relative, must not be '.' and must not
+                        contain '..', '//' or a backslash
+                      rule: '!self.startsWith(''/'') && self != ''.'' && !self.contains(''\\'')
+                        && !self.contains(''//'') && !(''..'' in self.split(''/''))'
+                    - message: path must not end with '/' or contain a '.' or '.git'
+                        segment
+                      rule: '!self.endsWith(''/'') && !(''.'' in self.split(''/''))
+                        && !(''.git'' in self.split(''/''))'
                   url:
                     description: |-
                       url is the address of the repository, for example
-                      ssh://git@github.com/acme/dashboards.git.
+                      ssh://git@github.com/acme/dashboards.git. The scheme must be explicit;
+                      the scp-style git@host:path shorthand is not accepted. Credentials never
+                      go in the URL: they are supplied through auth.
+                    maxLength: 2048
                     minLength: 1
                     type: string
+                    x-kubernetes-validations:
+                    - message: url must use an explicit ssh://, https:// or http://
+                        scheme; scp-style host:path is not accepted
+                      rule: isURL(self) && url(self).getScheme() in ['ssh', 'https',
+                        'http']
+                    - message: url must not contain whitespace or control characters
+                      rule: '!self.matches(r''[\x00-\x20\x7f]'')'
+                    - message: url must not embed a password; supply credentials through
+                        auth
+                      rule: '!self.matches(''^[a-zA-Z][a-zA-Z0-9+.-]*://[^/@]*:[^/@]*@'')'
+                    - message: http and https urls must not embed credentials; supply
+                        credentials through auth
+                      rule: '!self.matches(''^https?://[^/]*@'')'
                 required:
                 - url
                 type: object
@@ -142,6 +196,7 @@ spec:
                 description: sync controls the direction and timing of the sync.
                 properties:
                   conflictPolicy:
+                    default: followRemote
                     description: conflictPolicy says which side wins when both changed
                       the same file.
                     enum:
@@ -157,14 +212,24 @@ spec:
                     - bidirectional
                     type: string
                   interval:
+                    default: 30s
                     description: interval is how often the agent polls the repository
                       for new commits.
+                    maxLength: 32
                     type: string
+                    x-kubernetes-validations:
+                    - message: interval must be at least 1s
+                      rule: duration(self) >= duration('1s')
                   settleTime:
+                    default: 5s
                     description: |-
                       settleTime is the quiet period after the last local edit before the agent
                       commits, so a file that is still being written is not committed half done.
+                    maxLength: 32
                     type: string
+                    x-kubernetes-validations:
+                    - message: settleTime must be at least 1s
+                      rule: duration(self) >= duration('1s')
                 required:
                 - direction
                 type: object
@@ -174,22 +239,44 @@ spec:
                   claimName:
                     description: |-
                       claimName is the name of an existing PersistentVolumeClaim in the same
-                      namespace as the Treebind.
+                      namespace as the Treebind. It cannot be changed after creation.
+                    maxLength: 253
                     minLength: 1
                     type: string
                   mountPath:
                     description: |-
                       mountPath is where the claim is mounted inside the sync container. It
                       does not affect where the application mounts the claim.
+                    maxLength: 1024
                     type: string
+                    x-kubernetes-validations:
+                    - message: mountPath must be an absolute path without '..'
+                      rule: self.startsWith('/') && !('..' in self.split('/'))
                   subPath:
                     description: |-
                       subPath is a directory inside the claim. Only that directory is synced
-                      with the repository. The whole claim is used when it is empty.
+                      with the repository. The whole claim is used when it is empty. It cannot
+                      be changed after creation.
+                    maxLength: 1024
                     type: string
+                    x-kubernetes-validations:
+                    - message: subPath must be relative, must not be '.' and must
+                        not contain '..', '//' or a backslash
+                      rule: '!self.startsWith(''/'') && self != ''.'' && !self.contains(''\\'')
+                        && !self.contains(''//'') && !(''..'' in self.split(''/''))'
+                    - message: subPath must not end with '/' or contain a '.' or '.git'
+                        segment
+                      rule: '!self.endsWith(''/'') && !(''.'' in self.split(''/''))
+                        && !(''.git'' in self.split(''/''))'
                 required:
                 - claimName
                 type: object
+                x-kubernetes-validations:
+                - message: claimName is immutable
+                  rule: self.claimName == oldSelf.claimName
+                - message: subPath is immutable
+                  rule: has(self.subPath) == has(oldSelf.subPath) && (!has(self.subPath)
+                    || self.subPath == oldSelf.subPath)
             required:
             - repository
             - sync
@@ -280,6 +367,10 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be at most 56 characters, so the sync pod name,
+            the name plus '-sync-0', fits the 63-character DNS label limit
+          rule: '!has(self.metadata.name) || self.metadata.name.size() <= 56'
     served: true
     storage: true
     subresources:
