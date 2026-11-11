@@ -36,6 +36,12 @@ for the full setup.
 Which storage classes Treebind works on, and how that was tested, will be
 listed in the [storage support matrix](docs/storage-support.md).
 
+## Deleting a Treebind
+
+Deleting a Treebind removes its sync pod and Service. It never touches your
+volume or the data on it; see
+[docs/deleting-a-treebind.md](docs/deleting-a-treebind.md).
+
 ## Contributing
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and
