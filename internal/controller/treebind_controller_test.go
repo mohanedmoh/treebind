@@ -77,6 +77,34 @@ var _ = Describe("Treebind Controller", func() {
 			return got
 		}
 
+		findCondition := func(conditionType string) *metav1.Condition {
+			GinkgoHelper()
+			condition := meta.FindStatusCondition(get().Status.Conditions, conditionType)
+			Expect(condition).NotTo(BeNil())
+			return condition
+		}
+
+		// reportAs plays the status poller: it writes the given conditions
+		// through the status subresource, the way the reconciler never does.
+		reportAs := func(conditions ...metav1.Condition) {
+			GinkgoHelper()
+			resource := get()
+			for _, condition := range conditions {
+				condition.ObservedGeneration = resource.Generation
+				meta.SetStatusCondition(&resource.Status.Conditions, condition)
+			}
+			Expect(k8sClient.Status().Update(ctx, resource)).To(Succeed())
+		}
+
+		makeSyncPodReady := func() {
+			GinkgoHelper()
+			statefulSet := getStatefulSet()
+			statefulSet.Status.Replicas = 1
+			statefulSet.Status.ReadyReplicas = 1
+			statefulSet.Status.ObservedGeneration = statefulSet.Generation
+			Expect(k8sClient.Status().Update(ctx, statefulSet)).To(Succeed())
+		}
+
 		BeforeEach(func() {
 			controllerReconciler = &TreebindReconciler{
 				Client:     k8sClient,
@@ -319,6 +347,114 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(condition.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady))
 			Expect(condition.Message).To(Equal("1 of 1 sync pods ready"))
 			Expect(condition.ObservedGeneration).To(Equal(got.Generation))
+		})
+
+		It("adds Synced and Conflict as Unknown until the sync agent has reported", func() {
+			reconcileOnce()
+
+			generation := get().Generation
+			for _, conditionType := range []string{
+				treebindv1alpha1.ConditionSynced,
+				treebindv1alpha1.ConditionConflict,
+			} {
+				condition := findCondition(conditionType)
+				Expect(condition.Status).To(Equal(metav1.ConditionUnknown), conditionType)
+				Expect(condition.Reason).To(Equal(treebindv1alpha1.ReasonAwaitingAgentReport), conditionType)
+				Expect(condition.Message).To(Equal(wantAwaitingMessage), conditionType)
+				Expect(condition.ObservedGeneration).To(Equal(generation), conditionType)
+			}
+		})
+
+		It("leaves Synced and Conflict to the status poller once they exist", func() {
+			reconcileOnce()
+
+			reportAs(
+				metav1.Condition{
+					Type:   treebindv1alpha1.ConditionSynced,
+					Status: metav1.ConditionTrue,
+					Reason: reasonInSync,
+				},
+				metav1.Condition{
+					Type:   treebindv1alpha1.ConditionConflict,
+					Status: metav1.ConditionTrue,
+					Reason: reasonConflictParked,
+				},
+			)
+			reported := get()
+			syncedBefore := findCondition(treebindv1alpha1.ConditionSynced)
+			conflictBefore := findCondition(treebindv1alpha1.ConditionConflict)
+
+			reconcileOnce()
+
+			Expect(findCondition(treebindv1alpha1.ConditionSynced)).To(Equal(syncedBefore))
+			Expect(findCondition(treebindv1alpha1.ConditionConflict)).To(Equal(conflictBefore))
+			Expect(get().ResourceVersion).To(Equal(reported.ResourceVersion))
+
+			By("changing the spec, which moves the generation the reconciler writes to its own conditions")
+			resource := get()
+			resource.Spec.Repository.Branch = "staging"
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			reconcileOnce()
+
+			got := get()
+			Expect(got.Generation).To(BeNumerically(">", reported.Generation))
+			Expect(findCondition(treebindv1alpha1.ConditionReady).ObservedGeneration).To(Equal(got.Generation))
+			Expect(findCondition(treebindv1alpha1.ConditionSynced)).To(Equal(syncedBefore))
+			Expect(findCondition(treebindv1alpha1.ConditionConflict)).To(Equal(conflictBefore))
+		})
+
+		It("keeps Ready True while a conflict waits, and turns it False when Synced is False", func() {
+			reconcileOnce()
+			makeSyncPodReady()
+			reportAs(
+				metav1.Condition{
+					Type:   treebindv1alpha1.ConditionSynced,
+					Status: metav1.ConditionTrue,
+					Reason: reasonInSync,
+				},
+				metav1.Condition{
+					Type:   treebindv1alpha1.ConditionConflict,
+					Status: metav1.ConditionTrue,
+					Reason: reasonConflictParked,
+				},
+			)
+			reconcileOnce()
+
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady))
+			Expect(ready.Message).To(Equal(messagePodReady))
+
+			By("reporting a failed sync while the pod is still ready")
+			reportAs(metav1.Condition{
+				Type:    treebindv1alpha1.ConditionSynced,
+				Status:  metav1.ConditionFalse,
+				Reason:  reasonSyncFailed,
+				Message: "the last sync failed",
+			})
+			reconcileOnce()
+
+			got := get()
+			ready = findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonNotSynced))
+			Expect(ready.Message).To(Equal("1 of 1 sync pods ready, but Synced is False: SyncFailed"))
+			Expect(ready.ObservedGeneration).To(Equal(got.Generation))
+			Expect(findCondition(treebindv1alpha1.ConditionConflict).Status).To(Equal(metav1.ConditionTrue))
+
+			By("reconciling again with nothing changed")
+			reconcileOnce()
+			Expect(get().ResourceVersion).To(Equal(got.ResourceVersion))
+
+			By("reporting a good sync again")
+			reportAs(metav1.Condition{
+				Type:   treebindv1alpha1.ConditionSynced,
+				Status: metav1.ConditionTrue,
+				Reason: reasonInSync,
+			})
+			reconcileOnce()
+
+			Expect(findCondition(treebindv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 		})
 
 		It("does not recreate the sync objects of a Treebind that is being deleted", func() {

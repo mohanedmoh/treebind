@@ -350,8 +350,12 @@ type TreebindStatus struct {
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 
 	// conditions represent the current state of the Treebind resource. Each
-	// condition has a unique type and is set by the reconciler. The status of
-	// each condition is one of True, False, or Unknown.
+	// condition has a unique type. The status of each condition is one of True,
+	// False, or Unknown.
+	//
+	// SpecSupported and Ready are set by the reconciler. Synced and Conflict are
+	// set by the status poller from the sync agent's reports, and are Unknown
+	// until the first report arrives.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -377,10 +381,29 @@ const (
 	ReasonSyncPodReady = "SyncPodReady"
 	// ReasonSyncPodNotReady means the sync StatefulSet has no ready pod.
 	ReasonSyncPodNotReady = "SyncPodNotReady"
+	// ReasonNotSynced means the sync pod is ready but the volume is not in sync
+	// with the repository. The message names the reason of the Synced condition.
+	ReasonNotSynced = "NotSynced"
+
+	// ConditionSynced is the type of the condition that says whether the volume
+	// matches the repository at status.lastSyncedCommit.
+	ConditionSynced = "Synced"
+
+	// ConditionConflict is the type of the condition that says whether local work
+	// is parked and waits for someone to resolve it.
+	ConditionConflict = "Conflict"
+
+	// ReasonAwaitingAgentReport means the sync agent has not reported yet, so the
+	// condition is Unknown.
+	ReasonAwaitingAgentReport = "AwaitingAgentReport"
 )
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Synced",type=string,JSONPath=`.status.conditions[?(@.type=="Synced")].status`
+// +kubebuilder:printcolumn:name="Conflict",type=string,JSONPath=`.status.conditions[?(@.type=="Conflict")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata.name) || self.metadata.name.size() <= 56",message="metadata.name must be at most 56 characters, so the sync pod name, the name plus '-sync-0', fits the 63-character DNS label limit"
 
 // Treebind is the Schema for the treebinds API

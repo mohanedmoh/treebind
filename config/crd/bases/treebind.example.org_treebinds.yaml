@@ -14,7 +14,20 @@ spec:
     singular: treebind
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Synced")].status
+      name: Synced
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Conflict")].status
+      name: Conflict
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Treebind is the Schema for the treebinds API
@@ -479,8 +492,12 @@ spec:
               conditions:
                 description: |-
                   conditions represent the current state of the Treebind resource. Each
-                  condition has a unique type and is set by the reconciler. The status of
-                  each condition is one of True, False, or Unknown.
+                  condition has a unique type. The status of each condition is one of True,
+                  False, or Unknown.
+
+                  SpecSupported and Ready are set by the reconciler. Synced and Conflict are
+                  set by the status poller from the sync agent's reports, and are Unknown
+                  until the first report arrives.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
