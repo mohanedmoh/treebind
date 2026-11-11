@@ -1,0 +1,5 @@
+# A throwaway Git remote for the `make dev` loop. Applied with
+# `kubectl apply -k config/dev` only and deliberately not referenced from
+# config/default, so it can never ship in a release.
+resources:
+- git-remote.yaml

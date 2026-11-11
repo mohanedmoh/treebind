@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: treebind
+    app.kubernetes.io/managed-by: kustomize
+  name: treebind-dev
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-remote
+  namespace: treebind-dev
+  labels:
+    app.kubernetes.io/name: treebind
+    app.kubernetes.io/component: git-remote
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: treebind
+      app.kubernetes.io/component: git-remote
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: treebind
+        app.kubernetes.io/component: git-remote
+    spec:
+      securityContext:
+        # The image only ships root, so run as the same numeric non-root user
+        # the operator image uses.
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      - name: setup
+        # v2.54.0
+        image: alpine/git:v2.54.0@sha256:6a1fdb962814ca11508ca8d1bab94375b5b7ac4e4a9a40981c29fc32c02f095d
+        command:
+        - sh
+        - -ec
+        # Alpine ships git-daemon outside the git package, so fetch that one
+        # binary into the volume; apk fetch needs no root, which keeps the
+        # whole pod unprivileged.
+        - |
+          mkdir -p /srv/.bin
+          cd /srv/.bin
+          apk fetch --no-cache --quiet git-daemon
+          tar -xzf git-daemon-*.apk usr/libexec/git-core/git-daemon
+          mv usr/libexec/git-core/git-daemon .
+          chmod 0755 git-daemon
+          rm -rf usr git-daemon-*.apk
+          git init --bare --initial-branch=main /srv/sample.git
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        volumeMounts:
+        - name: data
+          mountPath: /srv
+      containers:
+      - name: git-daemon
+        # v2.54.0
+        image: alpine/git:v2.54.0@sha256:6a1fdb962814ca11508ca8d1bab94375b5b7ac4e4a9a40981c29fc32c02f095d
+        command:
+        - git
+        - daemon
+        - --base-path=/srv
+        - --export-all
+        - --enable=receive-pack
+        - --reuseaddr
+        env:
+        # `git daemon` finds the fetched git-daemon binary through PATH.
+        - name: PATH
+          value: /srv/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        # The non-root user has no home in the image; git wants a readable one.
+        - name: HOME
+          value: /srv
+        ports:
+        - containerPort: 9418
+          name: git
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: git
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        volumeMounts:
+        - name: data
+          mountPath: /srv
+      volumes:
+      - name: data
+        emptyDir: {}
+      terminationGracePeriodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-remote
+  namespace: treebind-dev
+  labels:
+    app.kubernetes.io/name: treebind
+    app.kubernetes.io/component: git-remote
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    app.kubernetes.io/name: treebind
+    app.kubernetes.io/component: git-remote
+  ports:
+  - name: git
+    port: 9418
+    targetPort: git
+    protocol: TCP
