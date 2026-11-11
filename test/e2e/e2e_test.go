@@ -52,10 +52,13 @@ const (
 	syncNamespace       = "default"
 	syncTreebindName    = "e2e-sync"
 	syncClaimName       = "e2e-sync-data"
+	syncKeySecretName   = "e2e-sync-key"
+	syncHostsMapName    = "e2e-sync-hosts"
 	syncStatefulSetName = syncTreebindName + "-sync"
 )
 
-// syncManifest is the claim and the smallest Treebind that names it.
+// syncManifest is the claim, the SSH key and known hosts an ssh:// repository
+// needs, and the smallest Treebind that names them.
 const syncManifest = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -67,6 +70,22 @@ spec:
     requests:
       storage: 1Gi
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ` + syncKeySecretName + `
+  namespace: ` + syncNamespace + `
+stringData:
+  id_ed25519: not-a-real-key
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ` + syncHostsMapName + `
+  namespace: ` + syncNamespace + `
+data:
+  known_hosts: github.com ssh-ed25519 AAAA
+---
 apiVersion: treebind.example.org/v1alpha1
 kind: Treebind
 metadata:
@@ -76,6 +95,9 @@ spec:
   repository:
     url: ssh://git@github.com/example/dashboards.git
     branch: main
+    auth:
+      sshKeySecretRef: {name: ` + syncKeySecretName + `, key: id_ed25519}
+      knownHostsConfigMapRef: {name: ` + syncHostsMapName + `, key: known_hosts}
   target:
     claimName: ` + syncClaimName + `
   sync:
@@ -322,11 +344,17 @@ var _ = Describe("Manager", Ordered, func() {
 	// that the StatefulSet exists and is owned, not that its pod is ready.
 	Context("Sync workload", func() {
 		AfterAll(func() {
-			By("removing the Treebind and the claim of the sync workload")
+			By("removing the Treebind, the claim and the credentials of the sync workload")
 			cmd := exec.Command("kubectl", "delete", "treebind", syncTreebindName, "-n", syncNamespace,
 				"--ignore-not-found")
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "pvc", syncClaimName, "-n", syncNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "secret", syncKeySecretName, "-n", syncNamespace,
+				"--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "configmap", syncHostsMapName, "-n", syncNamespace,
+				"--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		})
 
