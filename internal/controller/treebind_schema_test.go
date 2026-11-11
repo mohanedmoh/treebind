@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -92,6 +93,75 @@ var _ = Describe("Treebind schema", func() {
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
 	})
 
+	It("defaults the sync interval, settle time and conflict policy", func() {
+		tb := newTreebind("schema-defaults")
+		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
+
+		got := &treebindv1alpha1.Treebind{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tb), got)).To(Succeed())
+		Expect(got.Spec.Sync.Interval).To(HaveValue(Equal(metav1.Duration{Duration: 30 * time.Second})))
+		Expect(got.Spec.Sync.SettleTime).To(HaveValue(Equal(metav1.Duration{Duration: 5 * time.Second})))
+		Expect(got.Spec.Sync.ConflictPolicy).To(Equal(treebindv1alpha1.ConflictPolicyFollowRemote))
+	})
+
+	It("rejects updates to the immutable target fields", func() {
+		tb := newTreebind("schema-immutable")
+		tb.Spec.Target.SubPath = "grafana"
+		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
+
+		byClaim := tb.DeepCopy()
+		byClaim.Spec.Target.ClaimName = "other-data"
+		err := k8sClient.Update(ctx, byClaim)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring("claimName is immutable")))
+
+		bySubPath := tb.DeepCopy()
+		bySubPath.Spec.Target.SubPath = "elsewhere"
+		err = k8sClient.Update(ctx, bySubPath)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring("subPath is immutable")))
+
+		mutable := tb.DeepCopy()
+		mutable.Spec.Repository.Branch = "develop"
+		Expect(k8sClient.Update(ctx, mutable)).To(Succeed())
+	})
+
+	It("rejects setting or clearing the optional subPath after creation", func() {
+		withoutSubPath := newTreebind("schema-subpath-unset")
+		Expect(k8sClient.Create(ctx, withoutSubPath)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, withoutSubPath)).To(Succeed()) })
+
+		added := withoutSubPath.DeepCopy()
+		added.Spec.Target.SubPath = "grafana"
+		err := k8sClient.Update(ctx, added)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring("subPath is immutable")))
+
+		withSubPath := newTreebind("schema-subpath-set")
+		withSubPath.Spec.Target.SubPath = "grafana"
+		Expect(k8sClient.Create(ctx, withSubPath)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, withSubPath)).To(Succeed()) })
+
+		cleared := withSubPath.DeepCopy()
+		cleared.Spec.Target.SubPath = ""
+		err = k8sClient.Update(ctx, cleared)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring("subPath is immutable")))
+	})
+
+	It("caps metadata.name so the sync pod name fits in a DNS label", func() {
+		tooLong := newTreebind(strings.Repeat("a", 57))
+		err := k8sClient.Create(ctx, tooLong)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring("56 characters")))
+
+		longest := newTreebind(strings.Repeat("a", 56))
+		Expect(k8sClient.Create(ctx, longest)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, longest)).To(Succeed())
+	})
+
 	It("stores the status fields through the status subresource", func() {
 		tb := newTreebind("schema-status")
 		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
@@ -112,6 +182,53 @@ var _ = Describe("Treebind schema", func() {
 		Expect(got.Status.LastSyncTime).NotTo(BeNil())
 		Expect(got.Status.LastSyncTime.Time).To(BeTemporally("==", syncTime.Time))
 	})
+
+	DescribeTable("accepts an object that satisfies the schema",
+		func(mutate func(*treebindv1alpha1.Treebind)) {
+			tb := newTreebind("schema-ok")
+			mutate(tb)
+
+			Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, tb)).To(Succeed())
+		},
+		Entry("with an ssh URL", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.URL = "ssh://git@github.com/example/dashboards.git"
+		}),
+		Entry("with an https URL", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.URL = "https://github.com/example/dashboards.git"
+		}),
+		Entry("with an http URL", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.URL = "http://git.internal/example/dashboards.git"
+		}),
+		Entry("with a nested repository path", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.Path = "grafana/dashboards"
+		}),
+		Entry("with a slash in the branch name", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.Branch = "feature/retry-sync"
+		}),
+		Entry("with a nested subPath", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Target.SubPath = "team-a/dashboards"
+		}),
+		Entry("with a dot-prefixed directory that is not .git in the repository path", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.Path = ".github/dashboards"
+		}),
+		Entry("with dots inside a release branch name", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.Branch = "release-1.2"
+		}),
+		Entry("with an absolute mountPath", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Target.MountPath = "/work"
+		}),
+		Entry("with the 1s minimum interval and settle time", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Sync.Interval = &metav1.Duration{Duration: time.Second}
+			tb.Spec.Sync.SettleTime = &metav1.Duration{Duration: time.Second}
+		}),
+		Entry("with relative glob patterns", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Paths = &treebindv1alpha1.PathsSpec{
+				Include: []string{"dashboards/**/*.json"},
+				Exclude: []string{"*.tmp", ".git/**"},
+			}
+		}),
+	)
 
 	DescribeTable("rejects an object that breaks the schema",
 		func(mutate func(*treebindv1alpha1.Treebind), field string) {
@@ -142,5 +259,134 @@ var _ = Describe("Treebind schema", func() {
 				}
 			},
 			"spec.repository.auth.sshKeySecretRef.key"),
+		Entry("with a repository URL that has no scheme",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.URL = "github.com/example/dashboards.git" },
+			"spec.repository.url"),
+		Entry("with an scp-style repository URL",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.URL = "git@github.com:example/dashboards.git" },
+			"spec.repository.url"),
+		Entry("with a git protocol repository URL",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "git://github.com/example/dashboards.git"
+			},
+			"spec.repository.url"),
+		Entry("with a file repository URL",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.URL = "file:///srv/git/dashboards.git" },
+			"spec.repository.url"),
+		Entry("with whitespace in the repository URL",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "https://github.com/example/dash boards.git"
+			},
+			"spec.repository.url"),
+		Entry("with a password in the repository URL",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "https://user:secret@github.com/example/dashboards.git"
+			},
+			"spec.repository.url"),
+		Entry("with an absolute repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = "/dashboards" },
+			"spec.repository.path"),
+		Entry("with a parent segment in the repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = "dashboards/../secrets" },
+			"spec.repository.path"),
+		Entry("with an empty segment in the repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = "dashboards//grafana" },
+			"spec.repository.path"),
+		Entry("with a dot as the repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = "." },
+			"spec.repository.path"),
+		Entry("with a backslash in the repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = `dashboards\grafana` },
+			"spec.repository.path"),
+		Entry("with a parent segment in the subPath",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = "../other" },
+			"spec.target.subPath"),
+		Entry("with a relative mountPath",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.MountPath = "work" },
+			"spec.target.mountPath"),
+		Entry("with a parent segment in the mountPath",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.MountPath = "/work/../etc" },
+			"spec.target.mountPath"),
+		Entry("with a double dot in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "release..main" },
+			"spec.repository.branch"),
+		Entry("with a reflog expression in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "main@{1}" },
+			"spec.repository.branch"),
+		Entry("with a leading dash in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "-main" },
+			"spec.repository.branch"),
+		Entry("with a leading slash in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "/main" },
+			"spec.repository.branch"),
+		Entry("with a .lock suffix in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "main.lock" },
+			"spec.repository.branch"),
+		Entry("with a trailing slash in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "main/" },
+			"spec.repository.branch"),
+		Entry("with an interval under a second",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Sync.Interval = &metav1.Duration{Duration: 500 * time.Millisecond}
+			},
+			"spec.sync.interval"),
+		Entry("with a zero settle time",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Sync.SettleTime = &metav1.Duration{} },
+			"spec.sync.settleTime"),
+		Entry("with an absolute include pattern",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Include: []string{"/etc/**"}}
+			},
+			"spec.paths.include[0]"),
+		Entry("with a parent segment in an exclude pattern",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Exclude: []string{"foo/../bar"}}
+			},
+			"spec.paths.exclude[0]"),
+		Entry("with an empty include pattern",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Include: []string{""}}
+			},
+			"spec.paths.include[0]"),
+		Entry("with a token as the only userinfo of an https URL",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "https://ghp_example@github.com/example/dashboards.git"
+			},
+			"spec.repository.url"),
+		Entry("with a control character in the repository URL",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "https://github.com/example/dash\x00boards.git"
+			},
+			"spec.repository.url"),
+		Entry("with whitespace in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "main foo" },
+			"spec.repository.branch"),
+		Entry("with a colon in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "origin:main" },
+			"spec.repository.branch"),
+		Entry("with a component starting with a dot in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "feature/.hidden" },
+			"spec.repository.branch"),
+		Entry("with an empty component in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "feature//sync" },
+			"spec.repository.branch"),
+		Entry("with a trailing dot in the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "release." },
+			"spec.repository.branch"),
+		Entry("with a lone @ as the branch",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "@" },
+			"spec.repository.branch"),
+		Entry("with a .git segment in the repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = ".git/hooks" },
+			"spec.repository.path"),
+		Entry("with a dot segment in the repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = "dashboards/./grafana" },
+			"spec.repository.path"),
+		Entry("with a trailing slash in the repository path",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Path = "dashboards/" },
+			"spec.repository.path"),
+		Entry("with a .git segment in the subPath",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = "grafana/.git" },
+			"spec.target.subPath"),
 	)
 })
