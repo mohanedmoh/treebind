@@ -35,5 +35,7 @@ awk '
   }
 ' "$src" > "$tmp" || { echo "found no metadata.annotations in $src" >&2; exit 1; }
 
+# mktemp creates the file with mode 0600, and mv keeps it.
+chmod 0644 "$tmp"
 mv "$tmp" "$dst"
 trap - EXIT

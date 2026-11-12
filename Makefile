@@ -44,9 +44,10 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects, and the chart's copy of the CRD.
+manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects, and the chart's copies of the CRD and the role.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	hack/sync-chart-crd.sh config/crd/bases/treebind.example.org_treebinds.yaml charts/treebind/templates/crd/treebinds.treebind.example.org.yaml
+	hack/sync-chart-rbac.sh config/rbac/role.yaml charts/treebind/templates/rbac/manager-role.yaml
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
