@@ -19,35 +19,57 @@ package preflight
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestVolume(t *testing.T) {
-	t.Run("a writable directory passes", func(t *testing.T) {
-		results := Volume(context.Background(), t.TempDir())
+	t.Run("both checks run on a mounted, writable volume", func(t *testing.T) {
+		dir := tempDir(t)
 
-		if len(results) != 1 {
-			t.Fatalf("got %d results, want 1: %+v", len(results), results)
+		results := volume(context.Background(), dir, mountTable(t, rootMountLine, mountLine(dir, "rw", fsExt4)))
+
+		if len(results) != 2 {
+			t.Fatalf("got %d results, want 2: %+v", len(results), results)
 		}
-		wantResult(t, results[0], CheckWritable, Passed, "")
+		wantResult(t, results[0], CheckMount, Passed, "")
+		wantResult(t, results[1], CheckWritable, Passed, "")
 	})
 
-	t.Run("a directory that cannot be written to fails", func(t *testing.T) {
+	t.Run("a failed mount check skips the writable one and says which failure", func(t *testing.T) {
+		results := volume(context.Background(), tempDir(t), mountTable(t, rootMountLine))
+
+		if len(results) != 2 {
+			t.Fatalf("got %d results, want 2: %+v", len(results), results)
+		}
+		wantResult(t, results[0], CheckMount, Failed, ReasonNotMounted)
+		wantResult(t, results[1], CheckWritable, Skipped, ReasonNotChecked)
+		if !strings.Contains(results[1].Message, ReasonNotMounted) {
+			t.Errorf("the skipped check does not name the failure that caused it: %s", results[1].Message)
+		}
+	})
+
+	t.Run("a mount check that cannot tell still lets the writable one run", func(t *testing.T) {
+		results := volume(context.Background(), tempDir(t), noMountTable(t))
+
+		wantResult(t, results[0], CheckMount, Skipped, ReasonNotChecked)
+		wantResult(t, results[1], CheckWritable, Passed, "")
+	})
+
+	t.Run("a mounted volume that cannot be written to fails the writable check", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root writes to a directory whatever its mode")
 		}
-		dir := t.TempDir()
+		dir := tempDir(t)
 		if err := os.Chmod(dir, 0o555); err != nil {
 			t.Fatal(err)
 		}
 
-		results := Volume(context.Background(), dir)
+		results := volume(context.Background(), dir, mountTable(t, rootMountLine, mountLine(dir, "rw", fsExt4)))
 
-		if len(results) != 1 {
-			t.Fatalf("got %d results, want 1: %+v", len(results), results)
-		}
-		wantResult(t, results[0], CheckWritable, Failed, ReasonNotWritable)
+		wantResult(t, results[0], CheckMount, Passed, "")
+		wantResult(t, results[1], CheckWritable, Failed, ReasonNotWritable)
 	})
 }
 

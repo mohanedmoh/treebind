@@ -15,18 +15,21 @@ limitations under the License.
 */
 
 // Package preflight checks, once at start, that the volume the agent writes to
-// can hold a checkout.
+// can hold a checkout: that it is a mounted volume and that the agent's own user
+// can write to it.
 //
-// A check never refuses a setup that works. One that cannot tell is skipped, and
-// that is not a failure.
+// A check never refuses a setup that works. One that cannot tell, because the
+// mount table is unreadable or a check it depends on failed, is skipped, and that
+// is not a failure.
 //
 // The reasons of the results are the ones the status poller will use as the
-// reasons of conditions, so they stay stable.
+// reasons of conditions, so they stay stable (docs/adr/0009).
 package preflight
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -51,12 +54,19 @@ const (
 
 // The names of the checks, in the order they run.
 const (
+	CheckMount    = "Mount"
 	CheckWritable = "Writable"
 )
 
 // The reasons of a result that did not pass. Each distinct cause has its own, and
 // a reason is never reused for another cause.
 const (
+	// ReasonMountPathInvalid means the path does not exist, cannot be read or is
+	// not a directory.
+	ReasonMountPathInvalid = "MountPathInvalid"
+	// ReasonNotMounted means the path is on the container's own filesystem, not on
+	// a mounted volume.
+	ReasonNotMounted = "NotMounted"
 	// ReasonNotWritable means the agent's user lacks the permission to create a
 	// file in the directory.
 	ReasonNotWritable = "NotWritable"
@@ -86,13 +96,29 @@ type Result struct {
 }
 
 // Volume runs the checks on the directory where the agent writes, in order, and
-// returns one result for each. The checks share Timeout, whatever the context
-// allows.
+// returns one result for each. The writable check is skipped when the mount check
+// failed, because a directory that is not usable cannot be tested. The checks
+// share Timeout, whatever the context allows.
 func Volume(ctx context.Context, path string) []Result {
+	return volume(ctx, path, procMountInfo)
+}
+
+// volume is Volume with the mount table passed in, so that a test can give it one.
+func volume(ctx context.Context, path, mountInfo string) []Result {
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 
-	return []Result{run(ctx, CheckWritable, func() Result { return checkWritable(path) })}
+	mount := run(ctx, CheckMount, func() Result { return checkMount(path, mountInfo) })
+	if mount.Outcome == Failed {
+		return []Result{mount, skipped(CheckWritable,
+			fmt.Sprintf("not tried, because the mount check failed (%s)", mount.Reason))}
+	}
+	return []Result{mount, run(ctx, CheckWritable, func() Result { return checkWritable(path) })}
+}
+
+// skipped is the result of a check that could not tell.
+func skipped(check, message string) Result {
+	return Result{Check: check, Outcome: Skipped, Reason: ReasonNotChecked, Message: message}
 }
 
 // run executes a check and gives up on it when the context ends. A call that
@@ -127,5 +153,5 @@ func await(ctx context.Context, check string, done <-chan Result) Result {
 				"unreachable from the node looks like this; check that the storage is reachable",
 		}
 	}
-	return Result{Check: check, Outcome: Skipped, Reason: ReasonNotChecked, Message: "the check was interrupted"}
+	return skipped(check, "the check was interrupted")
 }
