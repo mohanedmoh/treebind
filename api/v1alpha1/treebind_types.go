@@ -387,6 +387,10 @@ const (
 	// ReasonNotSynced means the sync pod is ready but the volume is not in sync
 	// with the repository. The message names the reason of the Synced condition.
 	ReasonNotSynced = "NotSynced"
+	// ReasonReconcileFailed means the operator could not create or update the
+	// sync objects. The message carries the error, and the sync pod count says
+	// nothing until a reconcile succeeds.
+	ReasonReconcileFailed = "ReconcileFailed"
 
 	// ConditionSynced is the type of the condition that says whether the volume
 	// matches the repository at status.lastSyncedCommit.

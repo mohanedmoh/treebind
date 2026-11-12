@@ -17,10 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -281,4 +284,47 @@ func TestGeneratedCRDPrinterColumns(t *testing.T) {
 	if got := crd.Spec.Versions[0].AdditionalPrinterColumns; !reflect.DeepEqual(got, want) {
 		t.Errorf("printer columns = %+v, want %+v", got, want)
 	}
+}
+
+func TestReconcileFailedCondition(t *testing.T) {
+	const generation = int64(4)
+	const prefix = "The last reconcile failed: "
+
+	t.Run("carries the error and the generation", func(t *testing.T) {
+		condition := reconcileFailedCondition(errors.New("ensure StatefulSet a/b: invalid"), generation)
+
+		if condition.Type != treebindv1alpha1.ConditionReady || condition.Status != metav1.ConditionFalse ||
+			condition.Reason != treebindv1alpha1.ReasonReconcileFailed || condition.ObservedGeneration != generation {
+			t.Errorf("unexpected condition: %+v", condition)
+		}
+		if want := prefix + "ensure StatefulSet a/b: invalid"; condition.Message != want {
+			t.Errorf("message = %q, want %q", condition.Message, want)
+		}
+	})
+
+	t.Run("keeps an error at the limit whole", func(t *testing.T) {
+		text := strings.Repeat("x", maxFailureText)
+		if got := reconcileFailedCondition(errors.New(text), generation).Message; got != prefix+text {
+			t.Errorf("a message of %d bytes was changed", maxFailureText)
+		}
+	})
+
+	t.Run("cuts a longer error and says so", func(t *testing.T) {
+		message := reconcileFailedCondition(errors.New(strings.Repeat("x", maxFailureText+500)), generation).Message
+		if want := prefix + strings.Repeat("x", maxFailureText) + "..."; message != want {
+			t.Errorf("a long error was cut to %d bytes, want %d", len(message), len(want))
+		}
+	})
+
+	t.Run("does not split a character at the cut", func(t *testing.T) {
+		// Three-byte characters, so the limit of 1024 bytes falls inside the 342nd.
+		text := strings.Repeat("\u20ac", maxFailureText)
+		message := reconcileFailedCondition(errors.New(text), generation).Message
+		if !utf8.ValidString(message) {
+			t.Errorf("the message is not valid UTF-8: %q", message[len(message)-8:])
+		}
+		if !strings.HasSuffix(message, "...") {
+			t.Error("the cut message does not end with an ellipsis")
+		}
+	})
 }
