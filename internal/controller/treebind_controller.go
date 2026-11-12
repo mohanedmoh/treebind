@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -64,6 +65,11 @@ const awaitingReportMessage = "No report from the sync agent has been received y
 // observed generation changed, so the status update it makes does not trigger
 // a reconcile that writes again.
 //
+// When it cannot create or update the sync objects it still writes the status,
+// with Ready False and the reason ReconcileFailed, and then returns the error so
+// that the request is retried. An error that a retry makes go away is the
+// exception, because reporting it would only make Ready flap.
+//
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -86,34 +92,49 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	fields := unimplementedFields(&treebind.Spec)
 	changed := meta.SetStatusCondition(&treebind.Status.Conditions, specSupportedCondition(fields, treebind.Generation))
 
-	if err := r.ensureService(ctx, treebind); err != nil {
-		return ctrl.Result{}, err
+	statefulSet, ensureErr := r.ensureSyncObjects(ctx, treebind)
+	if ensureErr != nil && resolvesOnRetry(ctx, ensureErr) {
+		return ctrl.Result{}, ensureErr
 	}
-	statefulSet, err := r.ensureStatefulSet(ctx, treebind)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+
 	changed = addAwaitingReportConditions(treebind) || changed
-	synced := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionSynced)
-	changed = meta.SetStatusCondition(&treebind.Status.Conditions,
-		readyCondition(statefulSet, synced, treebind.Generation)) || changed
+	var ready metav1.Condition
+	if ensureErr != nil {
+		ready = reconcileFailedCondition(ensureErr, treebind.Generation)
+	} else {
+		synced := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionSynced)
+		ready = readyCondition(statefulSet, synced, treebind.Generation)
+	}
+	changed = meta.SetStatusCondition(&treebind.Status.Conditions, ready) || changed
 
 	if treebind.Status.ObservedGeneration != treebind.Generation {
 		treebind.Status.ObservedGeneration = treebind.Generation
 		changed = true
 	}
-	if !changed {
-		return ctrl.Result{}, nil
+	if changed {
+		// A conflict means the object changed after it was read. The error requeues
+		// the request, and the next pass starts from the newer object.
+		if err := r.Status().Update(ctx, treebind); err != nil {
+			return ctrl.Result{}, errors.Join(ensureErr,
+				fmt.Errorf("update status of Treebind %s: %w", req.NamespacedName, err))
+		}
+		log.Info("Reported status", "supported", len(fields) == 0, "unimplementedFields", fields,
+			"ready", ready.Status, "reason", ready.Reason)
 	}
 
-	// A conflict means the object changed after it was read. The error requeues
-	// the request, and the next pass starts from the newer object.
-	if err := r.Status().Update(ctx, treebind); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update status of Treebind %s: %w", req.NamespacedName, err)
-	}
-	log.Info("Reported spec support", "supported", len(fields) == 0, "unimplementedFields", fields)
+	return ctrl.Result{}, ensureErr
+}
 
-	return ctrl.Result{}, nil
+// ensureSyncObjects creates or updates the Service and then the StatefulSet. It
+// returns the StatefulSet as the API server last reported it, or the error of the
+// step that failed.
+func (r *TreebindReconciler) ensureSyncObjects(
+	ctx context.Context, treebind *treebindv1alpha1.Treebind,
+) (*appsv1.StatefulSet, error) {
+	if err := r.ensureService(ctx, treebind); err != nil {
+		return nil, err
+	}
+	return r.ensureStatefulSet(ctx, treebind)
 }
 
 // unimplementedFields returns the dotted JSON paths of the spec fields that are
@@ -196,6 +217,38 @@ func addAwaitingReportConditions(treebind *treebindv1alpha1.Treebind) bool {
 		added = true
 	}
 	return added
+}
+
+// resolvesOnRetry reports whether a retry makes the error go away, so that
+// reporting it would only turn Ready False for a moment. An update conflict and an
+// object that already exists come from a cache that has not caught up with the
+// write the previous pass made, and a cancelled context means the manager is
+// stopping.
+func resolvesOnRetry(ctx context.Context, err error) bool {
+	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) || ctx.Err() != nil
+}
+
+// maxFailureText is the most bytes of an error that go into the Ready message.
+// The API server can answer with a long list of field errors, and the message
+// stays on the object.
+const maxFailureText = 1024
+
+// reconcileFailedCondition builds the Ready condition for a pass that could not
+// create or update the sync objects. The error is the API server's answer about
+// objects built from the spec, and the operator never reads a Secret, so it
+// holds no credential.
+func reconcileFailedCondition(err error, generation int64) metav1.Condition {
+	text := err.Error()
+	if len(text) > maxFailureText {
+		text = strings.ToValidUTF8(text[:maxFailureText], "") + "..."
+	}
+	return metav1.Condition{
+		Type:               treebindv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             treebindv1alpha1.ReasonReconcileFailed,
+		Message:            "The last reconcile failed: " + text,
+		ObservedGeneration: generation,
+	}
 }
 
 // readyCondition builds the Ready condition from the StatefulSet status and the

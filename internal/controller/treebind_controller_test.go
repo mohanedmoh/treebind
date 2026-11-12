@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -28,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
@@ -103,6 +106,23 @@ var _ = Describe("Treebind Controller", func() {
 			statefulSet.Status.ReadyReplicas = 1
 			statefulSet.Status.ObservedGeneration = statefulSet.Generation
 			Expect(k8sClient.Status().Update(ctx, statefulSet)).To(Succeed())
+		}
+
+		// breakTemplate makes the pod template invalid: the claim and the SSH key
+		// would both be mounted at the same path, which the API server refuses.
+		breakTemplate := func() {
+			GinkgoHelper()
+			resource := get()
+			resource.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef()}
+			resource.Spec.Target.MountPath = sshMountPath
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+		}
+
+		reconcileFails := func() error {
+			GinkgoHelper()
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(HaveOccurred())
+			return err
 		}
 
 		BeforeEach(func() {
@@ -347,6 +367,153 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(condition.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady))
 			Expect(condition.Message).To(Equal("1 of 1 sync pods ready"))
 			Expect(condition.ObservedGeneration).To(Equal(got.Generation))
+		})
+
+		It("reports a failed reconcile in Ready, publishes the rest of the status and returns the error", func() {
+			breakTemplate()
+
+			Expect(reconcileFails()).To(MatchError(ContainSubstring("must be unique")))
+
+			got := get()
+			ready := meta.FindStatusCondition(got.Status.Conditions, treebindv1alpha1.ConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonReconcileFailed))
+			Expect(ready.Message).To(And(
+				HavePrefix("The last reconcile failed: ensure StatefulSet default/"+resourceName+"-sync"),
+				ContainSubstring("must be unique"),
+			))
+			Expect(ready.ObservedGeneration).To(Equal(got.Generation))
+			Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
+			Expect(findCondition(treebindv1alpha1.ConditionSpecSupported).Status).To(Equal(metav1.ConditionTrue))
+			Expect(findCondition(treebindv1alpha1.ConditionSynced).Status).To(Equal(metav1.ConditionUnknown))
+			Expect(findCondition(treebindv1alpha1.ConditionConflict).Status).To(Equal(metav1.ConditionUnknown))
+		})
+
+		It("writes nothing when the same failure repeats", func() {
+			breakTemplate()
+			Expect(reconcileFails()).To(HaveOccurred())
+			first := get()
+
+			Expect(reconcileFails()).To(HaveOccurred())
+
+			Expect(get().ResourceVersion).To(Equal(first.ResourceVersion))
+		})
+
+		It("goes back to the computed Ready once the sync objects can be written again", func() {
+			breakTemplate()
+			Expect(reconcileFails()).To(HaveOccurred())
+
+			resource := get()
+			resource.Spec.Target.MountPath = testCustomPath
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			reconcileOnce()
+
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodNotReady))
+			Expect(ready.Message).To(Equal(messageNoPodReady))
+			Expect(ready.ObservedGeneration).To(Equal(get().Generation))
+		})
+
+		// reconcilerWith returns a reconciler whose client runs the given functions
+		// instead of the real client's.
+		reconcilerWith := func(funcs interceptor.Funcs) *TreebindReconciler {
+			GinkgoHelper()
+			watching, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			return &TreebindReconciler{
+				Client:     interceptor.NewClient(watching, funcs),
+				Scheme:     k8sClient.Scheme(),
+				AgentImage: testImage,
+			}
+		}
+
+		// failCreateOf returns functions that fail the creation of one kind of
+		// object with the given error and leave everything else alone.
+		failCreateOf := func(kind client.Object, failure func(ctx context.Context) error) interceptor.Funcs {
+			return interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if reflect.TypeOf(obj) == reflect.TypeOf(kind) {
+						return failure(ctx)
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}
+		}
+
+		reconcileWith := func(reconciler *TreebindReconciler, reconcileCtx context.Context) error {
+			GinkgoHelper()
+			_, err := reconciler.Reconcile(reconcileCtx, reconcile.Request{NamespacedName: typeNamespacedName})
+			return err
+		}
+
+		DescribeTable("does not report an error that a retry makes go away",
+			func(failure func() error, matches func(error) bool) {
+				before := get()
+
+				err := reconcileWith(reconcilerWith(failCreateOf(&appsv1.StatefulSet{},
+					func(context.Context) error { return failure() })), ctx)
+
+				Expect(err).To(HaveOccurred())
+				Expect(matches(err)).To(BeTrue(), "the error was changed: %v", err)
+				after := get()
+				Expect(after.ResourceVersion).To(Equal(before.ResourceVersion))
+				Expect(after.Status.Conditions).To(BeEmpty())
+			},
+			Entry("an update conflict", func() error {
+				return errors.NewConflict(appsv1.Resource("statefulsets"), "x", fmt.Errorf("the cache is stale"))
+			}, errors.IsConflict),
+			Entry("an object that already exists", func() error {
+				return errors.NewAlreadyExists(appsv1.Resource("statefulsets"), "x")
+			}, errors.IsAlreadyExists),
+		)
+
+		It("does not report the cancellation of the context when the manager stops", func() {
+			cancellable, cancel := context.WithCancel(ctx)
+			defer cancel()
+			before := get()
+
+			err := reconcileWith(reconcilerWith(failCreateOf(&appsv1.StatefulSet{}, func(context.Context) error {
+				cancel()
+				return context.Canceled
+			})), cancellable)
+
+			Expect(err).To(MatchError(context.Canceled))
+			Expect(err.Error()).NotTo(ContainSubstring("update status"))
+			Expect(get().ResourceVersion).To(Equal(before.ResourceVersion))
+		})
+
+		It("reports a failure to create the Service and creates no StatefulSet", func() {
+			err := reconcileWith(reconcilerWith(failCreateOf(&corev1.Service{}, func(context.Context) error {
+				return errors.NewInternalError(fmt.Errorf("etcd is slow"))
+			})), ctx)
+
+			Expect(err).To(MatchError(ContainSubstring("etcd is slow")))
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonReconcileFailed))
+			Expect(ready.Message).To(HavePrefix("The last reconcile failed: ensure Service default/" + resourceName + "-sync"))
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, syncNamespacedName, &appsv1.StatefulSet{}))).To(BeTrue())
+		})
+
+		It("returns both errors when the status cannot be written either", func() {
+			funcs := failCreateOf(&appsv1.StatefulSet{}, func(context.Context) error {
+				return errors.NewInternalError(fmt.Errorf("etcd is slow"))
+			})
+			funcs.SubResourceUpdate = func(context.Context, client.Client, string, client.Object,
+				...client.SubResourceUpdateOption,
+			) error {
+				return errors.NewConflict(treebindv1alpha1.GroupVersion.WithResource("treebinds").GroupResource(),
+					resourceName, fmt.Errorf("changed meanwhile"))
+			}
+			before := get()
+
+			err := reconcileWith(reconcilerWith(funcs), ctx)
+
+			Expect(err).To(MatchError(ContainSubstring("etcd is slow")))
+			Expect(err).To(MatchError(ContainSubstring("update status of Treebind")))
+			Expect(err).To(MatchError(ContainSubstring("changed meanwhile")))
+			Expect(get().ResourceVersion).To(Equal(before.ResourceVersion))
 		})
 
 		It("adds Synced and Conflict as Unknown until the sync agent has reported", func() {
