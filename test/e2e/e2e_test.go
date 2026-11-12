@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -560,6 +561,26 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "Failed to create the Secret")
 		})
 
+		// A pod that cannot start leaves the reason in the events and in the pod's
+		// description of this namespace, not in the manager's.
+		AfterEach(func() {
+			if !CurrentSpecReport().Failed() {
+				return
+			}
+			for _, args := range [][]string{
+				{"get", "events", "--sort-by=.lastTimestamp"},
+				{"describe", "pods"},
+			} {
+				cmd := exec.Command("kubectl", append(args, "-n", restrictedNamespace)...)
+				output, err := utils.Run(cmd)
+				if err != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "Failed to run kubectl %s: %s\n", strings.Join(args, " "), err)
+					continue
+				}
+				_, _ = fmt.Fprintf(GinkgoWriter, "kubectl %s:\n%s\n", strings.Join(args, " "), output)
+			}
+		})
+
 		AfterAll(func() {
 			By("removing the namespace that enforces the restricted level")
 			cmd := exec.Command("kubectl", "delete", "ns", restrictedNamespace, "--ignore-not-found")
@@ -603,10 +624,20 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("running it as a non-root user, with an image that can load the key")
 			spec := statefulSet.Spec.Template.Spec
+			Expect(spec.SecurityContext).NotTo(BeNil(), "The pod template has no pod security context")
 			spec.RestartPolicy = corev1.RestartPolicyNever
 			uid := nonRootUID
 			spec.SecurityContext.RunAsUser = &uid
 			spec.SecurityContext.RunAsGroup = &uid
+			// The pod needs the key and nothing else. Without the claim it cannot be
+			// held up by it, and without the arguments the operator passes to the
+			// agent, ssh-keygen does not receive them.
+			spec.Volumes = slices.DeleteFunc(spec.Volumes, func(volume corev1.Volume) bool { return volume.Secret == nil })
+			Expect(spec.Volumes).To(HaveLen(1), "The pod template has no Secret volume for the SSH key")
+			keyVolume := spec.Volumes[0].Name
+			spec.Containers[0].VolumeMounts = slices.DeleteFunc(spec.Containers[0].VolumeMounts,
+				func(mount corev1.VolumeMount) bool { return mount.Name != keyVolume })
+			spec.Containers[0].Args = nil
 			spec.Containers[0].Image = keyReaderImage
 			spec.Containers[0].Command = []string{"ssh-keygen", "-y", "-f", "/etc/treebind/ssh/" + restrictedKeyFile}
 			pod := corev1.Pod{

@@ -56,7 +56,9 @@ For your application's pod:
 - Run it with `fsGroup: 65532`. Kubernetes then makes the volume group-owned by
   that GID, so the application can change what the agent wrote. On drivers that
   honour it, the volume's directories are also setgid, so new files keep the
-  group.
+  group. Not every storage driver supports this, NFS for one: on those the
+  setting has no effect, so set the owner, the group and the mode on the storage
+  side instead.
 - Give the application a umask of 0002 as well, or have it create files with
   group write. With the default 0022 the agent cannot change what the
   application creates, even with the same group.
@@ -71,4 +73,9 @@ for how `fsGroup` and `fsGroupChangePolicy` behave on your storage driver.
   condition when it cannot ([#31](https://github.com/mohanedmoh/treebind/issues/31)).
 - Git's `safe.directory` for a checkout owned by another user
   ([#31](https://github.com/mohanedmoh/treebind/issues/31)).
+- A writable home and temporary directory for the agent. Its root filesystem is
+  read-only and Git and SSH write there, so the agent has to keep them on a
+  temporary volume
+  ([#107](https://github.com/mohanedmoh/treebind/issues/107),
+  [#84](https://github.com/mohanedmoh/treebind/issues/84)).
 - `spec.agent` user, group and `fsGroup` overrides (FR-28).
