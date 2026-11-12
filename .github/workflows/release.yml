@@ -161,6 +161,14 @@ jobs:
           echo "$REGISTRY_TOKEN" | ko login ghcr.io --username "$REGISTRY_USER" --password-stdin
           echo "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
 
+      # The agent is built on a base image from Chainguard. Check that they signed
+      # the digest in .ko.yaml before anything is published on top of it.
+      - name: Verify the base image of the agent
+        run: |
+          set -euo pipefail
+          source hack/retry.sh
+          retry 3 hack/verify-agent-base.sh
+
       # 3. Both images for linux/amd64 and linux/arm64, pushed by digest, each
       #    with an SPDX SBOM attached to the image. Each image has its own
       #    repository under ghcr.io/<owner>/.
@@ -173,7 +181,13 @@ jobs:
           source hack/retry.sh
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           mkdir -p out/assets out/sbom
+          created="$(git show -s --format=%cI "$SHA")"
           labels="org.opencontainers.image.source=https://github.com/${REPO},org.opencontainers.image.revision=${SHA},org.opencontainers.image.version=${TAG},org.opencontainers.image.licenses=Apache-2.0"
+          # The base images have labels of their own. The agent's names Chainguard
+          # as the author and the title "git", and gives the day it was built as
+          # the creation time. These replace them. The values hold no comma,
+          # because ko splits the list at commas.
+          labels+=",org.opencontainers.image.created=${created},org.opencontainers.image.authors=The Treebind Authors,org.opencontainers.image.vendor=The Treebind Authors,org.opencontainers.image.url=https://github.com/${REPO}"
           # The source annotation replaces the one inherited from the base image
           # (which names the distroless repository), so that GHCR links the
           # package to this repository. ko prints one line to stdout:
@@ -190,6 +204,7 @@ jobs:
               --platform=linux/amd64,linux/arm64 --tags "$TAG" \
               --sbom=spdx --sbom-dir "out/sbom/$1" \
               --image-label "$labels" \
+              --image-label "org.opencontainers.image.title=treebind-$1" \
               --image-annotation "org.opencontainers.image.source=https://github.com/${REPO}" \
               "$2")"
             if ! [[ "$published" =~ @(sha256:[0-9a-f]{64})$ ]]; then

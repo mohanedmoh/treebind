@@ -229,6 +229,11 @@ dev: ko ## Create a kind cluster, build the images into it, deploy the operator 
 dev-down: ## Delete the kind cluster used by 'make dev'.
 	@$(KIND) delete cluster --name $(KIND_DEV_CLUSTER)
 
+.PHONY: check-agent-image
+check-agent-image: ko ## Build the agent image with ko and check that it can run Git and ssh as its user.
+	@image="$$(KO_DOCKER_REPO=ko.local "$(KO)" build --local --bare --platform="linux/$$(go env GOARCH)" ./cmd/agent)" && \
+	hack/check-agent-image.sh "$$image"
+
 ##@ Dependencies
 
 ## Location to install dependencies to

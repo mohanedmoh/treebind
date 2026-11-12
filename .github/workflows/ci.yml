@@ -176,10 +176,12 @@ jobs:
     needs: approve
     runs-on: ubuntu-latest
     env:
-      # The same ko as release.yml, pinned by version and by the SHA-256 of the
-      # download.
+      # The same ko and cosign as release.yml, pinned by version and by the
+      # SHA-256 of the download.
       KO_VERSION: "0.19.1"
       KO_SHA256: 635ac6ea3fd376c935fee597fbb29ab2c2449f49ef1655085fe3aa9c25fed7a5
+      COSIGN_VERSION: v3.1.4
+      COSIGN_SHA256: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -191,7 +193,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install ko
+      - name: Install ko and cosign
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/tools"
@@ -200,7 +202,18 @@ jobs:
           curl -fsSLo ko.tar.gz "https://github.com/ko-build/ko/releases/download/v${KO_VERSION}/ko_${KO_VERSION}_Linux_x86_64.tar.gz"
           echo "${KO_SHA256}  ko.tar.gz" | sha256sum -c -
           tar -xzf ko.tar.gz ko
+          curl -fsSLo cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  cosign" | sha256sum -c -
+          chmod +x cosign
           echo "$tools" >> "$GITHUB_PATH"
+
+      # The agent is built on a base image from Chainguard. A digest that changes
+      # in .ko.yaml is checked here, in the pull request that changes it.
+      - name: Verify the base image of the agent
+        run: |
+          set -euo pipefail
+          source hack/retry.sh
+          retry 3 hack/verify-agent-base.sh
 
       - name: Build both images for linux/amd64 and linux/arm64 without pushing
         env:
@@ -208,6 +221,16 @@ jobs:
         run: |
           set -euo pipefail
           ko build --push=false --platform=linux/amd64,linux/arm64 $(go list ./cmd/...)
+
+      # The agent has to run Git and ssh as its user, with the settings of the sync
+      # pod. This loads the amd64 image into the runner's Docker and runs it.
+      - name: Run the agent image with the settings of the sync pod
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: |
+          set -euo pipefail
+          image="$(ko build --local --bare --platform=linux/amd64 ./cmd/agent)"
+          hack/check-agent-image.sh "$image"
 
   # Every commit needs a Signed-off-by line. Dependabot does not add one, so
   # its pull requests skip the job; a job skipped by its own condition counts
