@@ -106,8 +106,15 @@ deletes the cluster.
 | `make docs-check` | Link and example check for the docs | Planned |
 
 Run `make lint test` before you push. Run `make generate manifests` after you
-change anything under `api/`, then commit the result, because CI fails on a
-dirty diff.
+change anything under `api/` or the RBAC markers in the controller, then commit
+the result, because CI fails on a dirty diff.
+
+The chart's copies of the CRD and of the operator's role are generated from
+`config/`; do not edit them by hand. The chart's manager Deployment is written
+by hand. `make test` compares it with `config/manager/manager.yaml` and names
+the field that differs, so change both when you change one: the arguments, the
+probes and ports, the security contexts, the resources and the replica count. It
+does not look at the agent image or the metrics flags.
 
 ## Working with Git
 
