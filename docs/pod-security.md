@@ -19,9 +19,14 @@ enforces `pod-security.kubernetes.io/enforce=restricted`:
 | `readOnlyRootFilesystem` | `true` |
 
 Neither pod sets `runAsUser`, `runAsGroup` or `fsGroup`, so each container runs
-as the user its image names. Both images are built on distroless `nonroot`,
-which is UID 65532 and GID 65532. The sync image gets a fixed UID of its own in
-[#84](https://github.com/mohanedmoh/treebind/issues/84).
+as the user its image names. The operator image is built on distroless
+`nonroot`, which is UID 65532 and GID 65532. The agent image is built on
+Chainguard's `git` image, which runs as the user `git`, also UID 65532 and GID
+65532, with a passwd entry and the home directory `/home/git`. It carries Git and
+OpenSSH, and ssh refuses to run for a user that has no passwd entry. The root
+filesystem is read-only, so the home and temporary directories still need
+volumes ([#107](https://github.com/mohanedmoh/treebind/issues/107)). What is in
+the image and how it is kept current is in [releasing](releasing.md#the-agent-image).
 
 `spec.agent.runAsUser`, `runAsGroup` and `fsGroup` exist in the API but are not
 applied yet. A Treebind that sets them reports `SpecSupported=False` with the
@@ -76,6 +81,5 @@ for how `fsGroup` and `fsGroupChangePolicy` behave on your storage driver.
 - A writable home and temporary directory for the agent. Its root filesystem is
   read-only and Git and SSH write there, so the agent has to keep them on a
   temporary volume
-  ([#107](https://github.com/mohanedmoh/treebind/issues/107),
-  [#84](https://github.com/mohanedmoh/treebind/issues/84)).
+  ([#107](https://github.com/mohanedmoh/treebind/issues/107)).
 - `spec.agent` user, group and `fsGroup` overrides (FR-28).

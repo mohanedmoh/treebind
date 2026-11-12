@@ -102,6 +102,7 @@ deletes the cluster.
 | `make docker-build` | Builds the operator image | Available |
 | `make dev` | kind cluster, images built and loaded, operator deployed, dev Git remote started | Available |
 | `make dev-down` | Deletes the kind cluster used by `make dev` | Available |
+| `make check-agent-image` | Builds the agent image with ko and checks that it runs Git and ssh as its user on a read-only root filesystem | Available |
 | `make conformance STORAGE_CLASS=<name>` | Storage conformance suite against a storage class | Planned |
 | `make docs-check` | Link and example check for the docs | Planned |
 

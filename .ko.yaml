@@ -3,9 +3,16 @@
 # repository, for linux/amd64 and linux/arm64.
 
 # distroless static, nonroot, pinned by the digest of its multi-platform index.
-# This is the same base image the Dockerfile uses. Update the digest on purpose,
-# when you want a newer base.
+# This is the same base image the Dockerfile uses, and the operator's. Update the
+# digest on purpose, when you want a newer base.
 defaultBaseImage: gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+
+# The agent runs Git and ssh, so it has a base image that has them: Chainguard's
+# git image, which runs as UID 65532 with a passwd entry. It is pinned by the
+# digest of its multi-platform index, and hack/verify-agent-base.sh checks that
+# Chainguard signed that digest. To update it, see docs/releasing.md.
+baseImageOverrides:
+  github.com/mohanedmoh/treebind/cmd/agent: cgr.dev/chainguard/git@sha256:f5f91faa60ed1b69deab0546d2154d2150f5f9163843793e72d45c51ff27153e
 
 defaultPlatforms:
   - linux/amd64
