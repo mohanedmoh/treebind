@@ -116,7 +116,7 @@ func start(t *testing.T, change func(*Options)) *running {
 	options := Options{
 		Config:   config.Config{Namespace: testNS, Name: testName, MountPath: "/work"},
 		Verifier: onlyGoodToken,
-		Preflight: func(context.Context, string) []preflight.Result {
+		Preflight: func(context.Context, string, string) []preflight.Result {
 			return passed
 		},
 		Logger:   slog.New(slog.NewTextHandler(logs, nil)),
@@ -217,7 +217,7 @@ func TestTheReportSaysThatTheChecksAreStillToRun(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	r := start(t, func(o *Options) {
-		o.Preflight = func(ctx context.Context, _ string) []preflight.Result {
+		o.Preflight = func(ctx context.Context, _, _ string) []preflight.Result {
 			once.Do(func() { close(entered) })
 			select {
 			case <-release:
@@ -255,7 +255,7 @@ func TestRefusesStrangers(t *testing.T) {
 func TestKeepsCheckingWhileACheckFailsAndStopsOnceTheyPass(t *testing.T) {
 	var calls atomic.Int64
 	r := start(t, func(o *Options) {
-		o.Preflight = func(context.Context, string) []preflight.Result {
+		o.Preflight = func(context.Context, string, string) []preflight.Result {
 			if calls.Add(1) <= 4 {
 				return failed
 			}
@@ -285,10 +285,35 @@ func TestKeepsCheckingWhileACheckFailsAndStopsOnceTheyPass(t *testing.T) {
 	}
 }
 
+func TestChecksTheVolumeAtTheMountPathForTheSubPathOfTheTreebind(t *testing.T) {
+	type call struct{ path, subPath string }
+	asked := make(chan call, 1)
+	start(t, func(o *Options) {
+		o.Config.MountPath = "/data/claim"
+		o.Config.SubPath = "team-a/dashboards"
+		o.Preflight = func(_ context.Context, path, subPath string) []preflight.Result {
+			select {
+			case asked <- call{path, subPath}:
+			default:
+			}
+			return passed
+		}
+	})
+
+	select {
+	case got := <-asked:
+		if got != (call{"/data/claim", "team-a/dashboards"}) {
+			t.Errorf("the checks were run on %+v, want the mount path and the sub path of the config", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the checks never ran")
+	}
+}
+
 func TestLogsAFailureOnceAndTheChangeWhenItEnds(t *testing.T) {
 	var calls atomic.Int64
 	r := start(t, func(o *Options) {
-		o.Preflight = func(context.Context, string) []preflight.Result {
+		o.Preflight = func(context.Context, string, string) []preflight.Result {
 			if calls.Add(1) <= 6 {
 				return failed
 			}
@@ -335,7 +360,7 @@ func TestProbes(t *testing.T) {
 
 	t.Run("a failed check does not make it not alive", func(t *testing.T) {
 		r := start(t, func(o *Options) {
-			o.Preflight = func(context.Context, string) []preflight.Result { return failed }
+			o.Preflight = func(context.Context, string, string) []preflight.Result { return failed }
 		})
 
 		eventually(t, "the failure", func() bool { return len(r.report(t).Checks) == 2 })
@@ -408,7 +433,7 @@ func TestStopsOnRequest(t *testing.T) {
 	t.Run("stops while a volume check is running", func(t *testing.T) {
 		entered := make(chan struct{})
 		r := start(t, func(o *Options) {
-			o.Preflight = func(ctx context.Context, _ string) []preflight.Result {
+			o.Preflight = func(ctx context.Context, _, _ string) []preflight.Result {
 				close(entered)
 				<-ctx.Done()
 				return failed
@@ -425,7 +450,7 @@ func TestStopsOnRequest(t *testing.T) {
 		entered := make(chan struct{})
 		var finished atomic.Bool
 		r := start(t, func(o *Options) {
-			o.Preflight = func(ctx context.Context, _ string) []preflight.Result {
+			o.Preflight = func(ctx context.Context, _, _ string) []preflight.Result {
 				close(entered)
 				<-ctx.Done()
 				time.Sleep(100 * time.Millisecond) // a check that takes a moment to wind down
@@ -449,7 +474,7 @@ func TestStopsOnRequest(t *testing.T) {
 		defer close(release)
 		r := start(t, func(o *Options) {
 			o.ShutdownGrace = 200 * time.Millisecond
-			o.Preflight = func(context.Context, string) []preflight.Result {
+			o.Preflight = func(context.Context, string, string) []preflight.Result {
 				close(entered)
 				<-release // a call that ignores the context, as one stuck on a dead mount does
 				return failed
@@ -487,7 +512,7 @@ func TestStopsOnRequest(t *testing.T) {
 				<-unblock
 				return nil
 			})
-			o.Preflight = func(ctx context.Context, _ string) []preflight.Result {
+			o.Preflight = func(ctx context.Context, _, _ string) []preflight.Result {
 				close(entered)
 				<-ctx.Done()
 				time.Sleep(900 * time.Millisecond)
@@ -515,7 +540,7 @@ func TestStopsOnRequest(t *testing.T) {
 	t.Run("stops serving before it waits for a check that is winding down", func(t *testing.T) {
 		entered := make(chan struct{})
 		r := start(t, func(o *Options) {
-			o.Preflight = func(ctx context.Context, _ string) []preflight.Result {
+			o.Preflight = func(ctx context.Context, _, _ string) []preflight.Result {
 				close(entered)
 				<-ctx.Done()
 				time.Sleep(300 * time.Millisecond)
@@ -537,7 +562,7 @@ func TestStopsOnRequest(t *testing.T) {
 		var calls atomic.Int64
 		r := start(t, func(o *Options) {
 			o.RetryMin, o.RetryMax = time.Hour, time.Hour
-			o.Preflight = func(context.Context, string) []preflight.Result {
+			o.Preflight = func(context.Context, string, string) []preflight.Result {
 				calls.Add(1)
 				return failed
 			}
@@ -580,7 +605,7 @@ func TestRunReturnsAnErrorWhenServingFailsAfterItStarted(t *testing.T) {
 			Verifier: onlyGoodToken,
 			Listener: listener,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Preflight: func(ctx context.Context, _ string) []preflight.Result {
+			Preflight: func(ctx context.Context, _, _ string) []preflight.Result {
 				<-ctx.Done()
 				return nil
 			},

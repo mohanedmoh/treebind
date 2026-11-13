@@ -39,7 +39,7 @@ const (
 func checkWritable(dir string) Result {
 	file, err := os.CreateTemp(dir, testFilePrefix+"*")
 	if err != nil {
-		return writeFailure(dir, "create a file in", err)
+		return writeFailure(CheckWritable, dir, "create a file in", err)
 	}
 	name := file.Name()
 	_, writeErr := file.WriteString("treebind preflight\n")
@@ -61,7 +61,7 @@ func writeOutcome(dir string, writeErr, closeErr, removeErr error) Result {
 		{"remove a file from", removeErr},
 	} {
 		if step.err != nil {
-			return writeFailure(dir, step.action, step.err)
+			return writeFailure(CheckWritable, dir, step.action, step.err)
 		}
 	}
 	return Result{
@@ -76,11 +76,11 @@ func writeOutcome(dir string, writeErr, closeErr, removeErr error) Result {
 // Only EACCES is a permission problem that the owner and mode of the directory
 // explain. EPERM, which an immutable or append-only directory returns, is not
 // cured by changing them, so it is reported as it is.
-func writeFailure(dir, action string, err error) Result {
+func writeFailure(check, dir, action string, err error) Result {
 	switch {
 	case errors.Is(err, syscall.EROFS):
 		return Result{
-			Check:   CheckWritable,
+			Check:   check,
 			Outcome: Failed,
 			Reason:  ReasonReadOnlyVolume,
 			Message: dir + " is on a read-only volume: the claim may be mounted read-only, or the storage refuses " +
@@ -88,7 +88,7 @@ func writeFailure(dir, action string, err error) Result {
 		}
 	case errors.Is(err, syscall.EACCES):
 		return Result{
-			Check:   CheckWritable,
+			Check:   check,
 			Outcome: Failed,
 			Reason:  ReasonNotWritable,
 			Message: fmt.Sprintf("this process (%s) cannot %s %s, which is %s. Make the directory writable for that "+
@@ -96,7 +96,7 @@ func writeFailure(dir, action string, err error) Result {
 		}
 	default:
 		return Result{
-			Check:   CheckWritable,
+			Check:   check,
 			Outcome: Failed,
 			Reason:  ReasonWriteFailed,
 			Message: fmt.Sprintf("could not %s %s: %v", action, dir, err),

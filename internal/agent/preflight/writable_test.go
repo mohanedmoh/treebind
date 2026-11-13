@@ -148,7 +148,7 @@ func TestWriteFailure(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result := writeFailure(dir, "create a file in", test.err)
+			result := writeFailure(CheckWritable, dir, "create a file in", test.err)
 
 			wantResult(t, result, CheckWritable, Failed, test.wantReason)
 			if !strings.Contains(result.Message, test.wantInText) {
