@@ -38,6 +38,7 @@ import (
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
 	"github.com/mohanedmoh/treebind/internal/controller"
+	"github.com/mohanedmoh/treebind/internal/statusclient"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -122,7 +123,8 @@ func main() {
 			"Read from the API server when empty.")
 	flag.StringVar(&statusSubject, "status-subject", os.Getenv("STATUS_SUBJECT"),
 		"The operator's service account as its tokens name it, system:serviceaccount:<namespace>:<name>. "+
-			"Built from POD_NAMESPACE and POD_SERVICE_ACCOUNT when empty.")
+			"Built from POD_NAMESPACE and POD_SERVICE_ACCOUNT when empty. The operator asks for tokens of this "+
+			"account to call the sync agents, and the Role in its namespace allows that for its own account only.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -239,6 +241,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One publisher serves both controllers, so that what it wrote is remembered once.
+	statusKeys := &controller.StatusKeyPublisher{Source: controller.NewKeyFetcher(controller.APIGetter(get))}
 	if err := (&controller.TreebindReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
@@ -246,9 +250,27 @@ func main() {
 
 		StatusIssuer:  status.Issuer,
 		StatusSubject: status.Subject,
-		StatusKeys:    &controller.StatusKeyPublisher{Source: controller.NewKeyFetcher(controller.APIGetter(get))},
+		StatusKeys:    statusKeys,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind")
+		os.Exit(1)
+	}
+
+	// The poller asks for tokens of the service account that the agents accept.
+	operatorNamespace, operatorAccount, err := serviceAccountOf(status.Subject)
+	if err != nil {
+		setupLog.Error(err, "Failed to find the service account to ask for tokens of")
+		os.Exit(1)
+	}
+	if err := (&controller.StatusPollerReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Agents: statusclient.New(&statusclient.ServiceAccountTokens{
+			Client: mgr.GetClient(), Namespace: operatorNamespace, ServiceAccount: operatorAccount,
+		}),
+		StatusKeys: statusKeys,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "treebind-status")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

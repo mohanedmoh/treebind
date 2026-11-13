@@ -86,6 +86,33 @@ func TestAGivenIssuerNeedsNoDiscoveryAndAGivenSubjectNeedsNoEnvironment(t *testi
 	}
 }
 
+func TestServiceAccountOf(t *testing.T) {
+	for _, tt := range []struct {
+		subject, wantNamespace, wantName string
+		wantErr                          bool
+	}{
+		{
+			"system:serviceaccount:treebind-system:treebind-controller-manager",
+			"treebind-system", "treebind-controller-manager", false,
+		},
+		{"system:serviceaccount:ns:a", "ns", "a", false},
+		{"", "", "", true},
+		{"treebind-system:controller", "", "", true},
+		{"system:serviceaccount:", "", "", true},
+		{"system:serviceaccount:ns", "", "", true},
+		{"system:serviceaccount::name", "", "", true},
+		{"system:serviceaccount:ns:", "", "", true},
+		{"system:serviceaccount:ns:name:extra", "", "", true},
+		{"system:node:worker-1", "", "", true},
+	} {
+		namespace, name, err := serviceAccountOf(tt.subject)
+		if (err != nil) != tt.wantErr || namespace != tt.wantNamespace || name != tt.wantName {
+			t.Errorf("serviceAccountOf(%q) = %q, %q, %v; want %q, %q, error = %v",
+				tt.subject, namespace, name, err, tt.wantNamespace, tt.wantName, tt.wantErr)
+		}
+	}
+}
+
 func TestTheOperatorRefusesToGuess(t *testing.T) {
 	tests := []struct {
 		name      string

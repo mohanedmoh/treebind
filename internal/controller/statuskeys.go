@@ -128,6 +128,12 @@ func (p *StatusKeyPublisher) Ensure(
 	err = patchOwnedStatusKeys(ctx, c, name, treebind.UID, keys)
 	if apierrors.IsNotFound(err) {
 		err = c.Create(ctx, configMap)
+		if apierrors.IsAlreadyExists(err) {
+			// The reconcile and the poller both put the keys in place, and the other made
+			// the ConfigMap between the patch and the create. It is the Treebind's, if the
+			// owner test passes, so patch it after all.
+			err = patchOwnedStatusKeys(ctx, c, name, treebind.UID, keys)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("ensure ConfigMap %s: %w", name, err)
@@ -136,6 +142,17 @@ func (p *StatusKeyPublisher) Ensure(
 	p.remember(name, treebind.UID, hash)
 	logf.FromContext(ctx).V(1).Info("Wrote the cluster's public signing keys", "configMap", name.String())
 	return nil
+}
+
+// Refresh asks the source to read the keys again at the next call, if it can. The
+// poller calls it when an agent refused the operator's token, and then Ensure.
+func (p *StatusKeyPublisher) Refresh() {
+	if p == nil {
+		return
+	}
+	if refresher, ok := p.Source.(interface{ Refresh() }); ok {
+		refresher.Refresh()
+	}
 }
 
 // desiredStatusKeys returns the ConfigMap of keys of a Treebind. The owner

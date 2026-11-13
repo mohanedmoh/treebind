@@ -43,6 +43,10 @@ const (
 	// keysFetchTimeout bounds one read, so that an API server that does not answer
 	// does not hold a reconcile.
 	keysFetchTimeout = 15 * time.Second
+	// keysMinRefresh is the least time between two reads when an agent that refused
+	// the operator's token asks for the keys to be read again. A cluster whose agents
+	// all refuse it must not make a read for every poll.
+	keysMinRefresh = 10 * time.Second
 )
 
 // KeySource returns the cluster's public signing keys, as the JSON Web Key Set the
@@ -79,6 +83,18 @@ func newKeyFetcher(get APIGetter) *keyFetcher {
 // and the error after that.
 func NewKeyFetcher(get APIGetter) KeySource {
 	return newKeyFetcher(get)
+}
+
+// Refresh makes the next call of Keys read the keys again, unless they were read less
+// than keysMinRefresh ago. It is for the poller to call when an agent refuses the
+// operator's token, which is what a rotation of the cluster's keys looks like before
+// the new keys have reached the agent.
+func (f *keyFetcher) Refresh() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.now().Sub(f.attemptedAt) >= keysMinRefresh {
+		f.attemptedAt = time.Time{}
+	}
 }
 
 // Keys returns the current key set.

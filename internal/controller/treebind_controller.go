@@ -71,9 +71,9 @@ const awaitingReportMessage = "No report from the sync agent has been received y
 // ConfigMap of keys that run the sync agent of a Treebind, and reports in the
 // Ready condition whether the sync pod is ready and the volume is not known to be
 // out of sync. It also reports in the SpecSupported condition which fields of the
-// spec are accepted but not implemented yet. It adds the Synced and Conflict
-// conditions as Unknown the first time it sees a Treebind and never changes them
-// afterwards: the status poller owns them. It writes the status only when a
+// spec are accepted but not implemented yet. It adds the Synced, Conflict and
+// AgentUnreachable conditions as Unknown the first time it sees a Treebind and
+// never changes them afterwards: the status poller owns them. It writes the status only when a
 // condition or the observed generation changed, so the status update it makes does
 // not trigger a reconcile that writes again.
 //
@@ -234,13 +234,17 @@ func specSupportedCondition(fields []string, generation int64) metav1.Condition 
 	}
 }
 
-// addAwaitingReportConditions adds the Synced and Conflict conditions as Unknown
-// when they are absent, and reports whether it added one. A condition that is
-// there is never touched, whatever its status, because the status poller wrote
-// it.
+// addAwaitingReportConditions adds the conditions that the status poller owns, as
+// Unknown, when they are absent, and reports whether it added one. A condition
+// that is there is never touched, whatever its status, because the status poller
+// wrote it.
 func addAwaitingReportConditions(treebind *treebindv1alpha1.Treebind) bool {
 	added := false
-	for _, conditionType := range []string{treebindv1alpha1.ConditionSynced, treebindv1alpha1.ConditionConflict} {
+	for _, conditionType := range []string{
+		treebindv1alpha1.ConditionSynced,
+		treebindv1alpha1.ConditionConflict,
+		treebindv1alpha1.ConditionAgentUnreachable,
+	} {
 		if meta.FindStatusCondition(treebind.Status.Conditions, conditionType) != nil {
 			continue
 		}

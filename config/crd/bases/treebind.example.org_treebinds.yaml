@@ -504,7 +504,9 @@ spec:
 
                   SpecSupported and Ready are set by the reconciler. Synced and Conflict are
                   set by the status poller from the sync agent's reports, and are Unknown
-                  until the first report arrives.
+                  until the first report arrives. AgentUnreachable is set by the status poller
+                  and says whether the operator can read the agent's report. It does not
+                  change Ready.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
