@@ -302,7 +302,10 @@ var _ = Describe("Treebind schema", func() {
 			tb.Spec.Repository.Branch = "feature/retry-sync"
 		}),
 		Entry("with a nested subPath", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Target.SubPath = "team-a/dashboards"
+			tb.Spec.Target.SubPath = subPathNested
+		}),
+		Entry("with a subPath that only looks like the agent's state directory", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Target.SubPath = subPathLookalike
 		}),
 		Entry("with a dot-prefixed directory that is not .git in the repository path", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Repository.Path = ".github/dashboards"
@@ -482,6 +485,12 @@ var _ = Describe("Treebind schema", func() {
 			"spec.repository.path"),
 		Entry("with a .git segment in the subPath",
 			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = "grafana/.git" },
+			"spec.target.subPath"),
+		Entry("with the agent's state directory as the subPath",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = subPathState },
+			"spec.target.subPath"),
+		Entry("with a subPath inside the agent's state directory",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = subPathStateGit },
 			"spec.target.subPath"),
 		Entry("with a placement mode that is neither standalone nor sidecar",
 			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Placement.Mode = "sideCar" },

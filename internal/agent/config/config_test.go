@@ -23,6 +23,9 @@ import (
 )
 
 const (
+	nestedSubPath = "team-a/dashboards"
+	badSegment    = "must not contain a '..'"
+
 	subject  = "system:serviceaccount:treebind-system:treebind-controller-manager"
 	issuer   = "https://kubernetes.default.svc.cluster.local"
 	audience = "treebind.example.org/apps/dashboards"
@@ -118,6 +121,93 @@ func TestFromEnvRefusesWhatCannotWork(t *testing.T) {
 
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Errorf("got %v, want a problem that says %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestFromEnvTakesTheSubPathAndLeavesItEmptyWithoutOne(t *testing.T) {
+	config, err := fromMap(complete())
+	if err != nil || config.SubPath != "" {
+		t.Errorf("without TREEBIND_SUB_PATH: %+v, %v, want an empty sub path", config, err)
+	}
+
+	env := complete()
+	env[EnvSubPath] = nestedSubPath
+	config, err = fromMap(env)
+	if err != nil || config.SubPath != nestedSubPath {
+		t.Errorf("with a sub path: %+v, %v", config, err)
+	}
+}
+
+// The CRD accepts a sub path with spaces in it, and the operator passes it on as it
+// is, so the agent must work in the directory the user named and not in a trimmed one.
+func TestFromEnvDoesNotTrimTheSubPath(t *testing.T) {
+	env := complete()
+	env[EnvSubPath] = " a b "
+
+	config, err := fromMap(env)
+
+	if err != nil || config.SubPath != " a b " {
+		t.Errorf("sub path = %q, %v, want it untouched", config.SubPath, err)
+	}
+}
+
+func TestFromEnvRefusesASubPathThatCannotBeOne(t *testing.T) {
+	env := complete()
+	env[EnvSubPath] = ".treebind/git"
+
+	_, err := fromMap(env)
+
+	if err == nil || !strings.Contains(err.Error(), EnvSubPath+" must not start with '.treebind'") {
+		t.Errorf("got %v, want the refusal to name the variable and the reason", err)
+	}
+}
+
+func TestCheckSubPath(t *testing.T) {
+	long := strings.Repeat("a", MaxSubPathLength)
+	tests := []struct {
+		name    string
+		subPath string
+		want    string // "" means accepted, else what the problem says
+	}{
+		{"none", "", ""},
+		{"a directory", "grafana", ""},
+		{"nested directories", nestedSubPath, ""},
+		{"a dot inside a name", "release-1.2", ""},
+		{"a dot-prefixed name that is not reserved", ".config", ""},
+		{"a name that starts like the state directory", ".treebindx", ""},
+		{"a dash after the state directory's name", ".treebind-old", ""},
+		{"the state directory's name below the first segment", "a/.treebind", ""},
+		{"a name with a space", "my dashboards", ""},
+		{"spaces around the path", " a ", ""},
+		{"a letter of more than one byte", "é/ü", ""},
+		{"the longest sub path", long, ""},
+		{"the longest sub path of letters of two bytes", strings.Repeat("é", MaxSubPathLength), ""},
+		{"one character too many", long + "a", "must be at most 1024 characters"},
+		{"an absolute path", "/data", "must be relative"},
+		{"a dot", ".", "must not be '.'"},
+		{"a backslash", `a\b`, "must not contain a backslash"},
+		{"a double slash", "a//b", "must not contain '//'"},
+		{"a parent segment", "../etc", badSegment},
+		{"a parent segment inside", "a/../b", badSegment},
+		{"a parent segment at the end", "a/..", badSegment},
+		{"a dot segment", "a/./b", badSegment},
+		{"a .git segment", "a/.git/b", badSegment},
+		{"a .git directory", ".git", badSegment},
+		{"a slash at the end", "a/", "must not end with '/'"},
+		{"the state directory", ".treebind", "must not start with '.treebind'"},
+		{"below the state directory", ".treebind/git", "must not start with '.treebind'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckSubPath(tt.subPath)
+
+			switch {
+			case tt.want == "" && err != nil:
+				t.Errorf("CheckSubPath(%q) = %v, want it accepted", tt.subPath, err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Errorf("CheckSubPath(%q) = %v, want a problem that says %q", tt.subPath, err, tt.want)
 			}
 		})
 	}

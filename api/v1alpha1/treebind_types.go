@@ -148,10 +148,18 @@ type TargetSpec struct {
 	// subPath is a directory inside the claim. Only that directory is synced
 	// with the repository. The whole claim is used when it is empty. It cannot
 	// be changed after creation.
+	//
+	// The sync agent keeps its Git directory and the rest of its own state in a
+	// directory called .treebind at the root of the claim. With a subPath it is
+	// beside the synced directory, so an application that mounts the claim with
+	// the same subPath does not see it. Without one it is inside the synced
+	// directory, where the application can see it. So an application should mount
+	// only the subPath, and the subPath cannot start with .treebind.
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024
 	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/') && self != '.' && !self.contains('\\\\') && !self.contains('//') && !('..' in self.split('/'))",message="subPath must be relative, must not be '.' and must not contain '..', '//' or a backslash"
 	// +kubebuilder:validation:XValidation:rule="!self.endsWith('/') && !('.' in self.split('/')) && !('.git' in self.split('/'))",message="subPath must not end with '/' or contain a '.' or '.git' segment"
+	// +kubebuilder:validation:XValidation:rule="self.split('/')[0] != '.treebind'",message="subPath must not start with '.treebind', which the sync agent keeps for its own state"
 	SubPath string `json:"subPath,omitempty"`
 
 	// mountPath is where the claim is mounted inside the sync container. It

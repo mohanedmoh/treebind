@@ -27,6 +27,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // The names of the environment variables.
@@ -34,6 +35,9 @@ const (
 	EnvName      = "TREEBIND_NAME"
 	EnvNamespace = "TREEBIND_NAMESPACE"
 	EnvMountPath = "TREEBIND_MOUNT_PATH"
+	// EnvSubPath is the directory of the claim that is synced, relative to the mount
+	// path. It is not set when the whole claim is (docs/adr/0016).
+	EnvSubPath = "TREEBIND_SUB_PATH"
 
 	EnvStatusAddr     = "TREEBIND_STATUS_ADDR"
 	EnvStatusIssuer   = "TREEBIND_STATUS_ISSUER"
@@ -55,6 +59,9 @@ type Config struct {
 	Namespace, Name string
 	// MountPath is where the claim is mounted: the directory the agent writes to.
 	MountPath string
+	// SubPath is the directory inside the claim that is synced with the repository,
+	// relative to MountPath. It is empty when the whole claim is.
+	SubPath string
 
 	// StatusAddr is the address the status endpoint and the probes listen on.
 	StatusAddr string
@@ -73,9 +80,12 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	// or space, which would never match a claim.
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
 	config := Config{
-		Namespace:      get(EnvNamespace),
-		Name:           get(EnvName),
-		MountPath:      orDefault(get(EnvMountPath), DefaultMountPath),
+		Namespace: get(EnvNamespace),
+		Name:      get(EnvName),
+		MountPath: orDefault(get(EnvMountPath), DefaultMountPath),
+		// Not trimmed: the CRD accepts a path with spaces around it, the operator passes
+		// it on as it is, and it names the directory the user meant.
+		SubPath:        getenv(EnvSubPath),
 		StatusAddr:     orDefault(get(EnvStatusAddr), DefaultStatusAddr),
 		StatusIssuer:   get(EnvStatusIssuer),
 		StatusAudience: get(EnvStatusAudience),
@@ -109,6 +119,9 @@ func (c Config) validate() error {
 	if !cleanAbsolute(c.MountPath) {
 		problems = append(problems, fmt.Errorf("%s must be an absolute path with no .. and no trailing slash", EnvMountPath))
 	}
+	if err := CheckSubPath(c.SubPath); err != nil {
+		problems = append(problems, fmt.Errorf("%s %w", EnvSubPath, err))
+	}
 	if !cleanAbsolute(c.StatusKeysFile) {
 		problems = append(problems, fmt.Errorf("%s must be an absolute path with no .. and no trailing slash", EnvStatusKeysFile))
 	}
@@ -121,6 +134,49 @@ func (c Config) validate() error {
 		problems = append(problems, fmt.Errorf("%s must be a service account, system:serviceaccount:<namespace>:<name>", EnvStatusSubject))
 	}
 	return errors.Join(problems...)
+}
+
+// MaxSubPathLength is the most characters that target.subPath of the CRD may have.
+const MaxSubPathLength = 1024
+
+// StateDirName is the directory at the root of the claim where the agent keeps its
+// own state, the Git directory among it (docs/adr/0016). The synced directory
+// cannot be it, or start with it.
+const StateDirName = ".treebind"
+
+// CheckSubPath returns the reason when a value cannot be the sub path of a Treebind,
+// and nil when it can. An empty one is the whole claim. The rules are the ones that
+// the CRD puts on target.subPath, and a test holds the two together: a value that the
+// API server accepts and the agent refuses would leave a sync pod that exits at start
+// for ever.
+func CheckSubPath(subPath string) error {
+	if subPath == "" {
+		return nil
+	}
+	switch {
+	case utf8.RuneCountInString(subPath) > MaxSubPathLength:
+		return fmt.Errorf("must be at most %d characters", MaxSubPathLength)
+	case strings.HasPrefix(subPath, "/"):
+		return errors.New("must be relative")
+	case subPath == ".":
+		return errors.New("must not be '.'")
+	case strings.Contains(subPath, `\`):
+		return errors.New("must not contain a backslash")
+	case strings.Contains(subPath, "//"):
+		return errors.New("must not contain '//'")
+	case strings.HasSuffix(subPath, "/"):
+		return errors.New("must not end with '/'")
+	}
+	segments := strings.Split(subPath, "/")
+	for _, segment := range segments {
+		if segment == ".." || segment == "." || segment == ".git" {
+			return errors.New("must not contain a '..', '.' or '.git' segment")
+		}
+	}
+	if segments[0] == StateDirName {
+		return fmt.Errorf("must not start with '%s', which the agent keeps for its own state", StateDirName)
+	}
+	return nil
 }
 
 // validAddress reports whether an address is a host, which may be empty, and a
