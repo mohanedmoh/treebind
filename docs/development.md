@@ -8,7 +8,7 @@ A contributor needs a laptop, a container runtime and no cloud account.
 | Tool | Version | Why |
 | :-- | :-- | :-- |
 | Go | 1.26 or later (the module declares `go 1.26.0`) | Build and test |
-| Git | A current release | The agent shells out to it only through `internal/git` |
+| Git | A current release | The agent shells out to it only through `internal/agent/git` |
 | Docker or Podman | Any current release | Builds images and runs kind |
 | kind | A current release | Local clusters for `make dev` and the end-to-end tests |
 | kubectl | Within one minor version of the cluster | Talks to the cluster |

@@ -94,7 +94,7 @@ afterwards, run `git rebase --signoff upstream/main` and force-push your branch.
   or agent loops.
 - Use structured logging. Never log a credential, token, or a URL that carries
   one.
-- Run Git only through `internal/git`. No other package calls the `git` binary.
+- Run Git only through `internal/agent/git`. No other package calls the `git` binary.
 - Confine every file operation to the volume root and reject paths that escape
   it, including through symlinks.
 - Write table-driven tests for logic with many cases.
