@@ -36,10 +36,23 @@ agent verifies the token itself, with no call to the API server:
 The issuer, the audience, the subject and the JWKS are public. The agent reads
 them from its configuration, and the JWKS from a file that it reads again when a
 token names a key it does not know, so a key rotation needs no restart. It reads
-the file again at most once in a short interval, because a stranger chooses the
-key a token names and must not be able to make the agent read a file on every
-request. The agent verifies with the Go standard library and gains no
-dependency.
+the file again at most once in ten seconds, because a stranger chooses the key a
+token names and must not be able to make the agent read a file on every request.
+It also reads it again when the keys are five minutes old, so that a key taken
+out of the file stops being trusted. A file that cannot be read or parsed leaves
+the keys that were loaded in place, so a fault in the file does not shut the
+operator out, but only for an hour: keys that have gone that long without a
+successful read are not used, whether or not a read was tried, and every token
+is refused until the file is good again. Until a first read has succeeded every token is refused, and the file is
+read again each second until one has, so that a file that appears just after a
+failed read is used at once. A request that needs a read that another request
+has started waits for it, for at most half a second. A read that takes longer than
+five seconds counts as failed and is left to finish by itself, and no other read
+starts until it has, so a file on a mount that hangs costs one goroutine and does
+not hold the requests. A clock that differs by up to
+30 seconds from the cluster's is tolerated. Keys that are not RSA of 2048 to
+8192 bits or P-256 are skipped, and a key ID that appears twice is an error. The
+agent verifies with the Go standard library and gains no dependency.
 
 Nothing secret is shared, so there is nothing to store, read or rotate. On a
 kind cluster a token with such an audience was signed with RS256 and lived ten
