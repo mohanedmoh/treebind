@@ -9,6 +9,9 @@ resources:
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
+# The operator mints tokens of its own service account, to call the sync agents.
+- token_role.yaml
+- token_role_binding.yaml
 # The following RBAC configurations are used to protect
 # the metrics endpoint with authn/authz. These configurations
 # ensure that only authorized users and service accounts

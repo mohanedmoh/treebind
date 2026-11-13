@@ -24,6 +24,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -639,6 +640,34 @@ var _ = Describe("Manager", Ordered, func() {
 				output, _ = utils.Run(cmd)
 				Expect(strings.TrimSpace(output)).To(Equal(check.want), "%s %s", check.verb, check.resource)
 			}
+
+			By("getting a token as the operator, for its own service account and for no other")
+			const audience = "treebind.example.org/e2e/token"
+			mint := func(account, accountNamespace string) (string, error) {
+				cmd := exec.Command("kubectl", "create", "token", account, "-n", accountNamespace,
+					"--audience="+audience, "--duration=10m", asOperator)
+				return utils.Run(cmd)
+			}
+			token, err := mint(serviceAccountName, namespace)
+			Expect(err).NotTo(HaveOccurred(), "The operator cannot get a token of its own service account")
+			parts := strings.Split(strings.TrimSpace(token), ".")
+			Expect(parts).To(HaveLen(3), "the answer is not a token")
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			Expect(err).NotTo(HaveOccurred())
+			var claims struct {
+				Subject  string   `json:"sub"`
+				Audience []string `json:"aud"`
+			}
+			Expect(json.Unmarshal(payload, &claims)).To(Succeed())
+			Expect(claims.Subject).To(Equal(fmt.Sprintf("system:serviceaccount:%s:%s", namespace, serviceAccountName)))
+			Expect(claims.Audience).To(Equal([]string{audience}))
+
+			_, err = mint("default", namespace)
+			Expect(err).To(MatchError(ContainSubstring("forbidden")),
+				"the operator got a token of another service account of its namespace")
+			_, err = mint("default", syncNamespace)
+			Expect(err).To(MatchError(ContainSubstring("forbidden")),
+				"the operator got a token of a service account of another namespace")
 		})
 	})
 
