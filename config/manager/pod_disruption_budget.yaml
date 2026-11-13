@@ -1,0 +1,20 @@
+# Lets a node drain evict one operator replica at a time. maxUnavailable, and not
+# minAvailable, so that a single replica (see docs/operator-replicas.md) never has
+# a budget of zero that blocks every drain. AlwaysAllow lets a drain evict a
+# replica that is not ready, so a broken replica cannot hold a node.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: treebind
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: treebind

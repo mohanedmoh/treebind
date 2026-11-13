@@ -13,7 +13,11 @@ manager:
   ##
   enabled: true
 
-  replicas: 1
+  ## Number of manager replicas. Leader election (the --leader-elect argument
+  ## below) lets one of them reconcile at a time; the others wait for the lease and
+  ## take over when the leader goes away. Set it to 1 to run a single replica.
+  ##
+  replicas: 2
 
   image:
     repository: ghcr.io/mohanedmoh/treebind-operator
@@ -23,7 +27,8 @@ manager:
     # tag: ""
     pullPolicy: IfNotPresent
 
-  ## Arguments
+  ## Arguments. Keep --leader-elect while manager.replicas is above 1: the chart
+  ## refuses to render without it, because every replica would reconcile at once.
   ##
   args:
     - --leader-elect
@@ -78,21 +83,45 @@ manager:
   ##
   tolerations: []
 
-  ## Deployment strategy
+  ## Deployment strategy. An update starts the new replica and waits for it to be
+  ## ready before it stops an old one, so the number of ready replicas never drops
+  ## below the replica count.
   ##
-  # strategy:
-  #   type: RollingUpdate
-  #   rollingUpdate:
-  #     maxSurge: 25%
-  #     maxUnavailable: 25%
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  ## PodDisruptionBudget for the manager pods. It lets a node drain evict one
+  ## replica at a time. maxUnavailable, and not minAvailable, so that a single
+  ## replica never has a budget of zero that blocks every drain.
+  ##
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
 
   ## Priority class name
   ##
   # priorityClassName: ""
 
-  ## Topology spread constraints
+  ## Topology spread constraints. The default prefers to put the replicas on
+  ## different nodes. The rule is soft (ScheduleAnyway), so both replicas still
+  ## schedule on a cluster with one node. Counting only the pods of the same
+  ## revision (pod-template-hash) keeps the replicas apart across an update too.
+  ## The values go through tpl, so the label selector can use the chart's helpers.
+  ## Set it to [] to leave the placement to the scheduler.
   ##
-  # topologySpreadConstraints: []
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: '{{ include "treebind.name" . }}'
+          control-plane: controller-manager
+      matchLabelKeys:
+        - pod-template-hash
 
   ## Termination grace period seconds
   ##

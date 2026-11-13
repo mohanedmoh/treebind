@@ -55,6 +55,15 @@ const metricsServiceName = "treebind-controller-manager-metrics-service"
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "treebind-metrics-binding"
 
+// The operator runs as two replicas that elect a leader through a Lease, and a
+// PodDisruptionBudget lets a drain evict one of them at a time (NFR-21).
+const (
+	controllerReplicas      = 2
+	leaseName               = "c4984a8a.example.org"
+	podDisruptionBudgetName = "treebind-controller-manager"
+	controllerPodSelector   = "control-plane=controller-manager"
+)
+
 // The objects of the sync workload spec, which runs in the default namespace
 // because the pod of a Treebind has to share the namespace of its claim.
 const (
@@ -265,8 +274,8 @@ var _ = Describe("Manager", Ordered, func() {
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
-			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+			By("Fetching the logs of the controller manager pods")
+			cmd := exec.Command("kubectl", "logs", "-l", controllerPodSelector, "-n", namespace, "--prefix")
 			controllerLogs, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
@@ -292,8 +301,8 @@ var _ = Describe("Manager", Ordered, func() {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get curl-metrics logs: %s", err)
 			}
 
-			By("Fetching controller manager pod description")
-			cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
+			By("Fetching the controller manager pod descriptions")
+			cmd = exec.Command("kubectl", "describe", "pods", "-l", controllerPodSelector, "-n", namespace)
 			podDescription, err := utils.Run(cmd)
 			if err == nil {
 				fmt.Println("Pod description:\n", podDescription)
@@ -311,30 +320,21 @@ var _ = Describe("Manager", Ordered, func() {
 			By("validating that the controller-manager pod is running as expected")
 			verifyControllerUp := func(g Gomega) {
 				By("getting the name of the controller-manager pod")
-				cmd := exec.Command("kubectl", "get",
-					"pods", "-l", "control-plane=controller-manager",
-					"-o", "go-template={{ range .items }}"+
-						"{{ if not .metadata.deletionTimestamp }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}{{ end }}",
-					"-n", namespace,
-				)
-
-				podOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
-				podNames := utils.GetNonEmptyLines(podOutput)
-				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
+				podNames := controllerPods(g)
+				g.Expect(podNames).To(HaveLen(controllerReplicas), "expected %d controller pods", controllerReplicas)
 				controllerPodName = podNames[0]
 				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
 
-				By("validating the pod's status")
-				cmd = exec.Command("kubectl", "get",
-					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
-					"-n", namespace,
-				)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
+				By("validating the status of every pod")
+				for _, podName := range podNames {
+					cmd := exec.Command("kubectl", "get",
+						"pods", podName, "-o", "jsonpath={.status.phase}",
+						"-n", namespace,
+					)
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
+				}
 			}
 			Eventually(verifyControllerUp).Should(Succeed())
 		})
@@ -432,6 +432,55 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
 			}
 			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should run two ready replicas, one of which holds the lease, and allow one disruption", func() {
+			By("waiting for both replicas to be ready")
+			Eventually(func(g Gomega) {
+				g.Expect(readyControllerPods(g)).To(HaveLen(controllerReplicas))
+			}).Should(Succeed())
+
+			By("checking that one of them holds the lease, so a standby is ready without leading")
+			Eventually(func(g Gomega) {
+				g.Expect(readyControllerPods(g)).To(ContainElement(leaseHolderPod(g)))
+			}).Should(Succeed())
+
+			By("checking that the PodDisruptionBudget lets a drain evict one replica")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "poddisruptionbudget", podDisruptionBudgetName,
+					"-n", namespace, "-o", "jsonpath={.status.disruptionsAllowed}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}).Should(Succeed())
+		})
+
+		// The pod is deleted without a grace period, so it cannot give the lease up and
+		// the other replica has to wait for it to run out. The specs below create a
+		// Treebind, and they only pass when the new leader reconciles it.
+		It("should hand the lease to another replica when the leader is deleted", func() {
+			var leader string
+			Eventually(func(g Gomega) {
+				leader = leaseHolderPod(g)
+				g.Expect(leader).NotTo(BeEmpty())
+			}).Should(Succeed())
+
+			By("deleting the leader pod without a grace period")
+			cmd := exec.Command("kubectl", "delete", "pod", leader, "-n", namespace, "--grace-period=0", "--force")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the leader pod")
+
+			By("waiting for a different pod to hold the lease")
+			Eventually(func(g Gomega) {
+				holder := leaseHolderPod(g)
+				g.Expect(holder).NotTo(BeEmpty())
+				g.Expect(holder).NotTo(Equal(leader))
+			}).Should(Succeed())
+
+			By("waiting for the Deployment to replace the deleted pod")
+			Eventually(func(g Gomega) {
+				g.Expect(readyControllerPods(g)).To(HaveLen(controllerReplicas))
+			}).Should(Succeed())
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
@@ -736,4 +785,42 @@ type tokenRequest struct {
 	Status struct {
 		Token string `json:"token"`
 	} `json:"status"`
+}
+
+// controllerPods returns the names of the operator pods that are not being deleted.
+func controllerPods(g Gomega) []string {
+	cmd := exec.Command("kubectl", "get", "pods", "-l", controllerPodSelector, "-n", namespace,
+		"-o", "go-template={{ range .items }}"+
+			"{{ if not .metadata.deletionTimestamp }}"+
+			"{{ .metadata.name }}"+
+			"{{ \"\\n\" }}{{ end }}{{ end }}")
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve the controller-manager pods")
+	return utils.GetNonEmptyLines(output)
+}
+
+// readyControllerPods returns the names of the operator pods that are ready and not
+// being deleted. A standby is ready too, because readiness does not need the lease.
+func readyControllerPods(g Gomega) []string {
+	cmd := exec.Command("kubectl", "get", "pods", "-l", controllerPodSelector, "-n", namespace,
+		"-o", "go-template={{ range .items }}{{ $name := .metadata.name }}"+
+			"{{ if not .metadata.deletionTimestamp }}"+
+			"{{ range .status.conditions }}{{ if and (eq .type \"Ready\") (eq .status \"True\") }}"+
+			"{{ $name }}{{ \"\\n\" }}"+
+			"{{ end }}{{ end }}"+
+			"{{ end }}{{ end }}")
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve the ready controller-manager pods")
+	return utils.GetNonEmptyLines(output)
+}
+
+// leaseHolderPod returns the name of the pod that holds the operator's Lease. The
+// holder identity is the pod name, an underscore and a random suffix.
+func leaseHolderPod(g Gomega) string {
+	cmd := exec.Command("kubectl", "get", "lease", leaseName, "-n", namespace,
+		"-o", "jsonpath={.spec.holderIdentity}")
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred(), "Failed to read the Lease")
+	pod, _, _ := strings.Cut(strings.TrimSpace(output), "_")
+	return pod
 }
