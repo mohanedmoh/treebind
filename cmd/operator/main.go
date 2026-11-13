@@ -203,7 +203,12 @@ func main() {
 	leaseDuration, renewDeadline, retryPeriod := leaderLeaseDuration, leaderRenewDeadline, leaderRetryPeriod
 
 	restConfig := ctrl.GetConfigOrDie()
-	status, err := discoveredStatusSettings(restConfig, statusSettings{Issuer: statusIssuer, Subject: statusSubject})
+	get, err := apiGetter(restConfig)
+	if err != nil {
+		setupLog.Error(err, "Failed to connect to the API server")
+		os.Exit(1)
+	}
+	status, err := discoveredStatusSettings(get, statusSettings{Issuer: statusIssuer, Subject: statusSubject})
 	if err != nil {
 		setupLog.Error(err, "Failed to find out how the sync agents check the operator's token")
 		os.Exit(1)
@@ -241,6 +246,7 @@ func main() {
 
 		StatusIssuer:  status.Issuer,
 		StatusSubject: status.Subject,
+		StatusKeys:    &controller.StatusKeyPublisher{Source: controller.NewKeyFetcher(controller.APIGetter(get))},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind")
 		os.Exit(1)

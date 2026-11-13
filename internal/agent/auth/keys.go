@@ -68,6 +68,14 @@ type jwk struct {
 	Y   string `json:"y"`
 }
 
+// CheckKeys returns nil when the agent could use data as its key file, and the
+// reason when it could not. The operator calls it on the key set it is about to
+// publish, so that a page that is not a key set never replaces keys that work.
+func CheckKeys(data []byte) error {
+	_, err := parseKeys(data, time.Time{})
+	return err
+}
+
 // parseKeys reads a key set. A key of a type, a size or a use this package does
 // not accept is skipped, so that a cluster that also publishes other keys works.
 // Two different keys under one key ID are an error, because which key a token

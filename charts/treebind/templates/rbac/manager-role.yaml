@@ -13,6 +13,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - services
   verbs:
   - create

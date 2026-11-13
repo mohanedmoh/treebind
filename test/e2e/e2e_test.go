@@ -73,6 +73,7 @@ const (
 	syncKeySecretName   = "e2e-sync-key"
 	syncHostsMapName    = "e2e-sync-hosts"
 	syncStatefulSetName = syncTreebindName + "-sync"
+	syncKeysName        = syncStatefulSetName + "-keys"
 	syncMarkerPodName   = "e2e-sync-marker"
 	syncMarkerContent   = "kept"
 )
@@ -541,6 +542,28 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyStatefulSet).Should(Succeed())
 
+			By("waiting for the ConfigMap of keys, which the Treebind owns and which holds the cluster's public keys")
+			verifyKeys := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", syncKeysName, "-n", syncNamespace,
+					"-o", "jsonpath={.metadata.ownerReferences[0].uid} {.metadata.ownerReferences[0].controller} "+
+						"{.data.jwks\\.json}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				owner, keys, found := strings.Cut(strings.TrimSpace(output), " true ")
+				g.Expect(found).To(BeTrue(), "the ConfigMap is not controlled by an owner: %s", output)
+				g.Expect(owner).To(Equal(treebindUID))
+				var set struct {
+					Keys []struct {
+						Kty string `json:"kty"`
+						Kid string `json:"kid"`
+					} `json:"keys"`
+				}
+				g.Expect(json.Unmarshal([]byte(keys), &set)).To(Succeed(), "the ConfigMap holds no key set: %s", keys)
+				g.Expect(set.Keys).NotTo(BeEmpty())
+				g.Expect(set.Keys[0].Kid).NotTo(BeEmpty())
+			}
+			Eventually(verifyKeys).Should(Succeed())
+
 			By("writing a file to the claim from a second pod")
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(syncMarkerManifest)
@@ -570,6 +593,15 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyStatefulSetGone).Should(Succeed())
 
+			By("waiting for the garbage collector to remove the ConfigMap of keys as well")
+			verifyKeysGone := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "-n", syncNamespace, "-o", "name")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(ContainSubstring(syncKeysName))
+			}
+			Eventually(verifyKeysGone).Should(Succeed())
+
 			By("checking that the claim is bound, has no owner, is not being deleted and still holds the file")
 			// A claim that a pod uses stays in place while a deletion is pending, still
 			// Bound, so only an empty deletionTimestamp shows that nobody asked for it.
@@ -590,6 +622,23 @@ var _ = Describe("Manager", Ordered, func() {
 				asOperator)
 			output, _ = utils.Run(cmd)
 			Expect(strings.TrimSpace(output)).To(Equal("no"))
+
+			By("asking what the operator may do with ConfigMaps and Secrets: create and patch, and nothing else")
+			for _, check := range []struct{ verb, resource, want string }{
+				{"create", "configmaps", "yes"},
+				{"patch", "configmaps", "yes"},
+				{"get", "configmaps", "no"},
+				{"list", "configmaps", "no"},
+				{"watch", "configmaps", "no"},
+				{"update", "configmaps", "no"},
+				{"delete", "configmaps", "no"},
+				{"get", "secrets", "no"},
+				{"list", "secrets", "no"},
+			} {
+				cmd = exec.Command("kubectl", "auth", "can-i", check.verb, check.resource, "-n", syncNamespace, asOperator)
+				output, _ = utils.Run(cmd)
+				Expect(strings.TrimSpace(output)).To(Equal(check.want), "%s %s", check.verb, check.resource)
+			}
 		})
 	})
 
