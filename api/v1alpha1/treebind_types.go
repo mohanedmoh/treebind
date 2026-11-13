@@ -358,7 +358,9 @@ type TreebindStatus struct {
 	//
 	// SpecSupported and Ready are set by the reconciler. Synced and Conflict are
 	// set by the status poller from the sync agent's reports, and are Unknown
-	// until the first report arrives.
+	// until the first report arrives. AgentUnreachable is set by the status poller
+	// and says whether the operator can read the agent's report. It does not
+	// change Ready.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -403,6 +405,45 @@ const (
 	// ReasonAwaitingAgentReport means the sync agent has not reported yet, so the
 	// condition is Unknown.
 	ReasonAwaitingAgentReport = "AwaitingAgentReport"
+
+	// ConditionAgentUnreachable is the type of the condition that says whether the
+	// operator can read the report of the sync agent. It is False while it can,
+	// True once it has not been able to for a few minutes, and Unknown while it
+	// cannot tell. It is about the operator's view of the agent and not about the
+	// sync: the sync can work while the operator cannot read it, so it never changes
+	// Ready.
+	ConditionAgentUnreachable = "AgentUnreachable"
+
+	// ReasonReportReceived means the agent answered with a report. The condition
+	// is False.
+	ReasonReportReceived = "ReportReceived"
+	// ReasonConnectionFailed means the connection to the sync pod was refused or
+	// nothing answered. The condition is True. A network policy or a service mesh
+	// that does not let the operator through looks like this.
+	ReasonConnectionFailed = "ConnectionFailed"
+	// ReasonTokenRefused means the agent answered 401 to the operator's token. The
+	// condition is True.
+	ReasonTokenRefused = "TokenRefused"
+	// ReasonUnexpectedResponse means the agent answered with a status that is
+	// neither a report nor a refusal. The condition is True.
+	ReasonUnexpectedResponse = "UnexpectedResponse"
+	// ReasonReportUnreadable means the agent answered with something that is not a
+	// report the operator can use. The condition is True.
+	ReasonReportUnreadable = "ReportUnreadable"
+	// ReasonPollFailing means the polls have been failing for less than the time
+	// it takes to call it. The condition is Unknown.
+	ReasonPollFailing = "PollFailing"
+	// ReasonAgentNotRunning means the name of the sync pod does not resolve, which
+	// is a pod that does not exist yet. The condition is Unknown, and Ready says
+	// more.
+	ReasonAgentNotRunning = "AgentNotRunning"
+	// ReasonTokenUnavailable means the operator could not get a token for the
+	// agent, which is not the agent's fault. The condition is Unknown.
+	ReasonTokenUnavailable = "TokenUnavailable"
+	// ReasonKeysUnavailable means the operator could not put the cluster's public
+	// keys where the agent reads them, so the agent refuses its token. The
+	// condition is Unknown.
+	ReasonKeysUnavailable = "KeysUnavailable"
 )
 
 // +kubebuilder:object:root=true

@@ -406,6 +406,26 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(findCondition(treebindv1alpha1.ConditionSpecSupported).Status).To(Equal(metav1.ConditionTrue))
 			Expect(findCondition(treebindv1alpha1.ConditionSynced).Status).To(Equal(metav1.ConditionUnknown))
 			Expect(findCondition(treebindv1alpha1.ConditionConflict).Status).To(Equal(metav1.ConditionUnknown))
+			Expect(findCondition(treebindv1alpha1.ConditionAgentUnreachable).Status).To(Equal(metav1.ConditionUnknown))
+		})
+
+		It("leaves AgentUnreachable to the status poller once it exists, and it does not change Ready", func() {
+			reconcileOnce()
+			makeSyncPodReady()
+			reportAs(metav1.Condition{
+				Type:    treebindv1alpha1.ConditionAgentUnreachable,
+				Status:  metav1.ConditionTrue,
+				Reason:  treebindv1alpha1.ReasonConnectionFailed,
+				Message: "The operator cannot reach the sync agent",
+			})
+			before := findCondition(treebindv1alpha1.ConditionAgentUnreachable)
+
+			reconcileOnce()
+
+			Expect(findCondition(treebindv1alpha1.ConditionAgentUnreachable)).To(Equal(before))
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue), "an agent that cannot be read does not make the Treebind not ready")
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady))
 		})
 
 		It("writes nothing when the same failure repeats", func() {
@@ -736,13 +756,14 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(result).To(Equal(reconcile.Result{}))
 		})
 
-		It("adds Synced and Conflict as Unknown until the sync agent has reported", func() {
+		It("adds Synced, Conflict and AgentUnreachable as Unknown until the sync agent has reported", func() {
 			reconcileOnce()
 
 			generation := get().Generation
 			for _, conditionType := range []string{
 				treebindv1alpha1.ConditionSynced,
 				treebindv1alpha1.ConditionConflict,
+				treebindv1alpha1.ConditionAgentUnreachable,
 			} {
 				condition := findCondition(conditionType)
 				Expect(condition.Status).To(Equal(metav1.ConditionUnknown), conditionType)

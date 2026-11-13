@@ -243,6 +243,41 @@ func TestKeyFetcherNeverPublishesWhatTheAgentCannotUse(t *testing.T) {
 	}
 }
 
+func TestRefreshMakesTheNextCallReadAgainButNotWithinTheMinimumWait(t *testing.T) {
+	api, clock := &fakeAPI{}, newFakeClock()
+	api.set(jwksOf("first", &testSigningKey().PublicKey), nil)
+	fetcher := newTestFetcher(api, clock)
+	ctx := context.Background()
+	if _, err := fetcher.Keys(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rotated := jwksOf("rotated", &testSigningKey().PublicKey)
+	api.set(rotated, nil)
+
+	// An agent refused the token right after the keys were read: they are as new as
+	// they can be, so nothing is read.
+	clock.Advance(keysMinRefresh - time.Second)
+	fetcher.Refresh()
+	if got, _ := fetcher.Keys(ctx); string(got) == string(rotated) || api.calls.Load() != 1 {
+		t.Errorf("the keys were read again %v after the last read, which is under the minimum wait", keysMinRefresh-time.Second)
+	}
+
+	// A second later the minimum wait has passed, and the minute has not.
+	clock.Advance(time.Second)
+	fetcher.Refresh()
+	got, err := fetcher.Keys(ctx)
+	if err != nil || string(got) != string(rotated) || api.calls.Load() != 2 {
+		t.Errorf("Keys = %s, %v after %d reads, want the rotated keys after 2", got, err, api.calls.Load())
+	}
+
+	// Without a Refresh the minute still has to pass.
+	api.set(jwksOf("later", &testSigningKey().PublicKey), nil)
+	clock.Advance(keysFetchTTL - time.Second)
+	if _, err := fetcher.Keys(ctx); err != nil || api.calls.Load() != 2 {
+		t.Errorf("the keys were read again without a Refresh and before the minute: %d reads", api.calls.Load())
+	}
+}
+
 func TestKeyFetcherIsNotHeldBackByACancelledCaller(t *testing.T) {
 	api := &fakeAPI{}
 	api.set(jwksOf(testKeyID, &testSigningKey().PublicKey), nil)

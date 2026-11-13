@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/discovery"
@@ -37,6 +38,9 @@ const (
 	discoveryPath = "/.well-known/openid-configuration"
 	// discoveryTimeout bounds the one request made at start.
 	discoveryTimeout = 15 * time.Second
+
+	// serviceAccountPrefix starts the subject of a service account's token.
+	serviceAccountPrefix = "system:serviceaccount:"
 )
 
 // rawGetter reads a path of the API server.
@@ -62,7 +66,7 @@ func resolveStatusSettings(
 			return statusSettings{}, errors.New("the operator's service account is not known: " +
 				"set POD_NAMESPACE and POD_SERVICE_ACCOUNT, or pass --status-subject")
 		}
-		settings.Subject = "system:serviceaccount:" + namespace + ":" + serviceAccount
+		settings.Subject = serviceAccountPrefix + namespace + ":" + serviceAccount
 	}
 	if !agentconfig.IsServiceAccount(settings.Subject) {
 		return statusSettings{}, fmt.Errorf("the subject %q is not a service account, "+
@@ -98,6 +102,19 @@ func apiGetter(config *rest.Config) (rawGetter, error) {
 func discoveredStatusSettings(get rawGetter, given statusSettings) (statusSettings, error) {
 	return resolveStatusSettings(context.Background(), given,
 		os.Getenv("POD_NAMESPACE"), os.Getenv("POD_SERVICE_ACCOUNT"), get)
+}
+
+// serviceAccountOf returns the namespace and the name of the service account that a
+// subject names, system:serviceaccount:<namespace>:<name>. The operator asks for its
+// tokens for the account that the agents accept, so the two are one fact.
+func serviceAccountOf(subject string) (namespace, name string, err error) {
+	remainder, ok := strings.CutPrefix(subject, serviceAccountPrefix)
+	namespace, name, found := strings.Cut(remainder, ":")
+	if !ok || !found || namespace == "" || name == "" || strings.Contains(name, ":") {
+		return "", "", fmt.Errorf("the subject %q is not a service account, "+
+			"system:serviceaccount:<namespace>:<name>", subject)
+	}
+	return namespace, name, nil
 }
 
 // discoverIssuer reads the issuer from the API server's discovery document.

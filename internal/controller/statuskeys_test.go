@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,6 +209,26 @@ func TestEnsureRefusesWithoutAKeySource(t *testing.T) {
 	}
 }
 
+func TestRefreshOfAPublisherReachesTheSourceThatCanRefresh(t *testing.T) {
+	api, clock := &fakeAPI{}, newFakeClock()
+	api.set(testKeySet(), nil)
+	fetcher := newTestFetcher(api, clock)
+	if _, err := fetcher.Keys(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(keysMinRefresh)
+
+	(&StatusKeyPublisher{Source: fetcher}).Refresh()
+	if _, err := fetcher.Keys(context.Background()); err != nil || api.calls.Load() != 2 {
+		t.Errorf("the source was not asked to read again: %v after %d reads", err, api.calls.Load())
+	}
+
+	// A source that cannot refresh, and no publisher at all, are not an error.
+	(&StatusKeyPublisher{Source: &staticKeys{}}).Refresh()
+	(*StatusKeyPublisher)(nil).Refresh()
+	(&StatusKeyPublisher{}).Refresh()
+}
+
 func TestJitterStaysWithinAFifthEitherWay(t *testing.T) {
 	const base = 5 * time.Minute
 	low, high := base, base
@@ -381,6 +402,34 @@ var _ = Describe("The ConfigMap of keys", func() {
 		after := writes.get()
 		Expect(after.creates).To(Equal(before.creates), "a create that fails with AlreadyExists for every Treebind at once")
 		Expect(after.patches).To(Equal(before.patches + 1))
+	})
+
+	It("patches after all when the ConfigMap was made between its patch and its create", func() {
+		Expect(ensure()).To(Succeed())
+		rotated := jwksOf("rotated", &testSigningKey().PublicKey)
+		source.set(rotated, nil)
+
+		// The first patch of a publisher that has no memory of the ConfigMap finds none,
+		// as it does when the other controller makes it in that moment.
+		var patches atomic.Int32
+		watching, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		raced := interceptor.NewClient(watching, interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
+				if patches.Add(1) == 1 {
+					return apierrors.NewNotFound(corev1.Resource("configmaps"), obj.GetName())
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		})
+		other := &StatusKeyPublisher{Source: source, now: clock.Now}
+
+		Expect(other.Ensure(ctx, raced, k8sClient.Scheme(), treebind)).To(Succeed())
+
+		Expect(get().Data).To(Equal(map[string]string{statusKeysFile: string(rotated)}))
+		Expect(patches.Load()).To(Equal(int32(2)))
 	})
 
 	It("is written again when the keys change, without waiting", func() {

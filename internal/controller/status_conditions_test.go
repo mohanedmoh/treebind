@@ -181,9 +181,11 @@ func TestAddAwaitingReportConditions(t *testing.T) {
 		}
 	}
 	synced, conflict := treebindv1alpha1.ConditionSynced, treebindv1alpha1.ConditionConflict
+	unreachable := treebindv1alpha1.ConditionAgentUnreachable
 	syncedTrue := existing(synced, metav1.ConditionTrue, reasonInSync)
 	conflictTrue := existing(conflict, metav1.ConditionTrue, reasonConflictParked)
 	syncedFalse := existing(synced, metav1.ConditionFalse, reasonSyncFailed)
+	unreachableTrue := existing(unreachable, metav1.ConditionTrue, treebindv1alpha1.ReasonConnectionFailed)
 
 	tests := []struct {
 		name       string
@@ -192,27 +194,41 @@ func TestAddAwaitingReportConditions(t *testing.T) {
 		wantByType map[string]metav1.Condition
 	}{
 		{
-			name:       "both are added as Unknown when absent",
-			wantAdded:  true,
-			wantByType: map[string]metav1.Condition{synced: awaiting(synced), conflict: awaiting(conflict)},
+			name:      "all three are added as Unknown when absent",
+			wantAdded: true,
+			wantByType: map[string]metav1.Condition{
+				synced: awaiting(synced), conflict: awaiting(conflict), unreachable: awaiting(unreachable),
+			},
 		},
 		{
-			name:       "only the missing one is added",
+			name:       "only the missing ones are added",
 			conditions: []metav1.Condition{syncedTrue},
 			wantAdded:  true,
-			wantByType: map[string]metav1.Condition{synced: syncedTrue, conflict: awaiting(conflict)},
+			wantByType: map[string]metav1.Condition{
+				synced: syncedTrue, conflict: awaiting(conflict), unreachable: awaiting(unreachable),
+			},
+		},
+		{
+			name:       "AgentUnreachable is added to a Treebind that was made before the operator knew it",
+			conditions: []metav1.Condition{syncedTrue, conflictTrue},
+			wantAdded:  true,
+			wantByType: map[string]metav1.Condition{synced: syncedTrue, conflict: conflictTrue, unreachable: awaiting(unreachable)},
 		},
 		{
 			name:       "existing conditions are never overwritten, whatever their value",
-			conditions: []metav1.Condition{syncedFalse, conflictTrue},
-			wantByType: map[string]metav1.Condition{synced: syncedFalse, conflict: conflictTrue},
+			conditions: []metav1.Condition{syncedFalse, conflictTrue, unreachableTrue},
+			wantByType: map[string]metav1.Condition{synced: syncedFalse, conflict: conflictTrue, unreachable: unreachableTrue},
 		},
 		{
-			name:       "an Unknown that is already there is left as it is",
-			conditions: []metav1.Condition{existing(synced, metav1.ConditionUnknown, "Other"), conflictTrue},
+			name: "an Unknown that is already there is left as it is",
+			conditions: []metav1.Condition{
+				existing(synced, metav1.ConditionUnknown, "Other"), conflictTrue,
+				existing(unreachable, metav1.ConditionUnknown, treebindv1alpha1.ReasonPollFailing),
+			},
 			wantByType: map[string]metav1.Condition{
-				synced:   existing(synced, metav1.ConditionUnknown, "Other"),
-				conflict: conflictTrue,
+				synced:      existing(synced, metav1.ConditionUnknown, "Other"),
+				conflict:    conflictTrue,
+				unreachable: existing(unreachable, metav1.ConditionUnknown, treebindv1alpha1.ReasonPollFailing),
 			},
 		},
 	}
