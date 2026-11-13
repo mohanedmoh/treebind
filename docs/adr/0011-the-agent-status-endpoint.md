@@ -82,6 +82,47 @@ pods. Mutual TLS needs certificates issued and rotated for every agent.
 - The transport is plain HTTP on the pod network. A token that is read on the
   way only reads this agent's report and expires in minutes.
 
+### The agent's settings
+
+The operator puts the settings in the sync pod as environment variables. None is
+secret: they are names, paths and public facts about the cluster.
+
+| Variable | Meaning | Default |
+| :-- | :-- | :-- |
+| `TREEBIND_NAMESPACE`, `TREEBIND_NAME` | the Treebind the agent works for | required |
+| `TREEBIND_MOUNT_PATH` | where the claim is mounted | `/work` |
+| `TREEBIND_STATUS_ADDR` | where the endpoint and the probes listen | `:8080` |
+| `TREEBIND_STATUS_ISSUER` | the `iss` claim of the operator's token | required |
+| `TREEBIND_STATUS_AUDIENCE` | the `aud` claim: `<group>/<namespace>/<name>` of the Treebind | required |
+| `TREEBIND_STATUS_SUBJECT` | the `sub` claim: the operator's service account | required |
+| `TREEBIND_STATUS_KEYS_FILE` | the cluster's public signing keys | `/etc/treebind/status/jwks.json` |
+
+The operator gives the audience whole, so the agent does not know how it is put
+together and the API group can change without a change to the agent. An agent
+with a setting missing or wrong exits with code 2 and says every problem at once,
+because a restart does not cure a wrong pod.
+
+### The agent stays up
+
+A failed volume check does not end the agent. It serves its report, which says
+what failed, and runs the checks again, after 5 seconds and then with a wait that
+doubles up to a minute, until none fails. Then it stops checking: the checks are
+for before the first sync. It stops cleanly on SIGTERM, which is the only warning
+a pod that is being deleted gives (ADR 0006): the endpoint stops taking requests
+first, requests that are being answered finish, and a volume check that does not
+return in five seconds is left behind, so that a hung mount cannot hold the agent
+past the time its pod gives it.
+
+The probes are on the same port and need no token. `/healthz` says the agent is
+running, and stays `ok` while a check fails, because a restart would not cure a
+volume. `/readyz` says it has synced, which no agent can yet, so it answers `503`
+until the sync loop exists. A Treebind therefore does not turn `Ready` before
+anything syncs.
+
+A caller that is refused is logged at most once in thirty seconds, with the count
+of the ones that were held back, because anyone who can reach the port can cause
+refusals.
+
 ### The report is a contract
 
 The answer is a JSON document:
@@ -92,6 +133,7 @@ The answer is a JSON document:
 | `treebind` | the `namespace` and `name` of the Treebind the agent works for |
 | `startedAt` | when the agent process started |
 | `time` | when the report was made, by the agent's clock |
+| `checkedAt` | when the checks last finished; absent until they first have, and `checks` is then empty because they are still to run, not because nothing failed |
 | `checks` | the preflight checks in the order they ran, each with `name`, `outcome`, `reason` and `message` as ADR 0009 defines them |
 
 Within a version, fields are only added, and a reader ignores the ones it does
@@ -118,11 +160,10 @@ counts, which ADR 0004 left to this record.
 - Someone who can read traffic on the pod network can read a report. TLS for the
   endpoint is a later step, and a service mesh that encrypts pod traffic covers it
   today.
-- The agent has to stay up to answer, so it no longer exits when a preflight
-  check fails. It reports the failure and runs the checks again. That is the
-  wiring #31 waits for.
-- This record is carried out in steps: the report and its handler, then the
-  verifier, then the agent's use of both. Until the verifier is in, nothing
-  serves the endpoint.
+- The agent stays up to answer, so it no longer exits when a preflight check
+  fails. It reports the failure and runs the checks again. That is the wiring
+  #31 waited for.
 - The kubelet cannot present a token, so the readiness and liveness probes
-  (#48) get their own paths, which tell a caller nothing but ready or not.
+  (#48) have their own paths, which tell a caller nothing but ready or not.
+- Until the operator sets the variables above, which is the next change, an agent
+  started by the operator exits with code 2.

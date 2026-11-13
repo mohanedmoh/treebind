@@ -134,3 +134,23 @@ func TestRun(t *testing.T) {
 		wantResult(t, got, "X", Skipped, ReasonNotChecked)
 	})
 }
+
+func TestAnyFailed(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []Result
+		want    bool
+	}{
+		{"no results", nil, false},
+		{"all passed", []Result{{Outcome: Passed}, {Outcome: Passed}}, false},
+		{"one skipped", []Result{{Outcome: Passed}, {Outcome: Skipped}}, false},
+		{"one failed", []Result{{Outcome: Passed}, {Outcome: Failed}}, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := AnyFailed(test.results); got != test.want {
+				t.Errorf("AnyFailed = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
