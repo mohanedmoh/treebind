@@ -117,7 +117,7 @@ func (c Config) validate() error {
 	}
 	// The subject is the operator's service account. A value that is not one can
 	// never match a token, so the endpoint would refuse everyone.
-	if c.StatusSubject != "" && !serviceAccount(c.StatusSubject) {
+	if c.StatusSubject != "" && !IsServiceAccount(c.StatusSubject) {
 		problems = append(problems, fmt.Errorf("%s must be a service account, system:serviceaccount:<namespace>:<name>", EnvStatusSubject))
 	}
 	return errors.Join(problems...)
@@ -140,9 +140,10 @@ func cleanAbsolute(p string) bool {
 	return path.IsAbs(p) && path.Clean(p) == p
 }
 
-// serviceAccount reports whether a subject names a service account:
-// system:serviceaccount:<namespace>:<name>.
-func serviceAccount(subject string) bool {
+// IsServiceAccount reports whether a subject names a service account:
+// system:serviceaccount:<namespace>:<name>. The operator checks the subject it
+// gives the agent with the rule the agent checks it with.
+func IsServiceAccount(subject string) bool {
 	parts := strings.Split(subject, ":")
 	return len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" && parts[2] != "" && parts[3] != ""
 }

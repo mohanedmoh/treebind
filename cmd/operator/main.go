@@ -94,6 +94,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var agentImage string
+	var statusIssuer, statusSubject string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -116,6 +117,12 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&agentImage, "agent-image", envOrDefault("AGENT_IMAGE", defaultAgentImage),
 		"The image of the sync agent container. Defaults to the AGENT_IMAGE environment variable.")
+	flag.StringVar(&statusIssuer, "status-issuer", os.Getenv("STATUS_ISSUER"),
+		"The issuer of the cluster's service account tokens, which the sync agents check in the operator's token. "+
+			"Read from the API server when empty.")
+	flag.StringVar(&statusSubject, "status-subject", os.Getenv("STATUS_SUBJECT"),
+		"The operator's service account as its tokens name it, system:serviceaccount:<namespace>:<name>. "+
+			"Built from POD_NAMESPACE and POD_SERVICE_ACCOUNT when empty.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -195,7 +202,14 @@ func main() {
 	// The manager takes the timings by pointer, and a constant has no address.
 	leaseDuration, renewDeadline, retryPeriod := leaderLeaseDuration, leaderRenewDeadline, leaderRetryPeriod
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	status, err := discoveredStatusSettings(restConfig, statusSettings{Issuer: statusIssuer, Subject: statusSubject})
+	if err != nil {
+		setupLog.Error(err, "Failed to find out how the sync agents check the operator's token")
+		os.Exit(1)
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -224,6 +238,9 @@ func main() {
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		AgentImage: agentImage,
+
+		StatusIssuer:  status.Issuer,
+		StatusSubject: status.Subject,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind")
 		os.Exit(1)

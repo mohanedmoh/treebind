@@ -21,18 +21,23 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"path"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
+	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/status"
 )
 
 const (
@@ -48,6 +53,22 @@ const (
 	dataVolumeName       = "data"
 	sshVolumeName        = "ssh-key"
 	knownHostsVolumeName = "known-hosts"
+
+	// The status endpoint of the agent (docs/adr/0011). The probes and the
+	// environment name the same port, so that they cannot disagree.
+	statusPort           = 8080
+	statusPortName       = "status"
+	statusKeysVolumeName = "status-keys"
+	statusKeysMountPath  = "/etc/treebind/status"
+	// statusKeysFile is the key in the ConfigMap that holds the cluster's public
+	// signing keys. The agent reads them from there to check the operator's token.
+	statusKeysFile = "jwks.json"
+
+	// The probes run every probePeriod. A probe that does not answer within
+	// probeTimeout, probeFailures times in a row, counts as failed.
+	probePeriodSeconds  = 10
+	probeTimeoutSeconds = 2
+	probeFailures       = 3
 
 	// sshKeyFileMode is the mode of the SSH key in the pod. The kubelet creates
 	// Secret files owned by root, and the agent runs as a non-root user without
@@ -80,6 +101,40 @@ func objectLabels(treebind *treebindv1alpha1.Treebind) map[string]string {
 	return labels
 }
 
+// statusKeysConfigMapName is the ConfigMap that holds the cluster's public signing
+// keys for the agent of a Treebind, under the key statusKeysFile. The sync pod
+// mounts it whether it exists or not, so that the agent starts before the
+// operator has put the keys there and refuses every caller until they arrive.
+func statusKeysConfigMapName(treebind *treebindv1alpha1.Treebind) string {
+	return syncName(treebind) + "-keys"
+}
+
+// statusAudience is the audience of the token the operator uses to call the agent
+// of a Treebind. It names the Treebind, so that a token for one agent is refused
+// by every other.
+func statusAudience(treebind *treebindv1alpha1.Treebind) string {
+	return treebindv1alpha1.GroupVersion.Group + "/" + treebind.Namespace + "/" + treebind.Name
+}
+
+// agentSettings is what the operator gives the sync pod of every Treebind in the
+// cluster, beside what the spec of the Treebind says.
+type agentSettings struct {
+	// Image is the image of the sync container.
+	Image string
+	// StatusIssuer and StatusSubject are the iss and sub claims that the operator's
+	// token carries: the cluster's issuer, and the operator's service account.
+	StatusIssuer, StatusSubject string
+}
+
+// validate refuses settings that would start agents that exit at once: an agent
+// without an issuer or a subject exits with code 2, and a restart does not cure it.
+func (a agentSettings) validate() error {
+	if a.StatusIssuer == "" || a.StatusSubject == "" {
+		return errors.New("the issuer and the subject of the operator's token are both required")
+	}
+	return nil
+}
+
 // desiredService returns the headless Service that gives the sync pod its
 // stable identity. The owner reference is added by the caller.
 func desiredService(treebind *treebindv1alpha1.Treebind) *corev1.Service {
@@ -99,8 +154,11 @@ func desiredService(treebind *treebindv1alpha1.Treebind) *corev1.Service {
 // desiredStatefulSet returns the StatefulSet that runs the single sync pod of
 // a Treebind, with the hash of its pod template in templateHashAnnotation. The
 // owner reference is added by the caller.
-func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agentImage string) (*appsv1.StatefulSet, error) {
-	template := desiredPodTemplate(treebind, agentImage)
+func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agent agentSettings) (*appsv1.StatefulSet, error) {
+	if err := agent.validate(); err != nil {
+		return nil, err
+	}
+	template := desiredPodTemplate(treebind, agent)
 	hash, err := templateHash(template)
 	if err != nil {
 		return nil, err
@@ -130,11 +188,14 @@ func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agentImage string) 
 	}, nil
 }
 
-func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agentImage string) corev1.PodTemplateSpec {
+func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings) corev1.PodTemplateSpec {
 	mountPath := treebind.Spec.Target.MountPath
 	if mountPath == "" {
 		mountPath = defaultMountPath
 	}
+	// The agent refuses a path that is not in its shortest form, such as /work/,
+	// which the spec allows and the kubelet treats like /work.
+	mountPath = path.Clean(mountPath)
 
 	volumes := []corev1.Volume{{
 		Name: dataVolumeName,
@@ -145,6 +206,17 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agentImage string) 
 		},
 	}}
 	mounts := []corev1.VolumeMount{{Name: dataVolumeName, MountPath: mountPath}}
+
+	optional := true
+	volumes = append(volumes, corev1.Volume{
+		Name: statusKeysVolumeName,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: statusKeysConfigMapName(treebind)},
+			Items:                []corev1.KeyToPath{{Key: statusKeysFile, Path: statusKeysFile}},
+			Optional:             &optional,
+		}},
+	})
+	mounts = append(mounts, corev1.VolumeMount{Name: statusKeysVolumeName, MountPath: statusKeysMountPath, ReadOnly: true})
 
 	if auth := treebind.Spec.Repository.Auth; auth != nil {
 		if ref := auth.SSHKeySecretRef; ref != nil {
@@ -173,24 +245,39 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agentImage string) 
 		}
 	}
 
-	runAsNonRoot, noEscalation, readOnlyRoot := true, false, true
+	runAsNonRoot, noEscalation, readOnlyRoot, noToken := true, false, true, false
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: objectLabels(treebind)},
 		Spec: corev1.PodSpec{
+			// The agent holds no Kubernetes credential (docs/adr/0011): the operator
+			// reaches it with a token that the agent checks itself.
+			AutomountServiceAccountToken: &noToken,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot:   &runAsNonRoot,
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			Containers: []corev1.Container{{
 				Name:  agentContainerName,
-				Image: agentImage,
+				Image: agent.Image,
 				Env: []corev1.EnvVar{
-					{Name: "TREEBIND_NAME", Value: treebind.Name},
-					{Name: "TREEBIND_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+					{Name: agentconfig.EnvName, Value: treebind.Name},
+					{Name: agentconfig.EnvNamespace, ValueFrom: &corev1.EnvVarSource{
 						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 					}},
+					{Name: agentconfig.EnvMountPath, Value: mountPath},
+					{Name: agentconfig.EnvStatusAddr, Value: fmt.Sprintf(":%d", statusPort)},
+					{Name: agentconfig.EnvStatusIssuer, Value: agent.StatusIssuer},
+					{Name: agentconfig.EnvStatusAudience, Value: statusAudience(treebind)},
+					{Name: agentconfig.EnvStatusSubject, Value: agent.StatusSubject},
+					{Name: agentconfig.EnvStatusKeysFile, Value: path.Join(statusKeysMountPath, statusKeysFile)},
 				},
-				VolumeMounts: mounts,
+				Ports: []corev1.ContainerPort{{Name: statusPortName, ContainerPort: statusPort, Protocol: corev1.ProtocolTCP}},
+				// Not ready until the agent has synced, which it cannot yet. A failing
+				// check of the volume does not make it unhealthy: a restart would not
+				// cure a volume.
+				ReadinessProbe: statusProbe(status.ReadyPath),
+				LivenessProbe:  statusProbe(status.HealthPath),
+				VolumeMounts:   mounts,
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -206,6 +293,19 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agentImage string) 
 			}},
 			Volumes: volumes,
 		},
+	}
+}
+
+// statusProbe is an HTTP probe of one of the probe paths of the agent. They need
+// no token.
+func statusProbe(probePath string) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+			Path: probePath, Port: intstr.FromString(statusPortName),
+		}},
+		PeriodSeconds:    probePeriodSeconds,
+		TimeoutSeconds:   probeTimeoutSeconds,
+		FailureThreshold: probeFailures,
 	}
 }
 
@@ -252,7 +352,7 @@ func (r *TreebindReconciler) ensureService(ctx context.Context, treebind *treebi
 func (r *TreebindReconciler) ensureStatefulSet(
 	ctx context.Context, treebind *treebindv1alpha1.Treebind,
 ) (*appsv1.StatefulSet, error) {
-	desired, err := desiredStatefulSet(treebind, r.AgentImage)
+	desired, err := desiredStatefulSet(treebind, r.agentSettings())
 	if err != nil {
 		return nil, fmt.Errorf("build StatefulSet for Treebind %s/%s: %w", treebind.Namespace, treebind.Name, err)
 	}

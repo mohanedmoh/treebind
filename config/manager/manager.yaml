@@ -90,6 +90,16 @@ spec:
         env:
         - name: AGENT_IMAGE
           value: ghcr.io/mohanedmoh/treebind-agent:latest
+        # The operator's service account, which the sync agents accept as the caller
+        # of their status endpoint (docs/adr/0011).
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_SERVICE_ACCOUNT
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.serviceAccountName
         ports:
         - containerPort: 8081
           name: health

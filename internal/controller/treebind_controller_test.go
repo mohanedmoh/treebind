@@ -130,6 +130,9 @@ var _ = Describe("Treebind Controller", func() {
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
 				AgentImage: testImage,
+
+				StatusIssuer:  testIssuer,
+				StatusSubject: testSubject,
 			}
 
 			By("creating the custom resource for the Kind Treebind")
@@ -248,10 +251,14 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(pod.Containers).To(HaveLen(1))
 			Expect(pod.Containers[0].Image).To(Equal(testImage))
 			Expect(pod.Containers[0].VolumeMounts).To(ConsistOf(
-				corev1.VolumeMount{Name: dataVolumeName, MountPath: defaultMountPath}))
-			Expect(pod.Volumes).To(HaveLen(1))
+				corev1.VolumeMount{Name: dataVolumeName, MountPath: defaultMountPath},
+				corev1.VolumeMount{Name: statusKeysVolumeName, MountPath: statusKeysMountPath, ReadOnly: true}))
+			Expect(pod.Volumes).To(HaveLen(2))
 			Expect(pod.Volumes[0].Name).To(Equal(dataVolumeName))
 			Expect(pod.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(owner.Spec.Target.ClaimName))
+			Expect(pod.Volumes[1].ConfigMap.Name).To(Equal(owner.Name + "-sync-keys"))
+			Expect(pod.Volumes[1].ConfigMap.Optional).To(HaveValue(BeTrue()))
+			Expect(pod.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
 		})
 
 		It("mounts the claim at the requested path and the credentials the spec names", func() {
@@ -268,15 +275,16 @@ var _ = Describe("Treebind Controller", func() {
 			pod := getStatefulSet().Spec.Template.Spec
 			Expect(pod.Containers[0].VolumeMounts).To(ConsistOf(
 				corev1.VolumeMount{Name: dataVolumeName, MountPath: testCustomPath},
+				corev1.VolumeMount{Name: statusKeysVolumeName, MountPath: statusKeysMountPath, ReadOnly: true},
 				corev1.VolumeMount{Name: sshVolumeName, MountPath: sshMountPath, ReadOnly: true},
 				corev1.VolumeMount{Name: knownHostsVolumeName, MountPath: knownHostsMountPath, ReadOnly: true},
 			))
-			Expect(pod.Volumes).To(HaveLen(3))
-			secret := pod.Volumes[1].Secret
+			Expect(pod.Volumes).To(HaveLen(4))
+			secret := pod.Volumes[2].Secret
 			Expect(secret.SecretName).To(Equal(testSSHKeyName))
 			Expect(secret.Items).To(ConsistOf(corev1.KeyToPath{Key: testSSHKeyKey, Path: testSSHKeyKey}))
 			Expect(secret.DefaultMode).To(HaveValue(Equal(int32(0o444))))
-			configMap := pod.Volumes[2].ConfigMap
+			configMap := pod.Volumes[3].ConfigMap
 			Expect(configMap.Name).To(Equal(testHostsName))
 			Expect(configMap.Items).To(ConsistOf(corev1.KeyToPath{Key: testHostsKey, Path: testHostsKey}))
 		})
@@ -326,7 +334,7 @@ var _ = Describe("Treebind Controller", func() {
 
 			statefulSet = getStatefulSet()
 			Expect(statefulSet.Annotations[templateHashAnnotation]).NotTo(Equal(hash))
-			Expect(statefulSet.Spec.Template.Spec.Volumes).To(HaveLen(2))
+			Expect(statefulSet.Spec.Template.Spec.Volumes).To(HaveLen(3))
 			hash = statefulSet.Annotations[templateHashAnnotation]
 
 			resource = get()
@@ -426,6 +434,9 @@ var _ = Describe("Treebind Controller", func() {
 				Client:     interceptor.NewClient(watching, funcs),
 				Scheme:     k8sClient.Scheme(),
 				AgentImage: testImage,
+
+				StatusIssuer:  testIssuer,
+				StatusSubject: testSubject,
 			}
 		}
 

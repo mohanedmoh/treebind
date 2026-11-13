@@ -243,8 +243,10 @@ func TestChartManagerMatchesConfig(t *testing.T) {
 	// Each side must have something to compare, so that a field that moves
 	// does not make a check pass on two empty values.
 	if wanted.SecurityContext == nil || wanted.LivenessProbe == nil || wanted.ReadinessProbe == nil ||
-		len(wanted.Args) == 0 || len(wanted.Ports) == 0 || config.Spec.Template.Spec.SecurityContext == nil {
-		t.Fatal("config/manager/manager.yaml no longer sets the security context, the probes, the args or the ports")
+		len(wanted.Args) == 0 || len(wanted.Ports) == 0 || config.Spec.Template.Spec.SecurityContext == nil ||
+		operatorIdentityEnv(wanted.Env) == nil {
+		t.Fatal("config/manager/manager.yaml no longer sets the security context, the probes, the args, the ports " +
+			"or the variables that name the operator's service account")
 	}
 
 	// What the chart takes from its default values.
@@ -265,6 +267,8 @@ func TestChartManagerMatchesConfig(t *testing.T) {
 	sameInChart(t, "the liveness probe", wanted.LivenessProbe, fixed.LivenessProbe)
 	sameInChart(t, "the readiness probe", wanted.ReadinessProbe, fixed.ReadinessProbe)
 	sameInChart(t, "the container ports", wanted.Ports, fixed.Ports)
+	sameInChart(t, "the environment that names the operator's service account",
+		operatorIdentityEnv(wanted.Env), operatorIdentityEnv(fixed.Env))
 	sameInChart(t, "the "+defaultContainer+" annotation",
 		config.Spec.Template.Metadata.Annotations[defaultContainer], template.Spec.Template.Metadata.Annotations[defaultContainer])
 	sameInChart(t, "the "+controlPlane+" label of the pods",
@@ -273,4 +277,20 @@ func TestChartManagerMatchesConfig(t *testing.T) {
 		slices.Sorted(maps.Keys(config.Spec.Selector.MatchLabels)), slices.Sorted(maps.Keys(template.Spec.Selector.MatchLabels)))
 	sameInChart(t, "the "+controlPlane+" selector",
 		config.Spec.Selector.MatchLabels[controlPlane], template.Spec.Selector.MatchLabels[controlPlane])
+}
+
+// operatorIdentityEnv returns the variables that tell the operator which service
+// account it runs as. The sync agents accept only a token of that account, so a
+// manager without them cannot start the agents it creates.
+func operatorIdentityEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	var identity []corev1.EnvVar
+	for _, variable := range env {
+		if variable.Name == "POD_NAMESPACE" || variable.Name == "POD_SERVICE_ACCOUNT" {
+			identity = append(identity, variable)
+		}
+	}
+	if len(identity) != 2 {
+		return nil
+	}
+	return identity
 }

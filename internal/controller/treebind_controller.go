@@ -43,6 +43,16 @@ type TreebindReconciler struct {
 
 	// AgentImage is the image of the sync container.
 	AgentImage string
+	// StatusIssuer is the issuer of the cluster's service account tokens, and
+	// StatusSubject the operator's own service account, as the sub claim names it
+	// (system:serviceaccount:<namespace>:<name>). The agent accepts only a token
+	// that carries them (docs/adr/0011).
+	StatusIssuer, StatusSubject string
+}
+
+// agentSettings is what the sync pods are given beside the spec of a Treebind.
+func (r *TreebindReconciler) agentSettings() agentSettings {
+	return agentSettings{Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject}
 }
 
 // +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds,verbs=get;list;watch;create;update;patch;delete
@@ -286,6 +296,12 @@ func readyCondition(statefulSet *appsv1.StatefulSet, synced *metav1.Condition, g
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *TreebindReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// An agent that is given no issuer or no subject exits at once and is started
+	// again for ever, so the operator refuses to start instead. The pod template
+	// refuses them too, for a reconciler that was not set up here.
+	if err := r.agentSettings().validate(); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&treebindv1alpha1.Treebind{}).
 		Owns(&appsv1.StatefulSet{}).

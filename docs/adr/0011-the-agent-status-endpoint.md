@@ -102,6 +102,34 @@ together and the API group can change without a change to the agent. An agent
 with a setting missing or wrong exits with code 2 and says every problem at once,
 because a restart does not cure a wrong pod.
 
+### What the operator puts in the sync pod
+
+- **No service-account token.** The pod does not mount one
+  (`automountServiceAccountToken: false`), so the agent can neither call the API
+  server nor read anything from it.
+- **The port and the probes.** The container has the port `status`, 8080, and
+  `TREEBIND_STATUS_ADDR` names the same one. The readiness probe asks `/readyz`
+  and the liveness probe `/healthz`, every 10 seconds, with a timeout of 2
+  seconds, and a probe counts as failed after three misses in a row.
+- **The settings.** The mount path is cleaned first (`/work/` becomes `/work`),
+  because the agent refuses a path that is not in its shortest form and the spec
+  allows one. The audience is `<group>/<namespace>/<name>` of the Treebind. The
+  subject is the service account the operator pod runs as, which the Deployment
+  gives it through the downward API (`POD_NAMESPACE` and `POD_SERVICE_ACCOUNT`).
+  The issuer is the one the API server publishes at
+  `/.well-known/openid-configuration`, which every service account may read. The
+  flags `--status-issuer` and `--status-subject` replace both, for a cluster whose
+  discovery document is not readable. The operator does not start when it cannot
+  find them out, because every agent it created would exit with code 2.
+- **The keys.** The pod mounts the ConfigMap `<name>-sync-keys`, key `jwks.json`,
+  at `/etc/treebind/status`, and marks it optional. The agent starts without the
+  keys and refuses every caller until they arrive, and the kubelet puts the file
+  there when the ConfigMap is created. Creating and refreshing it is #99.
+
+A change to any of these changes the pod template, so the sync pods of every
+Treebind are replaced once when the operator is upgraded to a version that sets
+them.
+
 ### The agent stays up
 
 A failed volume check does not end the agent. It serves its report, which says
@@ -165,5 +193,5 @@ counts, which ADR 0004 left to this record.
   #31 waited for.
 - The kubelet cannot present a token, so the readiness and liveness probes
   (#48) have their own paths, which tell a caller nothing but ready or not.
-- Until the operator sets the variables above, which is the next change, an agent
-  started by the operator exits with code 2.
+- Until #99 creates the ConfigMap of keys, the endpoint refuses every caller, so
+  the operator cannot read a report yet. The probes and the agent itself work.
