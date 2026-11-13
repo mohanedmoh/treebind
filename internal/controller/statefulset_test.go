@@ -18,6 +18,7 @@ package controller
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
+	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
 )
 
 // The values more than one test uses.
@@ -38,11 +40,15 @@ const (
 	testTreebindName = "grafana"
 	testSyncName     = "grafana-sync"
 	testCustomPath   = "/data/grafana"
+	testNamespace    = "apps"
+	testIssuer       = "https://kubernetes.default.svc.cluster.local"
+	testSubject      = "system:serviceaccount:treebind-system:treebind-controller-manager"
 )
 
 func mustDesiredStatefulSet(t *testing.T, treebind *treebindv1alpha1.Treebind, image string) *appsv1.StatefulSet {
 	t.Helper()
-	statefulSet, err := desiredStatefulSet(treebind, image)
+	statefulSet, err := desiredStatefulSet(treebind,
+		agentSettings{Image: image, StatusIssuer: testIssuer, StatusSubject: testSubject})
 	if err != nil {
 		t.Fatalf("desiredStatefulSet() error = %v", err)
 	}
@@ -82,6 +88,17 @@ func TestDesiredStatefulSetVolumes(t *testing.T) {
 			Items:                []corev1.KeyToPath{{Key: testHostsKey, Path: testHostsKey}},
 		}},
 	}
+	// The keys of the cluster come from a ConfigMap that may not exist yet.
+	optional := true
+	keysVolume := corev1.Volume{
+		Name: statusKeysVolumeName,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: testSyncName + "-keys"},
+			Items:                []corev1.KeyToPath{{Key: "jwks.json", Path: "jwks.json"}},
+			Optional:             &optional,
+		}},
+	}
+	keysMount := corev1.VolumeMount{Name: statusKeysVolumeName, MountPath: "/etc/treebind/status", ReadOnly: true}
 	sshMount := corev1.VolumeMount{Name: sshVolumeName, MountPath: sshMountPath, ReadOnly: true}
 	hostsMount := corev1.VolumeMount{Name: knownHostsVolumeName, MountPath: knownHostsMountPath, ReadOnly: true}
 
@@ -94,39 +111,45 @@ func TestDesiredStatefulSetVolumes(t *testing.T) {
 	}{
 		{
 			name:        "the claim is mounted at /work by default and nothing else is",
-			wantVolumes: []corev1.Volume{dataVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}},
+			wantVolumes: []corev1.Volume{dataVolume, keysVolume},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, keysMount},
 		},
 		{
 			name:        "a custom mountPath is used as given",
 			mountPath:   testCustomPath,
-			wantVolumes: []corev1.Volume{dataVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}},
+			wantVolumes: []corev1.Volume{dataVolume, keysVolume},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}, keysMount},
+		},
+		{
+			name:        "a mountPath that is not in its shortest form is cleaned, as the agent needs it",
+			mountPath:   "/data//grafana/",
+			wantVolumes: []corev1.Volume{dataVolume, keysVolume},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}, keysMount},
 		},
 		{
 			name:        "an empty auth block mounts nothing",
 			auth:        &treebindv1alpha1.AuthSpec{},
-			wantVolumes: []corev1.Volume{dataVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}},
+			wantVolumes: []corev1.Volume{dataVolume, keysVolume},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, keysMount},
 		},
 		{
 			name:        "an SSH key Secret is mounted read-only with mode 0444",
 			auth:        &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef()},
-			wantVolumes: []corev1.Volume{dataVolume, sshVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, sshMount},
+			wantVolumes: []corev1.Volume{dataVolume, keysVolume, sshVolume},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, keysMount, sshMount},
 		},
 		{
 			name:        "a known hosts ConfigMap is mounted read-only",
 			auth:        &treebindv1alpha1.AuthSpec{KnownHostsConfigMapRef: knownHostsRef()},
-			wantVolumes: []corev1.Volume{dataVolume, hostsVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, hostsMount},
+			wantVolumes: []corev1.Volume{dataVolume, keysVolume, hostsVolume},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, keysMount, hostsMount},
 		},
 		{
 			name:        "both are mounted next to a custom mountPath",
 			mountPath:   testCustomPath,
 			auth:        &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef(), KnownHostsConfigMapRef: knownHostsRef()},
-			wantVolumes: []corev1.Volume{dataVolume, sshVolume, hostsVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}, sshMount, hostsMount},
+			wantVolumes: []corev1.Volume{dataVolume, keysVolume, sshVolume, hostsVolume},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}, keysMount, sshMount, hostsMount},
 		},
 	}
 	for _, tt := range tests {
@@ -217,16 +240,6 @@ func TestDesiredStatefulSetAgentContainer(t *testing.T) {
 	if len(container.Command) != 0 || len(container.Args) != 0 {
 		t.Errorf("command = %v, args = %v, want neither", container.Command, container.Args)
 	}
-	wantEnv := []corev1.EnvVar{
-		{Name: "TREEBIND_NAME", Value: testTreebindName},
-		{Name: "TREEBIND_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
-		}},
-	}
-	if !reflect.DeepEqual(container.Env, wantEnv) {
-		t.Errorf("env = %+v, want %+v", container.Env, wantEnv)
-	}
-
 	security := container.SecurityContext
 	if security == nil || security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation ||
 		security.ReadOnlyRootFilesystem == nil || !*security.ReadOnlyRootFilesystem ||
@@ -331,5 +344,159 @@ func TestDesiredService(t *testing.T) {
 	}
 	if !reflect.DeepEqual(service.Labels, statefulSet.Labels) {
 		t.Errorf("labels = %v, want %v", service.Labels, statefulSet.Labels)
+	}
+}
+
+// agentContainer returns the agent container of a desired StatefulSet.
+func agentContainer(t *testing.T, treebind *treebindv1alpha1.Treebind) (corev1.Container, corev1.PodSpec) {
+	t.Helper()
+	pod := mustDesiredStatefulSet(t, treebind, testImage).Spec.Template.Spec
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != agentContainerName {
+		t.Fatalf("containers = %+v, want one called %s", pod.Containers, agentContainerName)
+	}
+	return pod.Containers[0], pod
+}
+
+func TestAgentGetsNoKubernetesCredential(t *testing.T) {
+	_, pod := agentContainer(t, newTreebind(testTreebindName))
+
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Errorf("automountServiceAccountToken = %v, want false: the agent holds no credential (ADR 0011)",
+			pod.AutomountServiceAccountToken)
+	}
+}
+
+func TestAgentEnvironment(t *testing.T) {
+	treebind := newTreebind(testTreebindName)
+	treebind.Namespace = testNamespace
+	treebind.Spec.Target.MountPath = testCustomPath
+
+	container, _ := agentContainer(t, treebind)
+
+	want := []corev1.EnvVar{
+		{Name: "TREEBIND_NAME", Value: testTreebindName},
+		{Name: "TREEBIND_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+		}},
+		{Name: "TREEBIND_MOUNT_PATH", Value: testCustomPath},
+		{Name: "TREEBIND_STATUS_ADDR", Value: ":8080"},
+		{Name: "TREEBIND_STATUS_ISSUER", Value: testIssuer},
+		{Name: "TREEBIND_STATUS_AUDIENCE", Value: "treebind.example.org/" + testNamespace + "/" + testTreebindName},
+		{Name: "TREEBIND_STATUS_SUBJECT", Value: testSubject},
+		{Name: "TREEBIND_STATUS_KEYS_FILE", Value: "/etc/treebind/status/jwks.json"},
+	}
+	if !reflect.DeepEqual(container.Env, want) {
+		t.Errorf("env = %+v\nwant %+v", container.Env, want)
+	}
+}
+
+// The agent exits with code 2 on a setting it does not accept, and a restart does
+// not cure that, so what the operator puts in the pod has to pass the agent's own
+// checks. This reads the environment the way the kubelet gives it to the agent.
+func TestTheAgentAcceptsTheEnvironmentItIsGiven(t *testing.T) {
+	for name, mountPath := range map[string]string{
+		"the default mount path": "",
+		"a custom one":           testCustomPath,
+		"one that is not clean":  "/work//data/",
+	} {
+		t.Run(name, func(t *testing.T) {
+			treebind := newTreebind(testTreebindName)
+			treebind.Namespace = testNamespace
+			treebind.Spec.Target.MountPath = mountPath
+			container, _ := agentContainer(t, treebind)
+
+			env := map[string]string{}
+			for _, variable := range container.Env {
+				if variable.ValueFrom != nil {
+					env[variable.Name] = testNamespace // metadata.namespace, the only field the pod reads
+					continue
+				}
+				env[variable.Name] = variable.Value
+			}
+			config, err := agentconfig.FromEnv(func(name string) string { return env[name] })
+
+			if err != nil {
+				t.Fatalf("the agent refuses the environment of its own pod: %v", err)
+			}
+			if config.Namespace != testNamespace || config.Name != testTreebindName ||
+				config.StatusAudience != "treebind.example.org/"+testNamespace+"/"+testTreebindName {
+				t.Errorf("the agent reads %+v", config)
+			}
+			// The mount path in the environment is where the volume is mounted.
+			mounted := ""
+			for _, mount := range container.VolumeMounts {
+				if mount.Name == dataVolumeName {
+					mounted = mount.MountPath
+				}
+			}
+			if config.MountPath != mounted {
+				t.Errorf("the agent writes to %s, the claim is mounted at %s", config.MountPath, mounted)
+			}
+		})
+	}
+}
+
+func TestProbesAskThePortTheAgentListensOn(t *testing.T) {
+	container, _ := agentContainer(t, newTreebind(testTreebindName))
+
+	if len(container.Ports) != 1 || container.Ports[0].ContainerPort != 8080 || container.Ports[0].Name != "status" {
+		t.Fatalf("ports = %+v, want 8080 called status", container.Ports)
+	}
+	for name, tt := range map[string]struct {
+		probe *corev1.Probe
+		path  string
+	}{
+		"readiness": {container.ReadinessProbe, "/readyz"},
+		"liveness":  {container.LivenessProbe, "/healthz"},
+	} {
+		if tt.probe == nil || tt.probe.HTTPGet == nil {
+			t.Fatalf("the %s probe is not an HTTP probe: %+v", name, tt.probe)
+		}
+		get := tt.probe.HTTPGet
+		if get.Path != tt.path || get.Port.String() != "status" {
+			t.Errorf("the %s probe asks %s on %s, want %s on status", name, get.Path, get.Port.String(), tt.path)
+		}
+		if tt.probe.PeriodSeconds != 10 || tt.probe.TimeoutSeconds != 2 || tt.probe.FailureThreshold != 3 {
+			t.Errorf("the %s probe timing is %+v", name, tt.probe)
+		}
+	}
+}
+
+func TestEveryAgentIsCalledWithItsOwnAudience(t *testing.T) {
+	first, second := newTreebind("first"), newTreebind("second")
+	other := newTreebind("first")
+	other.Namespace = "elsewhere"
+
+	audiences := map[string]bool{statusAudience(first): true, statusAudience(second): true, statusAudience(other): true}
+
+	if len(audiences) != 3 {
+		t.Errorf("two Treebinds share an audience: %v", audiences)
+	}
+	if want := "treebind.example.org/" + first.Namespace + "/first"; statusAudience(first) != want {
+		t.Errorf("audience = %s, want %s", statusAudience(first), want)
+	}
+}
+
+func TestTheOperatorWillNotStartAgentsThatCannotCheckItsToken(t *testing.T) {
+	for name, reconciler := range map[string]*TreebindReconciler{
+		"no issuer":  {StatusSubject: testSubject},
+		"no subject": {StatusIssuer: testIssuer},
+	} {
+		// The manager is nil, so an error of the controller builder would pass for
+		// the refusal: the text has to be the operator's own.
+		if err := reconciler.SetupWithManager(nil); err == nil || !strings.Contains(err.Error(), "issuer and the subject") {
+			t.Errorf("%s: SetupWithManager returned %v, want the refusal of the operator", name, err)
+		}
+	}
+}
+
+func TestNoPodTemplateForAgentsThatCannotCheckTheOperatorsToken(t *testing.T) {
+	for name, agent := range map[string]agentSettings{
+		"no issuer":  {Image: testImage, StatusSubject: testSubject},
+		"no subject": {Image: testImage, StatusIssuer: testIssuer},
+	} {
+		if _, err := desiredStatefulSet(newTreebind(testTreebindName), agent); err == nil {
+			t.Errorf("%s: a StatefulSet was built", name)
+		}
 	}
 }

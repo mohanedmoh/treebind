@@ -29,6 +29,10 @@ manager:
 
   ## Arguments. Keep --leader-elect while manager.replicas is above 1: the chart
   ## refuses to render without it, because every replica would reconcile at once.
+  ## The operator reads the issuer of the cluster's service account tokens from the
+  ## API server at start. On a cluster where that document cannot be read, add
+  ## --status-issuer=<issuer> here, and --status-subject=<system:serviceaccount:ns:name>
+  ## if the operator should not work out its own service account.
   ##
   args:
     - --leader-elect
