@@ -81,16 +81,21 @@ func resolveStatusSettings(
 	return settings, nil
 }
 
-// discoveredStatusSettings is resolveStatusSettings for the operator process: the
-// service account comes from its environment and the issuer from its cluster.
-func discoveredStatusSettings(config *rest.Config, given statusSettings) (statusSettings, error) {
+// apiGetter returns a reader of paths of the API server that the operator is
+// connected to.
+func apiGetter(config *rest.Config) (rawGetter, error) {
 	client, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
-		return statusSettings{}, fmt.Errorf("create a client for the API server: %w", err)
+		return nil, fmt.Errorf("create a client for the API server: %w", err)
 	}
-	get := func(ctx context.Context, path string) ([]byte, error) {
+	return func(ctx context.Context, path string) ([]byte, error) {
 		return client.RESTClient().Get().AbsPath(path).DoRaw(ctx)
-	}
+	}, nil
+}
+
+// discoveredStatusSettings is resolveStatusSettings for the operator process: the
+// service account comes from its environment and the issuer from its cluster.
+func discoveredStatusSettings(get rawGetter, given statusSettings) (statusSettings, error) {
 	return resolveStatusSettings(context.Background(), given,
 		os.Getenv("POD_NAMESPACE"), os.Getenv("POD_SERVICE_ACCOUNT"), get)
 }

@@ -337,6 +337,10 @@ func TestDesiredService(t *testing.T) {
 	if len(service.Spec.Ports) != 0 {
 		t.Errorf("ports = %v, want none", service.Spec.Ports)
 	}
+	if !service.Spec.PublishNotReadyAddresses {
+		t.Error("publishNotReadyAddresses = false: the name of the sync pod would not resolve until it is ready, " +
+			"which it is not before its first sync, so the operator could not reach the agent")
+	}
 	statefulSet := mustDesiredStatefulSet(t, treebind, testImage)
 	if !reflect.DeepEqual(service.Spec.Selector, statefulSet.Spec.Selector.MatchLabels) {
 		t.Errorf("selector = %v, want the StatefulSet selector %v",

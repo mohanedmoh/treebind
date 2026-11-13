@@ -17,9 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -31,6 +34,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
@@ -50,6 +55,7 @@ var _ = Describe("Treebind Controller", func() {
 			Namespace: resourceNamespace,
 		}
 		syncNamespacedName := types.NamespacedName{Name: resourceName + "-sync", Namespace: resourceNamespace}
+		keysNamespacedName := types.NamespacedName{Name: resourceName + "-sync-keys", Namespace: resourceNamespace}
 		treebind := &treebindv1alpha1.Treebind{}
 		var controllerReconciler *TreebindReconciler
 
@@ -133,6 +139,7 @@ var _ = Describe("Treebind Controller", func() {
 
 				StatusIssuer:  testIssuer,
 				StatusSubject: testSubject,
+				StatusKeys:    newTestPublisher(),
 			}
 
 			By("creating the custom resource for the Kind Treebind")
@@ -154,6 +161,9 @@ var _ = Describe("Treebind Controller", func() {
 			sync := metav1.ObjectMeta{Name: syncNamespacedName.Name, Namespace: syncNamespacedName.Namespace}
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: sync}))).To(Succeed())
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: sync}))).To(Succeed())
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: keysNamespacedName.Name, Namespace: keysNamespacedName.Namespace,
+			}}))).To(Succeed())
 		})
 
 		It("reports a spec with only implemented fields as supported", func() {
@@ -437,6 +447,7 @@ var _ = Describe("Treebind Controller", func() {
 
 				StatusIssuer:  testIssuer,
 				StatusSubject: testSubject,
+				StatusKeys:    newTestPublisher(),
 			}
 		}
 
@@ -525,6 +536,204 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(err).To(MatchError(ContainSubstring("update status of Treebind")))
 			Expect(err).To(MatchError(ContainSubstring("changed meanwhile")))
 			Expect(get().ResourceVersion).To(Equal(before.ResourceVersion))
+		})
+
+		getKeysConfigMap := func() *corev1.ConfigMap {
+			GinkgoHelper()
+			got := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, keysNamespacedName, got)).To(Succeed())
+			return got
+		}
+
+		// failingKeys returns a publisher that cannot read the cluster's keys.
+		failingKeys := func() *StatusKeyPublisher {
+			source := &staticKeys{}
+			source.set(nil, fmt.Errorf("the API server said no"))
+			return &StatusKeyPublisher{Source: source}
+		}
+
+		It("puts the cluster's keys in a ConfigMap that the Treebind owns", func() {
+			reconcileOnce()
+
+			configMap := getKeysConfigMap()
+			Expect(configMap.Data).To(Equal(map[string]string{statusKeysFile: string(testKeySet())}))
+			ref := metav1.GetControllerOf(configMap)
+			Expect(ref).NotTo(BeNil())
+			Expect(ref.UID).To(Equal(get().UID))
+		})
+
+		It("creates the ConfigMap of keys before the StatefulSet, so that a new pod has the file when it starts", func() {
+			var created []string
+			reconciler := reconcilerWith(interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					created = append(created, reflect.TypeOf(obj).Elem().Name())
+					return c.Create(ctx, obj, opts...)
+				},
+			})
+
+			Expect(reconcileWith(reconciler, ctx)).To(Succeed())
+
+			Expect(created).To(Equal([]string{"ConfigMap", "Service", "StatefulSet"}))
+		})
+
+		// retryDelayIsShort checks the delay a pass asks for after the keys failed.
+		retryDelayIsShort := func(result reconcile.Result) {
+			GinkgoHelper()
+			Expect(result.RequeueAfter).To(BeNumerically(">=", statusKeysRetry*4/5))
+			Expect(result.RequeueAfter).To(BeNumerically("<=", statusKeysRetry*6/5))
+		}
+
+		It("creates the Service and the StatefulSet when the keys cannot be read, leaves Ready alone and tries again soon", func() {
+			reconciler := reconcilerWith(interceptor.Funcs{})
+			reconciler.StatusKeys = failingKeys()
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			Expect(err).NotTo(HaveOccurred())
+			retryDelayIsShort(result)
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodNotReady), "the keys are not what Ready is about")
+			Expect(ready.Message).To(Equal(messageNoPodReady))
+			Expect(getService()).NotTo(BeNil())
+			Expect(getStatefulSet()).NotTo(BeNil())
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, keysNamespacedName, &corev1.ConfigMap{}))).To(BeTrue())
+		})
+
+		// logged runs the reconcile with a logger that keeps what it is told, and returns
+		// the lines that report an error.
+		logged := func(reconciler *TreebindReconciler) string {
+			GinkgoHelper()
+			var output bytes.Buffer
+			logger := zap.New(zap.WriteTo(&output))
+			_, err := reconciler.Reconcile(logf.IntoContext(ctx, logger), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			var errorLines []string
+			for line := range strings.SplitSeq(output.String(), "\n") {
+				if strings.Contains(line, `"level":"error"`) {
+					errorLines = append(errorLines, line)
+				}
+			}
+			return strings.Join(errorLines, "\n")
+		}
+
+		It("does not log a failed read of the keys as an error for every Treebind, because the key source has", func() {
+			reconciler := reconcilerWith(interceptor.Funcs{})
+			reconciler.StatusKeys = failingKeys()
+
+			Expect(logged(reconciler)).To(BeEmpty())
+		})
+
+		It("logs a ConfigMap of that name that it did not create as an error, because only this Treebind has it", func() {
+			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: keysNamespacedName.Name, Namespace: keysNamespacedName.Namespace},
+				Data:       map[string]string{statusKeysFile: foreignData},
+			})).To(Succeed())
+
+			errorLines := logged(controllerReconciler)
+
+			Expect(errorLines).To(ContainSubstring("Could not put the cluster's public signing keys"))
+			Expect(errorLines).To(ContainSubstring("first owner is this Treebind"))
+		})
+
+		It("keeps Ready True for a sync pod that is ready while the keys cannot be read", func() {
+			reconcileOnce()
+			makeSyncPodReady()
+			reconciler := reconcilerWith(interceptor.Funcs{})
+			reconciler.StatusKeys = failingKeys()
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			Expect(err).NotTo(HaveOccurred())
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady))
+		})
+
+		It("leaves a ConfigMap of that name that it did not create alone, still creates the rest and leaves Ready alone", func() {
+			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: keysNamespacedName.Name, Namespace: keysNamespacedName.Namespace},
+				Data:       map[string]string{statusKeysFile: foreignData},
+			})).To(Succeed())
+
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			Expect(err).NotTo(HaveOccurred())
+			retryDelayIsShort(result)
+			Expect(findCondition(treebindv1alpha1.ConditionReady).Reason).To(Equal(treebindv1alpha1.ReasonSyncPodNotReady))
+			Expect(getKeysConfigMap().Data).To(Equal(map[string]string{statusKeysFile: foreignData}))
+			Expect(getStatefulSet()).NotTo(BeNil())
+		})
+
+		It("does not ask for the Treebinds whose keys failed at the same moment", func() {
+			controllerReconciler.StatusKeys = failingKeys()
+			delays := map[time.Duration]bool{}
+			for range 30 {
+				result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+				retryDelayIsShort(result)
+				delays[result.RequeueAfter] = true
+			}
+
+			Expect(len(delays)).To(BeNumerically(">", 1), "the delay is the same every time: %v", delays)
+		})
+
+		It("reports only the failure of the Service in Ready when the keys fail as well", func() {
+			reconciler := reconcilerWith(failCreateOf(&corev1.Service{}, func(context.Context) error {
+				return errors.NewInternalError(fmt.Errorf("etcd is slow"))
+			}))
+			reconciler.StatusKeys = failingKeys()
+
+			err := reconcileWith(reconciler, ctx)
+
+			Expect(err).To(MatchError(ContainSubstring("etcd is slow")))
+			Expect(err).NotTo(MatchError(ContainSubstring("the API server said no")))
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonReconcileFailed))
+			Expect(ready.Message).To(HavePrefix("The last reconcile failed: ensure Service default/" + resourceName + "-sync"))
+			Expect(ready.Message).NotTo(ContainSubstring("the API server said no"))
+		})
+
+		It("makes the Service publish the name of a pod that is not ready, also on a Service made without it", func() {
+			reconcileOnce()
+			service := getService()
+			Expect(service.Spec.PublishNotReadyAddresses).To(BeTrue())
+
+			service.Spec.PublishNotReadyAddresses = false
+			Expect(k8sClient.Update(ctx, service)).To(Succeed())
+			reconcileOnce()
+
+			Expect(getService().Spec.PublishNotReadyAddresses).To(BeTrue())
+		})
+
+		It("asks to be reconciled again after about five minutes, to look at the keys again", func() {
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">=", statusKeysRefresh*4/5))
+			Expect(result.RequeueAfter).To(BeNumerically("<=", statusKeysRefresh*6/5))
+		})
+
+		It("does not ask for every Treebind at the same moment", func() {
+			delays := map[time.Duration]bool{}
+			for range 30 {
+				result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+				delays[result.RequeueAfter] = true
+			}
+
+			Expect(len(delays)).To(BeNumerically(">", 1), "the delay is the same every time: %v", delays)
+		})
+
+		It("leaves the delay to the error when the sync objects cannot be written", func() {
+			reconciler := reconcilerWith(failCreateOf(&corev1.Service{}, func(context.Context) error {
+				return errors.NewInternalError(fmt.Errorf("etcd is slow"))
+			}))
+			reconciler.StatusKeys = failingKeys()
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			Expect(err).To(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
 		})
 
 		It("adds Synced and Conflict as Unknown until the sync agent has reported", func() {

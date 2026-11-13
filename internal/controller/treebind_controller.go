@@ -48,6 +48,8 @@ type TreebindReconciler struct {
 	// (system:serviceaccount:<namespace>:<name>). The agent accepts only a token
 	// that carries them (docs/adr/0011).
 	StatusIssuer, StatusSubject string
+	// StatusKeys puts the cluster's public signing keys where the agents read them.
+	StatusKeys *StatusKeyPublisher
 }
 
 // agentSettings is what the sync pods are given beside the spec of a Treebind.
@@ -65,20 +67,30 @@ func (r *TreebindReconciler) agentSettings() agentSettings {
 // until the sync agent's first report arrives.
 const awaitingReportMessage = "No report from the sync agent has been received yet"
 
-// Reconcile keeps the headless Service and the one-replica StatefulSet that
-// run the sync agent of a Treebind, and reports in the Ready condition whether
-// the sync pod is ready and the volume is not known to be out of sync. It also
-// reports in the SpecSupported condition which fields of the spec are accepted
-// but not implemented yet. It adds the Synced and Conflict conditions as
-// Unknown the first time it sees a Treebind and never changes them afterwards:
-// the status poller owns them. It writes the status only when a condition or the
-// observed generation changed, so the status update it makes does not trigger
-// a reconcile that writes again.
+// Reconcile keeps the headless Service, the one-replica StatefulSet and the
+// ConfigMap of keys that run the sync agent of a Treebind, and reports in the
+// Ready condition whether the sync pod is ready and the volume is not known to be
+// out of sync. It also reports in the SpecSupported condition which fields of the
+// spec are accepted but not implemented yet. It adds the Synced and Conflict
+// conditions as Unknown the first time it sees a Treebind and never changes them
+// afterwards: the status poller owns them. It writes the status only when a
+// condition or the observed generation changed, so the status update it makes does
+// not trigger a reconcile that writes again.
 //
 // When it cannot create or update the sync objects it still writes the status,
 // with Ready False and the reason ReconcileFailed, and then returns the error so
 // that the request is retried. An error that a retry makes go away is the
 // exception, because reporting it would only make Ready flap.
+//
+// It puts the cluster's public signing keys in a ConfigMap for the sync agent
+// before it creates the StatefulSet, so that a new pod finds the file when the
+// kubelet mounts the volume instead of waiting for it to appear. A failure to do
+// that does not change Ready and does not stop the sync objects: the sync does not
+// need the keys, only the operator's reading of the agent does, and Ready is about
+// the sync. The failure is logged and the pass is asked for again after about
+// statusKeysRetry. A pass that succeeds is asked for again after about
+// statusKeysRefresh, because the keys can change with nothing in the cluster to
+// say so.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
@@ -102,6 +114,15 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	fields := unimplementedFields(&treebind.Spec)
 	changed := meta.SetStatusCondition(&treebind.Status.Conditions, specSupportedCondition(fields, treebind.Generation))
 
+	keysErr := r.StatusKeys.Ensure(ctx, r.Client, r.Scheme, treebind)
+	if keysErr != nil && ctx.Err() == nil {
+		if errors.Is(keysErr, errReadKeys) {
+			// The key source has logged it, once for every Treebind.
+			log.V(1).Info("Could not read the cluster's public signing keys", "error", keysErr.Error())
+		} else {
+			log.Error(keysErr, "Could not put the cluster's public signing keys where the sync agent reads them")
+		}
+	}
 	statefulSet, ensureErr := r.ensureSyncObjects(ctx, treebind)
 	if ensureErr != nil && resolvesOnRetry(ctx, ensureErr) {
 		return ctrl.Result{}, ensureErr
@@ -132,7 +153,13 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			"ready", ready.Status, "reason", ready.Reason)
 	}
 
-	return ctrl.Result{}, ensureErr
+	if ensureErr != nil {
+		return ctrl.Result{}, ensureErr
+	}
+	if keysErr != nil {
+		return ctrl.Result{RequeueAfter: jittered(statusKeysRetry)}, nil
+	}
+	return ctrl.Result{RequeueAfter: jittered(statusKeysRefresh)}, nil
 }
 
 // ensureSyncObjects creates or updates the Service and then the StatefulSet. It
@@ -301,6 +328,9 @@ func (r *TreebindReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// refuses them too, for a reconciler that was not set up here.
 	if err := r.agentSettings().validate(); err != nil {
 		return err
+	}
+	if r.StatusKeys == nil || r.StatusKeys.Source == nil {
+		return errors.New("a source of the cluster's public signing keys is required")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&treebindv1alpha1.Treebind{}).

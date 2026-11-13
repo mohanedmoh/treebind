@@ -100,6 +100,35 @@ func TestParseKeys(t *testing.T) {
 	}
 }
 
+// The operator tests a key set with CheckKeys before it publishes it, so it has
+// to give the answer the agent's own parser gives.
+func TestCheckKeysGivesTheAnswerOfTheParser(t *testing.T) {
+	good := rsaJWK(kidRSA, &keys().rsa.PublicKey)
+	tests := []struct {
+		name   string
+		data   []byte
+		wantOK bool
+	}{
+		{"a key set the agent can use", defaultKeyFile(t), true},
+		{"a file that is not JSON", []byte("not json"), false},
+		{"a page of HTML", []byte("<html>unauthorized</html>"), false},
+		{"a file with no keys", []byte(`{"keys":[]}`), false},
+		{"two keys under one key ID", keyFile(t, good, rsaJWK(kidRSA, &keys().otherRSA.PublicKey)), false},
+		{"a file larger than the limit", []byte(strings.Repeat(" ", maxKeysFileBytes+1)), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckKeys(tt.data)
+			if (err == nil) != tt.wantOK {
+				t.Errorf("CheckKeys = %v, want accepted = %v", err, tt.wantOK)
+			}
+			if _, parseErr := parseKeys(tt.data, now); (parseErr == nil) != (err == nil) {
+				t.Errorf("CheckKeys says %v, the parser says %v", err, parseErr)
+			}
+		})
+	}
+}
+
 func TestKeysComeFromTheFile(t *testing.T) {
 	t.Run("tokens are refused until the file is there, and then accepted", func(t *testing.T) {
 		f := newFixture(t, nil)

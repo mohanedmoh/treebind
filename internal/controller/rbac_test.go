@@ -35,12 +35,17 @@ const (
 	claims     = "persistentvolumeclaims"
 	volumes    = "persistentvolumes"
 	verbGet    = "get"
+	verbList   = "list"
+	verbWatch  = "watch"
 	verbDelete = "delete"
+
+	// appsGroup is the API group of the StatefulSets the operator manages.
+	appsGroup = "apps"
 )
 
 var (
 	volumeResources = []string{claims, volumes}
-	readOnlyVerbs   = []string{verbGet, "list", "watch"}
+	readOnlyVerbs   = []string{verbGet, verbList, verbWatch}
 )
 
 type policyRule struct {
@@ -137,8 +142,8 @@ func TestVolumeWriteRules(t *testing.T) {
 		rule policyRule
 		want bool
 	}{
-		{"no rule on volumes", policyRule{[]string{"apps"}, []string{"statefulsets"}, []string{verbDelete}}, false},
-		{"read access on claims", policyRule{[]string{""}, []string{claims}, []string{verbGet, "list", "watch"}}, false},
+		{"no rule on volumes", policyRule{[]string{appsGroup}, []string{"statefulsets"}, []string{verbDelete}}, false},
+		{"read access on claims", policyRule{[]string{""}, []string{claims}, []string{verbGet, verbList, verbWatch}}, false},
 		{"read access on volumes", policyRule{[]string{""}, []string{volumes}, []string{verbGet}}, false},
 		{"delete on claims", policyRule{[]string{""}, []string{claims}, []string{verbGet, verbDelete}}, true},
 		{"patch on claim status", policyRule{[]string{""}, []string{claims + "/status"}, []string{"patch"}}, true},
@@ -147,12 +152,108 @@ func TestVolumeWriteRules(t *testing.T) {
 		{"patch on the status of every core resource", policyRule{[]string{""}, []string{"*/status"}, []string{"patch"}}, true},
 		{"delete on every core resource", policyRule{[]string{""}, []string{"*"}, []string{verbDelete}}, true},
 		{"delete on every resource of every group", policyRule{[]string{"*"}, []string{"*"}, []string{verbDelete}}, true},
-		{"delete on every resource of another group", policyRule{[]string{"apps"}, []string{"*"}, []string{verbDelete}}, false},
+		{"delete on every resource of another group", policyRule{[]string{appsGroup}, []string{"*"}, []string{verbDelete}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := len(volumeWriteRules([]policyRule{tt.rule})) > 0; got != tt.want {
 				t.Errorf("volumeWriteRules(%+v) flags a write = %v, want %v", tt.rule, got, tt.want)
+			}
+		})
+	}
+}
+
+// The operator keeps the public keys the agents check its token against in a
+// ConfigMap per Treebind (docs/adr/0015). Creating ConfigMaps and patching its own
+// is all it may do with them: it never reads one, so a ConfigMap of someone else
+// stays unread, and it never deletes one, so the garbage collector does that. It
+// never reads a Secret either (NFR-21), so no rule may reach Secrets at all.
+const (
+	configMaps = "configmaps"
+	secrets    = "secrets"
+	verbCreate = "create"
+	verbPatch  = "patch"
+)
+
+// coversCoreResource reports whether a rule can apply to the named core resource,
+// by name or through a wildcard, including its subresources.
+func coversCoreResource(rule policyRule, resource string) bool {
+	if !slices.Contains(rule.APIGroups, "") && !slices.Contains(rule.APIGroups, "*") {
+		return false
+	}
+	return slices.ContainsFunc(rule.Resources, func(candidate string) bool {
+		base, _, _ := strings.Cut(candidate, "/")
+		return base == "*" || base == resource
+	})
+}
+
+// configMapAndSecretViolations returns the rules that give more than create and
+// patch on ConfigMaps, or any access to Secrets. A wildcard verb counts as more.
+func configMapAndSecretViolations(rules []policyRule) []policyRule {
+	var violations []policyRule
+	for _, rule := range rules {
+		if coversCoreResource(rule, secrets) {
+			violations = append(violations, rule)
+			continue
+		}
+		if coversCoreResource(rule, configMaps) &&
+			slices.ContainsFunc(rule.Verbs, func(verb string) bool { return verb != verbCreate && verb != verbPatch }) {
+			violations = append(violations, rule)
+		}
+	}
+	return violations
+}
+
+func TestOperatorRolesGiveConfigMapsOnlyCreateAndPatchAndSecretsNothing(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("..", "..", "config", "rbac", "role.yaml"),
+		filepath.Join("..", "..", "charts", "treebind", "templates", "rbac", "manager-role.yaml"),
+	} {
+		t.Run(path, func(t *testing.T) {
+			rules := rulesFrom(t, path)
+			if violations := configMapAndSecretViolations(rules); len(violations) > 0 {
+				t.Errorf("the operator may read or change more than it needs to: %+v", violations)
+			}
+			// The check above passes when the rule is missing, and then the operator could
+			// not publish its keys.
+			if !slices.ContainsFunc(rules, func(rule policyRule) bool {
+				return slices.Contains(rule.APIGroups, "") && slices.Contains(rule.Resources, configMaps) &&
+					slices.Contains(rule.Verbs, verbCreate) && slices.Contains(rule.Verbs, verbPatch)
+			}) {
+				t.Error("the operator may not create and patch ConfigMaps, so it cannot publish the keys")
+			}
+		})
+	}
+}
+
+// The check above passes when no rule exists, so this keeps it from passing
+// because the detector is broken.
+func TestConfigMapAndSecretViolations(t *testing.T) {
+	tests := []struct {
+		name string
+		rule policyRule
+		want bool
+	}{
+		{"create and patch on ConfigMaps", policyRule{[]string{""}, []string{configMaps}, []string{verbCreate, verbPatch}}, false},
+		{"no rule on either", policyRule{[]string{appsGroup}, []string{"statefulsets"}, []string{verbDelete}}, false},
+		{"get on ConfigMaps", policyRule{[]string{""}, []string{configMaps}, []string{verbCreate, verbPatch, verbGet}}, true},
+		{"list on ConfigMaps", policyRule{[]string{""}, []string{configMaps}, []string{verbList}}, true},
+		{"watch on ConfigMaps", policyRule{[]string{""}, []string{configMaps}, []string{verbWatch}}, true},
+		{"update on ConfigMaps", policyRule{[]string{""}, []string{configMaps}, []string{"update"}}, true},
+		{"delete on ConfigMaps", policyRule{[]string{""}, []string{configMaps}, []string{verbDelete}}, true},
+		{"a wildcard verb on ConfigMaps", policyRule{[]string{""}, []string{configMaps}, []string{"*"}}, true},
+		{"get on every core resource", policyRule{[]string{""}, []string{"*"}, []string{verbGet}}, true},
+		{"get on every resource of every group", policyRule{[]string{"*"}, []string{"*"}, []string{verbGet}}, true},
+		{"get on a ConfigMap subresource", policyRule{[]string{""}, []string{configMaps + "/status"}, []string{verbGet}}, true},
+		{"get on Secrets", policyRule{[]string{""}, []string{secrets}, []string{verbGet}}, true},
+		{"create on Secrets", policyRule{[]string{""}, []string{secrets}, []string{verbCreate}}, true},
+		{"get on ConfigMaps of another group", policyRule{[]string{"example.org"}, []string{configMaps}, []string{verbGet}}, false},
+		{"get on Secrets of another group", policyRule{[]string{"example.org"}, []string{secrets}, []string{verbGet}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := len(configMapAndSecretViolations([]policyRule{tt.rule})) > 0; got != tt.want {
+				t.Errorf("configMapAndSecretViolations(%+v) flags a violation = %v, want %v", tt.rule, got, tt.want)
 			}
 		})
 	}

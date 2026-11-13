@@ -137,6 +137,12 @@ func (a agentSettings) validate() error {
 
 // desiredService returns the headless Service that gives the sync pod its
 // stable identity. The owner reference is added by the caller.
+//
+// The name of the pod, <name>-sync-0.<name>-sync.<namespace>.svc, is how the
+// operator reaches the agent. A headless Service publishes the name of a pod only
+// once the pod is ready, and the agent is not ready until it has synced, so
+// without publishNotReadyAddresses the operator could not reach an agent that is
+// up and has nothing to sync yet. The Service has no port and nothing else uses it.
 func desiredService(treebind *treebindv1alpha1.Treebind) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -145,8 +151,9 @@ func desiredService(treebind *treebindv1alpha1.Treebind) *corev1.Service {
 			Labels:    objectLabels(treebind),
 		},
 		Spec: corev1.ServiceSpec{
-			ClusterIP: corev1.ClusterIPNone,
-			Selector:  podLabels(treebind),
+			ClusterIP:                corev1.ClusterIPNone,
+			Selector:                 podLabels(treebind),
+			PublishNotReadyAddresses: true,
 		},
 	}
 }
@@ -331,6 +338,7 @@ func (r *TreebindReconciler) ensureService(ctx context.Context, treebind *treebi
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
 		service.Labels = mergeMap(service.Labels, desired.Labels)
 		service.Spec.Selector = desired.Spec.Selector
+		service.Spec.PublishNotReadyAddresses = desired.Spec.PublishNotReadyAddresses
 		// The cluster IP cannot change after creation.
 		if service.CreationTimestamp.IsZero() {
 			service.Spec.ClusterIP = desired.Spec.ClusterIP
