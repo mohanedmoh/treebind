@@ -471,6 +471,13 @@ spec:
                       subPath is a directory inside the claim. Only that directory is synced
                       with the repository. The whole claim is used when it is empty. It cannot
                       be changed after creation.
+
+                      The sync agent keeps its Git directory and the rest of its own state in a
+                      directory called .treebind at the root of the claim. With a subPath it is
+                      beside the synced directory, so an application that mounts the claim with
+                      the same subPath does not see it. Without one it is inside the synced
+                      directory, where the application can see it. So an application should mount
+                      only the subPath, and the subPath cannot start with .treebind.
                     maxLength: 1024
                     type: string
                     x-kubernetes-validations:
@@ -482,6 +489,9 @@ spec:
                         segment
                       rule: '!self.endsWith(''/'') && !(''.'' in self.split(''/''))
                         && !(''.git'' in self.split(''/''))'
+                    - message: subPath must not start with '.treebind', which the
+                        sync agent keeps for its own state
+                      rule: self.split('/')[0] != '.treebind'
                 required:
                 - claimName
                 type: object

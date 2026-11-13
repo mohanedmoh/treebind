@@ -252,6 +252,27 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 		}
 	}
 
+	env := []corev1.EnvVar{
+		{Name: agentconfig.EnvName, Value: treebind.Name},
+		{Name: agentconfig.EnvNamespace, ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+		}},
+		{Name: agentconfig.EnvMountPath, Value: mountPath},
+	}
+	// The variable is left out when the whole claim is synced, so that a pod template
+	// that never had a sub path does not change, and its pod is not replaced, when the
+	// operator learns to pass one on.
+	if subPath := treebind.Spec.Target.SubPath; subPath != "" {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSubPath, Value: subPath})
+	}
+	env = append(env,
+		corev1.EnvVar{Name: agentconfig.EnvStatusAddr, Value: fmt.Sprintf(":%d", statusPort)},
+		corev1.EnvVar{Name: agentconfig.EnvStatusIssuer, Value: agent.StatusIssuer},
+		corev1.EnvVar{Name: agentconfig.EnvStatusAudience, Value: statusAudience(treebind)},
+		corev1.EnvVar{Name: agentconfig.EnvStatusSubject, Value: agent.StatusSubject},
+		corev1.EnvVar{Name: agentconfig.EnvStatusKeysFile, Value: path.Join(statusKeysMountPath, statusKeysFile)},
+	)
+
 	runAsNonRoot, noEscalation, readOnlyRoot, noToken := true, false, true, false
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: objectLabels(treebind)},
@@ -266,18 +287,7 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 			Containers: []corev1.Container{{
 				Name:  agentContainerName,
 				Image: agent.Image,
-				Env: []corev1.EnvVar{
-					{Name: agentconfig.EnvName, Value: treebind.Name},
-					{Name: agentconfig.EnvNamespace, ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
-					}},
-					{Name: agentconfig.EnvMountPath, Value: mountPath},
-					{Name: agentconfig.EnvStatusAddr, Value: fmt.Sprintf(":%d", statusPort)},
-					{Name: agentconfig.EnvStatusIssuer, Value: agent.StatusIssuer},
-					{Name: agentconfig.EnvStatusAudience, Value: statusAudience(treebind)},
-					{Name: agentconfig.EnvStatusSubject, Value: agent.StatusSubject},
-					{Name: agentconfig.EnvStatusKeysFile, Value: path.Join(statusKeysMountPath, statusKeysFile)},
-				},
+				Env:   env,
 				Ports: []corev1.ContainerPort{{Name: statusPortName, ContainerPort: statusPort, Protocol: corev1.ProtocolTCP}},
 				// Not ready until the agent has synced, which it cannot yet. A failing
 				// check of the volume does not make it unhealthy: a restart would not
