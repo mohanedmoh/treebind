@@ -63,6 +63,10 @@ type Report struct {
 	StartedAt time.Time `json:"startedAt"`
 	// Time is when the report was made, by the agent's clock.
 	Time time.Time `json:"time"`
+	// CheckedAt is when the checks last finished. It is absent until they first
+	// have, and then Checks is empty because they are still to run, not because
+	// nothing failed. A reader can also tell from it how old the results are.
+	CheckedAt time.Time `json:"checkedAt,omitzero"`
 	// Checks are the results of the preflight checks, in the order they ran.
 	Checks []Check `json:"checks"`
 }
@@ -131,7 +135,7 @@ func NewHandler(source func() Report, verifier Verifier) *Handler {
 // else. Any other path is not found, for anyone.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// No answer of this endpoint may be stored, whatever it says.
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", noStore)
 
 	// The path is compared as it was sent. Nothing is cleaned, decoded or
 	// redirected, so "//status" and "/%73tatus" are other paths.
@@ -159,9 +163,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, reason)
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !readOnlyMethod(w, r) {
 		return
 	}
 
@@ -194,6 +196,17 @@ func (h *Handler) refuse(w http.ResponseWriter, reason error) {
 	}
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// readOnlyMethod reports whether the request is a GET or a HEAD, and answers 405
+// when it is not.
+func readOnlyMethod(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	w.Header().Set("Allow", "GET, HEAD")
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	return false
 }
 
 // bearerToken returns the token of an "Authorization: Bearer <token>" header. A

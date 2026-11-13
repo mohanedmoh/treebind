@@ -35,7 +35,6 @@ import (
 
 const (
 	goodToken = "good.token.value"
-	noStore   = "no-store"
 )
 
 // verifierFunc lets a function be the Verifier.
@@ -98,6 +97,25 @@ func TestReportFormat(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d, want 200", w.Code)
 	}
+	if got := w.Body.String(); got != want {
+		t.Errorf("the report changed:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestReportFormatAfterTheChecksRan(t *testing.T) {
+	const want = `{"version":1,"treebind":{"namespace":"apps","name":"dashboards"},` +
+		`"startedAt":"2026-11-12T09:00:00Z","time":"2026-11-12T09:30:00Z","checkedAt":"2026-11-12T09:10:00Z","checks":[]}`
+	handler := NewHandler(func() Report {
+		return Report{
+			Treebind:  Treebind{Namespace: "apps", Name: "dashboards"},
+			StartedAt: started,
+			CheckedAt: time.Date(2026, 11, 12, 9, 10, 0, 0, time.UTC),
+		}
+	}, onlyGoodToken)
+	handler.now = func() time.Time { return reported }
+
+	w := request(handler, http.MethodGet, Path, "Bearer "+goodToken)
+
 	if got := w.Body.String(); got != want {
 		t.Errorf("the report changed:\n got %s\nwant %s", got, want)
 	}

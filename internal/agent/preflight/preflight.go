@@ -95,6 +95,17 @@ type Result struct {
 	Message string
 }
 
+// AnyFailed reports whether one of the results failed. A skipped check is not a
+// failure.
+func AnyFailed(results []Result) bool {
+	for _, result := range results {
+		if result.Outcome == Failed {
+			return true
+		}
+	}
+	return false
+}
+
 // Volume runs the checks on the directory where the agent writes, in order, and
 // returns one result for each. The writable check is skipped when the mount check
 // failed, because a directory that is not usable cannot be tested. The checks
