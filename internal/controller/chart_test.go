@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -48,13 +49,15 @@ const (
 
 // deployment holds the fields of a Deployment that the check reads.
 type deployment struct {
-	Spec struct {
+	Metadata metav1.ObjectMeta `json:"metadata"`
+	Spec     struct {
 		Replicas *int32               `json:"replicas"`
 		Selector metav1.LabelSelector `json:"selector"`
 		Template struct {
 			Metadata metav1.ObjectMeta `json:"metadata"`
 			Spec     struct {
 				SecurityContext               *corev1.PodSecurityContext `json:"securityContext"`
+				ServiceAccountName            string                     `json:"serviceAccountName"`
 				TerminationGracePeriodSeconds *int64                     `json:"terminationGracePeriodSeconds"`
 				Containers                    []corev1.Container         `json:"containers"`
 			} `json:"spec"`
@@ -70,10 +73,16 @@ type chartValues struct {
 		HealthProbe struct {
 			Port int32 `json:"port"`
 		} `json:"healthProbe"`
-		PodSecurityContext            *corev1.PodSecurityContext  `json:"podSecurityContext"`
-		SecurityContext               *corev1.SecurityContext     `json:"securityContext"`
-		Resources                     corev1.ResourceRequirements `json:"resources"`
-		TerminationGracePeriodSeconds *int64                      `json:"terminationGracePeriodSeconds"`
+		PodSecurityContext            *corev1.PodSecurityContext        `json:"podSecurityContext"`
+		SecurityContext               *corev1.SecurityContext           `json:"securityContext"`
+		Resources                     corev1.ResourceRequirements       `json:"resources"`
+		TerminationGracePeriodSeconds *int64                            `json:"terminationGracePeriodSeconds"`
+		Strategy                      appsv1.DeploymentStrategy         `json:"strategy"`
+		TopologySpreadConstraints     []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints"`
+		PodDisruptionBudget           struct {
+			Enabled        bool  `json:"enabled"`
+			MaxUnavailable int32 `json:"maxUnavailable"`
+		} `json:"podDisruptionBudget"`
 	} `json:"manager"`
 }
 
@@ -82,7 +91,18 @@ var (
 	inlineExpression = regexp.MustCompile(`\{\{.*?\}\}`)
 	// documentMarker matches the line that separates YAML documents.
 	documentMarker = regexp.MustCompile(`(?m)^---[ \t\r]*$`)
+	// nonWord matches what a placeholder leaves out of an expression.
+	nonWord = regexp.MustCompile(`[^A-Za-z0-9]+`)
 )
+
+// placeholder stands in for a Helm expression that these tests cannot evaluate. The
+// same expression gives the same text, so two fields that the chart fills from one
+// expression compare equal, and two that differ do not. The text is made of letters,
+// digits and underscores, and ends with a letter or a digit, so that it is a valid
+// label value where an expression stands in for one.
+func placeholder(expression string) string {
+	return "HELM_" + strings.Trim(nonWord.ReplaceAllString(expression, "_"), "_")
+}
 
 func readRepoFile(t *testing.T, elem ...string) string {
 	t.Helper()
@@ -94,27 +114,41 @@ func readRepoFile(t *testing.T, elem ...string) string {
 	return string(data)
 }
 
+// configManifest returns the document of one kind from a file under config/. A file
+// that holds no such kind fails the test, so a change of kind is reported by name.
+func configManifest(t *testing.T, kind string, elem ...string) []byte {
+	t.Helper()
+	for _, doc := range documentMarker.Split(readRepoFile(t, append([]string{"config"}, elem...)...), -1) {
+		var found struct {
+			Kind string `json:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &found); err != nil {
+			t.Fatalf("parse config/%s: %v", filepath.Join(elem...), err)
+		}
+		if found.Kind == kind {
+			return []byte(doc)
+		}
+	}
+	t.Fatalf("config/%s has no %s", filepath.Join(elem...), kind)
+	return nil
+}
+
+// parse reads a manifest into the type that the check needs.
+func parse[T any](t *testing.T, source string, doc []byte) T {
+	t.Helper()
+	var result T
+	if err := yaml.Unmarshal(doc, &result); err != nil {
+		t.Fatalf("parse %s: %v", source, err)
+	}
+	return result
+}
+
 // configDeployment reads the Deployment from config/manager/manager.yaml, which
 // also holds the namespace.
 func configDeployment(t *testing.T) deployment {
 	t.Helper()
-	for _, doc := range documentMarker.Split(readRepoFile(t, "config", "manager", "manager.yaml"), -1) {
-		var kind struct {
-			Kind string `json:"kind"`
-		}
-		if err := yaml.Unmarshal([]byte(doc), &kind); err != nil {
-			t.Fatalf("parse config/manager/manager.yaml: %v", err)
-		}
-		if kind.Kind == "Deployment" {
-			var result deployment
-			if err := yaml.Unmarshal([]byte(doc), &result); err != nil {
-				t.Fatalf("parse the Deployment in config/manager/manager.yaml: %v", err)
-			}
-			return result
-		}
-	}
-	t.Fatal("config/manager/manager.yaml has no Deployment")
-	return deployment{}
+	return parse[deployment](t, "the Deployment in config/manager/manager.yaml",
+		configManifest(t, "Deployment", "manager", "manager.yaml"))
 }
 
 func defaultValues(t *testing.T) chartValues {
@@ -126,13 +160,36 @@ func defaultValues(t *testing.T) chartValues {
 	return values
 }
 
-// chartDeployment reads the fixed text of the chart's Deployment template. Lines
-// that hold only a Helm directive are dropped, which flattens every conditional:
-// the content of all its branches stays. That is only sound for text outside a
-// conditional, which is all this test compares, so a field that moves under an
-// if/else shows up as a key set twice and fails the parse. The few numbers the
-// template takes from the values are filled in from the defaults, and every other
-// expression becomes a placeholder.
+// flattenTemplate reads the fixed text of a Helm template. Lines that hold only a
+// Helm directive are dropped, which flattens every conditional: the content of all
+// its branches stays. That is only sound for text outside a conditional, which is
+// all these tests compare, so a field that moves under an if/else shows up as a key
+// set twice and fails the parse. The expressions in numbers are replaced by the
+// text they map to, and every other expression becomes a placeholder.
+func flattenTemplate(t *testing.T, numbers *strings.Replacer, elem ...string) []byte {
+	t.Helper()
+	var kept []string
+	for line := range strings.SplitSeq(readRepoFile(t, elem...), "\n") {
+		if helmDirective.MatchString(line) {
+			continue
+		}
+		kept = append(kept, inlineExpression.ReplaceAllStringFunc(numbers.Replace(line), placeholder))
+	}
+
+	rendered := []byte(strings.Join(kept, "\n"))
+	// Strict parsing into a generic map reports a key that is set twice, which is
+	// what a conditional around a field leaves behind. The lenient parse of the
+	// caller would keep the last one and could compare the wrong branch.
+	if err := yaml.UnmarshalStrict(rendered, &map[string]any{}); err != nil {
+		t.Fatalf("the template %s sets a key twice or does not parse, "+
+			"which happens when a field that these tests compare sits under a condition: %v",
+			filepath.Join(elem...), err)
+	}
+	return rendered
+}
+
+// chartDeployment reads the fixed text of the chart's Deployment template. The few
+// numbers the template takes from the values are filled in from the defaults.
 func chartDeployment(t *testing.T, values chartValues) deployment {
 	t.Helper()
 	var grace int64
@@ -144,29 +201,8 @@ func chartDeployment(t *testing.T, values chartValues) deployment {
 		"{{ .Values.manager.replicas }}", fmt.Sprint(values.Manager.Replicas),
 		"{{ .Values.manager.terminationGracePeriodSeconds }}", fmt.Sprint(grace),
 	)
-
-	var kept []string
-	for line := range strings.SplitSeq(readRepoFile(t, "charts", "treebind", "templates", "manager", "manager.yaml"), "\n") {
-		if helmDirective.MatchString(line) {
-			continue
-		}
-		kept = append(kept, inlineExpression.ReplaceAllString(numbers.Replace(line), "HELM"))
-	}
-
-	rendered := []byte(strings.Join(kept, "\n"))
-	// Strict parsing into a generic map reports a key that is set twice, which is
-	// what a conditional around a field leaves behind. The lenient parse below
-	// would keep the last one and could compare the wrong branch.
-	if err := yaml.UnmarshalStrict(rendered, &map[string]any{}); err != nil {
-		t.Fatalf("the Deployment template of the chart sets a key twice or does not parse, "+
-			"which happens when a field that this test compares sits under a condition: %v", err)
-	}
-
-	var result deployment
-	if err := yaml.Unmarshal(rendered, &result); err != nil {
-		t.Fatalf("parse the Deployment template of the chart: %v", err)
-	}
-	return result
+	return parse[deployment](t, "the Deployment template of the chart",
+		flattenTemplate(t, numbers, "charts", "treebind", "templates", "manager", "manager.yaml"))
 }
 
 func container(t *testing.T, source string, containers []corev1.Container) corev1.Container {

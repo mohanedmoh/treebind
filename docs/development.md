@@ -52,8 +52,13 @@ again after a code change: the cluster is reused and the images are rebuilt.
 make dev
 kubectl apply -f config/samples/treebind_v1alpha1_treebind.yaml
 kubectl get treebind,statefulset,service,pod
-kubectl -n treebind-system logs deploy/treebind-controller-manager -f
+kubectl -n treebind-system logs -l control-plane=controller-manager --prefix -f
 ```
+
+The operator runs as two replicas here, as it does everywhere, and the one that
+holds the lease reconciles. The other waits for the lease and reconciles nothing,
+which is why the command above reads the logs of both. To work with a single
+replica, see [operator-replicas.md](operator-replicas.md#running-one-replica).
 
 The operator creates a one-replica StatefulSet and a headless Service, both named
 `treebind-sample-sync`, and reports `Ready` in the Treebind's status. The sample
@@ -114,8 +119,10 @@ The chart's copies of the CRD and of the operator's role are generated from
 `config/`; do not edit them by hand. The chart's manager Deployment is written
 by hand. `make test` compares it with `config/manager/manager.yaml` and names
 the field that differs, so change both when you change one: the arguments, the
-probes and ports, the security contexts, the resources and the replica count. It
-does not look at the agent image or the metrics flags.
+probes and ports, the security contexts, the resources, the replica count, the
+rolling update strategy and the topology spread. It does the same for the
+PodDisruptionBudget and the leader election role. It does not look at the agent
+image or the metrics flags.
 
 ## Working with Git
 

@@ -21,7 +21,17 @@ spec:
     matchLabels:
       control-plane: controller-manager
       app.kubernetes.io/name: treebind
-  replicas: 1
+  # Two replicas, so that the control loop survives the loss of one pod or node.
+  # Leader election (--leader-elect below) lets one of them reconcile at a time;
+  # the other waits for the lease. See docs/operator-replicas.md.
+  replicas: 2
+  # An update starts the new replica and waits for it to be ready before it stops
+  # an old one, so the number of ready replicas never drops below two.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       annotations:
@@ -30,6 +40,20 @@ spec:
         control-plane: controller-manager
         app.kubernetes.io/name: treebind
     spec:
+      # Prefer to put the replicas on different nodes. The rule is soft, so both
+      # replicas still schedule on a cluster with one node, such as kind or k3s.
+      # Counting only the pods of the same revision (pod-template-hash) keeps the
+      # replicas apart across a rolling update as well.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            control-plane: controller-manager
+            app.kubernetes.io/name: treebind
+        matchLabelKeys:
+        - pod-template-hash
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
       # It is considered best practice to support multiple architectures. You can

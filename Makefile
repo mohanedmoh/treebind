@@ -218,7 +218,8 @@ dev: ko ## Create a kind cluster, build the images into it, deploy the operator 
 	echo ""; \
 	echo "  kubectl apply -f config/samples/treebind_v1alpha1_treebind.yaml"; \
 	echo "  kubectl get treebind,statefulset,service"; \
-	echo "  kubectl -n treebind-system logs deploy/treebind-controller-manager -f"; \
+	echo "  kubectl -n treebind-system logs -l control-plane=controller-manager --prefix -f"; \
+	echo "  kubectl -n treebind-system get lease   # HOLDER is the replica that reconciles"; \
 	echo ""; \
 	echo "  kubectl -n treebind-dev port-forward svc/git-remote 9418:9418 &"; \
 	echo "  git clone git://127.0.0.1/sample.git"; \
