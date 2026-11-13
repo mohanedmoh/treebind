@@ -53,9 +53,25 @@ patches:
 #  target:
 #    kind: Deployment
 
+# The operator may mint tokens of its own service account and of no other
+# (rbac/token_role.yaml). The name prefix reaches the name of the Role and of the
+# service account but not the resourceNames of a rule, so the name that the service
+# account ends up with is copied into the rule here.
+replacements:
+- source:
+    kind: ServiceAccount
+    name: controller-manager
+    fieldPath: metadata.name
+  targets:
+  - select:
+      kind: Role
+      name: token-role
+    fieldPaths:
+    - rules.0.resourceNames.0
+
 # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
 # Uncomment the following replacements to add the cert-manager CA injection annotations
-#replacements:
+# (as items of the replacements list above, without a second "replacements:" key)
 # - source: # Uncomment the following block to enable certificates for metrics
 #     kind: Service
 #     version: v1

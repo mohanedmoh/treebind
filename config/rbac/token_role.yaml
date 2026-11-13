@@ -1,0 +1,20 @@
+# The operator asks the API server for tokens of its own service account, to call
+# the sync agents with (docs/adr/0015). The Role lets it do that for this one
+# service account in this namespace, and for no other, so it cannot get a token
+# for anything else in the cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: treebind
+    app.kubernetes.io/managed-by: kustomize
+  name: token-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  resourceNames:
+  - controller-manager
+  verbs:
+  - create

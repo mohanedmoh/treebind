@@ -247,8 +247,8 @@ func TestConfigMapAndSecretViolations(t *testing.T) {
 		{"get on a ConfigMap subresource", policyRule{[]string{""}, []string{configMaps + "/status"}, []string{verbGet}}, true},
 		{"get on Secrets", policyRule{[]string{""}, []string{secrets}, []string{verbGet}}, true},
 		{"create on Secrets", policyRule{[]string{""}, []string{secrets}, []string{verbCreate}}, true},
-		{"get on ConfigMaps of another group", policyRule{[]string{"example.org"}, []string{configMaps}, []string{verbGet}}, false},
-		{"get on Secrets of another group", policyRule{[]string{"example.org"}, []string{secrets}, []string{verbGet}}, false},
+		{"get on ConfigMaps of another group", policyRule{[]string{foreignGroup}, []string{configMaps}, []string{verbGet}}, false},
+		{"get on Secrets of another group", policyRule{[]string{foreignGroup}, []string{secrets}, []string{verbGet}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
