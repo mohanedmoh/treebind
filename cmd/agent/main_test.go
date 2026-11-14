@@ -47,6 +47,8 @@ func environment(extra map[string]string) func(string) string {
 		config.EnvStatusAddr:     "127.0.0.1:0",
 		config.EnvMountPath:      "/work",
 		config.EnvRepoURL:        "https://example.com/acme/dashboards.git",
+		config.EnvSyncDirection:  config.DirectionBidirectional,
+		config.EnvPodName:        "dashboards-sync-0",
 	}
 	maps.Copy(env, extra)
 	return func(name string) string { return env[name] }

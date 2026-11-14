@@ -53,7 +53,13 @@ func agentEnvironmentOf(container corev1.Container) map[string]string {
 	for _, variable := range container.Env {
 		env[variable.Name] = variable.Value
 		if variable.ValueFrom != nil {
-			env[variable.Name] = testNamespace // metadata.namespace, the only field the pod reads
+			// The two fields the pod reads from its own metadata.
+			switch variable.ValueFrom.FieldRef.FieldPath {
+			case "metadata.namespace":
+				env[variable.Name] = testNamespace
+			case fieldPodName:
+				env[variable.Name] = testPodName
+			}
 		}
 	}
 	return env
@@ -73,7 +79,7 @@ func TestAgentEnvironmentWithASubPath(t *testing.T) {
 	}
 	want := []string{
 		"TREEBIND_NAME", "TREEBIND_NAMESPACE", "TREEBIND_MOUNT_PATH", "TREEBIND_SUB_PATH",
-		"TREEBIND_REPO_URL", "TREEBIND_REPO_BRANCH", "TREEBIND_STATUS_ADDR", "TREEBIND_STATUS_ISSUER", "TREEBIND_STATUS_AUDIENCE",
+		"TREEBIND_REPO_URL", "TREEBIND_REPO_BRANCH", "TREEBIND_SYNC_DIRECTION", "TREEBIND_POD_NAME", "TREEBIND_STATUS_ADDR", "TREEBIND_STATUS_ISSUER", "TREEBIND_STATUS_AUDIENCE",
 		"TREEBIND_STATUS_SUBJECT", "TREEBIND_STATUS_KEYS_FILE",
 	}
 	if !reflect.DeepEqual(names, want) {

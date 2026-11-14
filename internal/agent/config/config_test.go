@@ -20,6 +20,7 @@ import (
 	"maps"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -33,10 +34,13 @@ const (
 	sshURL   = "ssh://git@example.com/acme/dashboards.git"
 	keyFile  = "/etc/treebind/ssh/id_ed25519"
 	hostFile = "/etc/treebind/known-hosts/known_hosts"
+	podName  = "dashboards-sync-0"
 
-	branchRelease  = "release/1.2"
-	problemScheme  = "must use ssh:// or https://"
-	problemControl = "whitespace or control"
+	branchRelease   = "release/1.2"
+	problemScheme   = "must use ssh:// or https://"
+	problemControl  = "whitespace or control"
+	problemLeast    = "must be at least 1s"
+	problemDuration = "must be a duration"
 )
 
 func complete() map[string]string {
@@ -47,6 +51,8 @@ func complete() map[string]string {
 		EnvStatusAudience: audience,
 		EnvStatusSubject:  subject,
 		EnvRepoURL:        repoURL,
+		EnvSyncDirection:  DirectionBidirectional,
+		EnvPodName:        podName,
 	}
 }
 
@@ -62,6 +68,7 @@ func TestFromEnvReadsTheSettingsAndFillsTheDefaults(t *testing.T) {
 	}
 	want := Config{
 		Namespace: "apps", Name: "dashboards", MountPath: DefaultMountPath, RepoURL: repoURL,
+		SyncInterval: DefaultSyncInterval, SyncDirection: DirectionBidirectional, PodName: podName,
 		StatusAddr:     DefaultStatusAddr,
 		StatusIssuer:   issuer,
 		StatusAudience: audience,
@@ -424,6 +431,116 @@ func TestCheckBranch(t *testing.T) {
 				t.Errorf("CheckBranch(%q) = %v, want a problem that says %q", tt.branch, err, tt.want)
 			}
 		})
+	}
+}
+
+func TestFromEnvTakesHowToSyncAndWhoThePodIs(t *testing.T) {
+	env := complete()
+	env[EnvSyncInterval] = "2m"
+	env[EnvSyncDirection] = DirectionPull
+	env[EnvPodName] = "another-sync-0"
+
+	config, err := fromMap(env)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.SyncInterval != 2*time.Minute || config.SyncDirection != DirectionPull || config.PodName != "another-sync-0" {
+		t.Errorf("the settings were not taken: %+v", config)
+	}
+}
+
+func TestFromEnvRefusesWhatCannotBeSyncedWith(t *testing.T) {
+	tests := []struct {
+		name   string
+		change map[string]string
+		want   string
+	}{
+		{"no direction", map[string]string{EnvSyncDirection: ""}, EnvSyncDirection + " is not set"},
+		{"a direction that is not one", map[string]string{EnvSyncDirection: "push"}, EnvSyncDirection + " must be pull or bidirectional"},
+		{"a direction in capitals", map[string]string{EnvSyncDirection: "Pull"}, EnvSyncDirection + " must be pull or bidirectional"},
+		{"no pod name", map[string]string{EnvPodName: ""}, EnvPodName + " is not set"},
+		{"an interval that is not a duration", map[string]string{EnvSyncInterval: "soon"}, EnvSyncInterval + " must be a duration such as 30s or 5m"},
+		{"an interval in days", map[string]string{EnvSyncInterval: "1d"}, EnvSyncInterval + " " + problemDuration},
+		{"an interval of nothing but a number", map[string]string{EnvSyncInterval: "30"}, EnvSyncInterval + " " + problemDuration},
+		{"an interval below the least", map[string]string{EnvSyncInterval: "999ms"}, EnvSyncInterval + " " + problemLeast},
+		{"an interval of nothing", map[string]string{EnvSyncInterval: "0s"}, EnvSyncInterval + " " + problemLeast},
+		{"a negative interval", map[string]string{EnvSyncInterval: "-30s"}, EnvSyncInterval + " " + problemLeast},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := complete()
+			maps.Copy(env, test.change)
+
+			_, err := fromMap(env)
+
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("got %v, want a problem that says %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestFromEnvSaysABadIntervalWithTheOtherProblems(t *testing.T) {
+	env := complete()
+	env[EnvSyncInterval] = "soon"
+	env[EnvNamespace] = ""
+
+	_, err := fromMap(env)
+
+	if err == nil || !strings.Contains(err.Error(), EnvSyncInterval) || !strings.Contains(err.Error(), EnvNamespace+" is not set") {
+		t.Errorf("error = %v, want both problems at once", err)
+	}
+}
+
+func TestCheckSyncInterval(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want time.Duration
+		err  string
+	}{
+		{"", DefaultSyncInterval, ""},
+		{"30s", 30 * time.Second, ""},
+		{"1s", time.Second, ""},
+		{"1.5s", 1500 * time.Millisecond, ""},
+		{"1m0s", time.Minute, ""},
+		{"1h30m", 90 * time.Minute, ""},
+		{"2562047h47m16.854775807s", time.Duration(1<<63 - 1), ""},
+		{"1000ms", time.Second, ""},
+		{"999ms", 0, problemLeast},
+		{"0s", 0, problemLeast},
+		{"-1s", 0, problemLeast},
+		{"0", 0, problemLeast},
+		{"30", 0, problemDuration},
+		{"1d", 0, problemDuration},
+		{" 30s", 0, problemDuration},
+		{"30 s", 0, problemDuration},
+		{"s", 0, problemDuration},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := CheckSyncInterval(tt.raw)
+
+			switch {
+			case tt.err == "" && (err != nil || got != tt.want):
+				t.Errorf("CheckSyncInterval(%q) = %v, %v, want %v", tt.raw, got, err, tt.want)
+			case tt.err != "" && (err == nil || !strings.Contains(err.Error(), tt.err)):
+				t.Errorf("CheckSyncInterval(%q) = %v, %v, want a problem that says %q", tt.raw, got, err, tt.err)
+			}
+		})
+	}
+}
+
+func TestCheckSyncDirection(t *testing.T) {
+	for _, accepted := range []string{DirectionPull, DirectionBidirectional, "pull", "bidirectional"} {
+		if err := CheckSyncDirection(accepted); err != nil {
+			t.Errorf("CheckSyncDirection(%q) = %v, want it accepted", accepted, err)
+		}
+	}
+	for _, refused := range []string{"", "push", "Pull", " pull", "pull ", "both", "bidirectional "} {
+		if err := CheckSyncDirection(refused); err == nil {
+			t.Errorf("CheckSyncDirection(%q) was accepted", refused)
+		}
 	}
 }
 
