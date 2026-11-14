@@ -208,7 +208,7 @@ func TestServesTheReport(t *testing.T) {
 		t.Errorf("checkedAt %s is not after startedAt %s: the checks finished after the agent started", report.CheckedAt, report.StartedAt)
 	}
 	checks := report.Checks
-	if checks[0].Name != "Mount" || checks[0].Outcome != "Passed" || checks[1].Name != "Writable" {
+	if checks[0].Name != "Mount" || checks[0].Outcome != outcomePassed || checks[1].Name != "Writable" {
 		t.Errorf("the checks are %+v", checks)
 	}
 }
@@ -265,7 +265,7 @@ func TestKeepsCheckingWhileACheckFailsAndStopsOnceTheyPass(t *testing.T) {
 
 	eventually(t, "the failure in the report", func() bool {
 		checks := r.report(t).Checks
-		return len(checks) == 2 && checks[1].Outcome == "Failed"
+		return len(checks) == 2 && checks[1].Outcome == outcomeFailed
 	})
 	if checks := r.report(t).Checks; checks[1].Reason != "NotWritable" || !strings.Contains(checks[1].Message, "cannot write") {
 		t.Errorf("the failure is %+v", checks[1])
@@ -273,7 +273,7 @@ func TestKeepsCheckingWhileACheckFailsAndStopsOnceTheyPass(t *testing.T) {
 
 	eventually(t, "the checks to pass", func() bool {
 		checks := r.report(t).Checks
-		return len(checks) == 2 && checks[1].Outcome == "Passed"
+		return len(checks) == 2 && checks[1].Outcome == outcomePassed
 	})
 	settled := calls.Load()
 	time.Sleep(50 * time.Millisecond)
