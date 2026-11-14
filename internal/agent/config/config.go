@@ -28,6 +28,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -48,6 +49,12 @@ const (
 	// set when the Treebind names the Secret and the ConfigMap they come from.
 	EnvSSHKeyFile     = "TREEBIND_SSH_KEY_FILE"
 	EnvKnownHostsFile = "TREEBIND_KNOWN_HOSTS_FILE"
+	// EnvSyncInterval is how often the agent pulls, as a Go duration such as 30s. The default is
+	// the one of the CRD when it is not set. EnvSyncDirection is pull or bidirectional.
+	EnvSyncInterval  = "TREEBIND_SYNC_INTERVAL"
+	EnvSyncDirection = "TREEBIND_SYNC_DIRECTION"
+	// EnvPodName is the name of the sync pod. The writer lock names its holder with it.
+	EnvPodName = "TREEBIND_POD_NAME"
 
 	EnvStatusAddr     = "TREEBIND_STATUS_ADDR"
 	EnvStatusIssuer   = "TREEBIND_STATUS_ISSUER"
@@ -61,6 +68,18 @@ const (
 	DefaultMountPath  = "/work"
 	DefaultStatusAddr = ":8080"
 	DefaultStatusKeys = "/etc/treebind/status/jwks.json"
+
+	// DefaultSyncInterval is the interval of the CRD, which a test holds to the default that the API
+	// server fills in.
+	DefaultSyncInterval = 30 * time.Second
+	// MinSyncInterval is the shortest interval the CRD admits.
+	MinSyncInterval = time.Second
+)
+
+// The directions of a sync, as the CRD names them.
+const (
+	DirectionPull          = "pull"
+	DirectionBidirectional = "bidirectional"
 )
 
 // Config is what the agent runs with.
@@ -80,6 +99,13 @@ type Config struct {
 	// keys. Both are set for an ssh:// repository. They are ignored for an https:// one.
 	SSHKeyFile, KnownHostsFile string
 
+	// SyncInterval is how often the agent pulls, and SyncDirection says whether it also commits
+	// and pushes the application's edits: pull, or bidirectional.
+	SyncInterval  time.Duration
+	SyncDirection string
+	// PodName is the name of the sync pod.
+	PodName string
+
 	// StatusAddr is the address the status endpoint and the probes listen on.
 	StatusAddr string
 	// StatusIssuer, StatusAudience and StatusSubject are the iss, aud and sub
@@ -96,6 +122,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	// A value from a mounted file or a loose manifest can carry a trailing newline
 	// or space, which would never match a claim.
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
+	interval, intervalErr := CheckSyncInterval(get(EnvSyncInterval))
 	config := Config{
 		Namespace: get(EnvNamespace),
 		Name:      get(EnvName),
@@ -107,13 +134,20 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		RepoBranch:     get(EnvRepoBranch),
 		SSHKeyFile:     get(EnvSSHKeyFile),
 		KnownHostsFile: get(EnvKnownHostsFile),
+		SyncInterval:   interval,
+		SyncDirection:  get(EnvSyncDirection),
+		PodName:        get(EnvPodName),
 		StatusAddr:     orDefault(get(EnvStatusAddr), DefaultStatusAddr),
 		StatusIssuer:   get(EnvStatusIssuer),
 		StatusAudience: get(EnvStatusAudience),
 		StatusSubject:  get(EnvStatusSubject),
 		StatusKeysFile: orDefault(get(EnvStatusKeysFile), DefaultStatusKeys),
 	}
-	return config, config.validate()
+	err := config.validate()
+	if intervalErr != nil {
+		err = errors.Join(fmt.Errorf("%s %w", EnvSyncInterval, intervalErr), err)
+	}
+	return config, err
 }
 
 func orDefault(value, fallback string) string {
@@ -137,6 +171,13 @@ func (c Config) validate() error {
 	require(EnvStatusAudience, c.StatusAudience)
 	require(EnvStatusSubject, c.StatusSubject)
 	require(EnvRepoURL, c.RepoURL)
+	require(EnvPodName, c.PodName)
+	require(EnvSyncDirection, c.SyncDirection)
+	if c.SyncDirection != "" {
+		if err := CheckSyncDirection(c.SyncDirection); err != nil {
+			problems = append(problems, fmt.Errorf("%s %w", EnvSyncDirection, err))
+		}
+	}
 
 	if !cleanAbsolute(c.MountPath) {
 		problems = append(problems, fmt.Errorf("%s must be an absolute path with no .. and no trailing slash", EnvMountPath))
@@ -201,6 +242,33 @@ func CheckSubPath(subPath string) error {
 	}
 	if segments[0] == StateDirName {
 		return fmt.Errorf("must not start with '%s', which the agent keeps for its own state", StateDirName)
+	}
+	return nil
+}
+
+// CheckSyncInterval returns the interval a value stands for, DefaultSyncInterval when it is empty,
+// or the reason it cannot be one. The rules are the ones that the CRD puts on sync.interval, and a
+// test holds the two together: an interval that the API server accepts and the agent refuses would
+// leave a sync pod that exits at start for ever.
+func CheckSyncInterval(raw string) (time.Duration, error) {
+	if raw == "" {
+		return DefaultSyncInterval, nil
+	}
+	interval, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, errors.New("must be a duration such as 30s or 5m")
+	}
+	if interval < MinSyncInterval {
+		return 0, fmt.Errorf("must be at least %s", MinSyncInterval)
+	}
+	return interval, nil
+}
+
+// CheckSyncDirection returns the reason a value cannot be the direction of a sync. They are the
+// values that the CRD admits for sync.direction.
+func CheckSyncDirection(direction string) error {
+	if direction != DirectionPull && direction != DirectionBidirectional {
+		return fmt.Errorf("must be %s or %s", DirectionPull, DirectionBidirectional)
 	}
 	return nil
 }

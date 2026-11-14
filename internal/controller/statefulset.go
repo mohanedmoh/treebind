@@ -272,6 +272,17 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	if branch := treebind.Spec.Repository.Branch; branch != "" {
 		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoBranch, Value: branch})
 	}
+	// How to sync, and who the pod is, for the writer lock (docs/adr/0021). Without an interval the
+	// agent uses the default of the CRD, which is what the API server fills in.
+	if interval := treebind.Spec.Sync.Interval; interval != nil {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSyncInterval, Value: interval.Duration.String()})
+	}
+	env = append(env,
+		corev1.EnvVar{Name: agentconfig.EnvSyncDirection, Value: string(treebind.Spec.Sync.Direction)},
+		corev1.EnvVar{Name: agentconfig.EnvPodName, ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+		}},
+	)
 	if auth := treebind.Spec.Repository.Auth; auth != nil {
 		if ref := auth.SSHKeySecretRef; ref != nil {
 			env = append(env, corev1.EnvVar{Name: agentconfig.EnvSSHKeyFile, Value: path.Join(sshMountPath, ref.Key)})

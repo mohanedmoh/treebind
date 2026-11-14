@@ -20,10 +20,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
 	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
@@ -41,8 +43,11 @@ const (
 	testSyncName     = "grafana-sync"
 	testCustomPath   = "/data/grafana"
 	testNamespace    = "apps"
-	testIssuer       = "https://kubernetes.default.svc.cluster.local"
-	testSubject      = "system:serviceaccount:treebind-system:treebind-controller-manager"
+	testPodName      = "grafana-sync-0"
+	// The field of the pod that the downward API gives its name from.
+	fieldPodName = "metadata.name"
+	testIssuer   = "https://kubernetes.default.svc.cluster.local"
+	testSubject  = "system:serviceaccount:treebind-system:treebind-controller-manager"
 )
 
 func mustDesiredStatefulSet(t *testing.T, treebind *treebindv1alpha1.Treebind, image string) *appsv1.StatefulSet {
@@ -322,9 +327,26 @@ func TestTemplateHash(t *testing.T) {
 			wantChange: true,
 		},
 		{
-			name: "settings the pod does not read leave it alone",
+			name: "the direction of the sync changes it",
 			mutate: func(tb *treebindv1alpha1.Treebind) {
 				tb.Spec.Sync.Direction = treebindv1alpha1.SyncDirectionPull
+			},
+			image:      testImage,
+			wantChange: true,
+		},
+		{
+			name: "the interval of the sync changes it",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Sync.Interval = &metav1.Duration{Duration: time.Minute}
+			},
+			image:      testImage,
+			wantChange: true,
+		},
+		{
+			name: "settings the pod does not read leave it alone",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowLocal
+				tb.Spec.Sync.SettleTime = &metav1.Duration{Duration: time.Minute}
 			},
 			image: testImage,
 		},
@@ -400,6 +422,10 @@ func TestAgentEnvironment(t *testing.T) {
 		{Name: "TREEBIND_MOUNT_PATH", Value: testCustomPath},
 		{Name: "TREEBIND_REPO_URL", Value: httpsRepositoryURL},
 		{Name: "TREEBIND_REPO_BRANCH", Value: branchMain},
+		{Name: "TREEBIND_SYNC_DIRECTION", Value: "bidirectional"},
+		{Name: "TREEBIND_POD_NAME", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: fieldPodName},
+		}},
 		{Name: "TREEBIND_STATUS_ADDR", Value: ":8080"},
 		{Name: "TREEBIND_STATUS_ISSUER", Value: testIssuer},
 		{Name: "TREEBIND_STATUS_AUDIENCE", Value: "treebind.example.org/" + testNamespace + "/" + testTreebindName},
