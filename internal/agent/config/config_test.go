@@ -213,6 +213,65 @@ func TestCheckSubPath(t *testing.T) {
 	}
 }
 
+// What CheckBranch says, in the words that tell one rule from another.
+const (
+	problemDots       = "'..' or '@{'"
+	problemEnding     = "'.lock', '/' or '.'"
+	problemCharacters = "whitespace, control characters"
+)
+
+func TestCheckBranch(t *testing.T) {
+	long := strings.Repeat("a", MaxBranchLength)
+	tests := []struct {
+		name   string
+		branch string
+		want   string // "" means accepted, else what the problem says
+	}{
+		{"none, which is the default branch", "", ""},
+		{"a name", "main", ""},
+		{"a name with a slash", "release/1.2", ""},
+		{"a dot and a dash inside", "feature-1.x", ""},
+		{"a letter of more than one byte", "é/ü", ""},
+		{"the longest branch", long, ""},
+		{"one character too many", long + "a", "must be at most 255 characters"},
+		{"two dots", "a..b", problemDots},
+		{"a reflog selector", "a@{1}", problemDots},
+		{"only an at sign", "@", problemDots},
+		{"a leading dash, which Git would take for an option", "-x", "'-' or '/'"},
+		{"a leading slash", "/a", "'-' or '/'"},
+		{"a .lock ending", "a.lock", problemEnding},
+		{"a trailing slash", "a/", problemEnding},
+		{"a trailing dot", "a.", problemEnding},
+		{"a double slash", "a//b", "'//'"},
+		{"a space", "a b", problemCharacters},
+		{"a tab", "a\tb", problemCharacters},
+		{"a newline", "a\nb", problemCharacters},
+		{"a NUL", "a\x00b", problemCharacters},
+		{"a DEL", "a\x7fb", problemCharacters},
+		{"a tilde", "a~1", problemCharacters},
+		{"a caret", "a^", problemCharacters},
+		{"a colon, which would end the refspec", "a:b", problemCharacters},
+		{"a question mark", "a?", problemCharacters},
+		{"an asterisk", "a*", problemCharacters},
+		{"a bracket", "a[", problemCharacters},
+		{"a backslash", `a\b`, problemCharacters},
+		{"a component that starts with a dot", "a/.b", "starts with '.'"},
+		{"a first component that starts with a dot", ".a", "starts with '.'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckBranch(tt.branch)
+
+			switch {
+			case tt.want == "" && err != nil:
+				t.Errorf("CheckBranch(%q) = %v, want it accepted", tt.branch, err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Errorf("CheckBranch(%q) = %v, want a problem that says %q", tt.branch, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestFromEnvReportsEveryProblemAtOnce(t *testing.T) {
 	_, err := fromMap(map[string]string{EnvMountPath: "work", EnvStatusAddr: "nope"})
 

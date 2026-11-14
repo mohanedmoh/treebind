@@ -34,6 +34,7 @@ const (
 	stateName        = ".treebind"
 	dashboardsDir    = "dashboards"
 	isALink          = "is a link"
+	isNotADir        = "is not a directory"
 	teamDir          = "team-a"
 	claimRoot        = "/work"
 	claimState       = "/work/.treebind"

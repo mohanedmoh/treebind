@@ -126,6 +126,44 @@ func (l Layout) checkWayToWorkTree(root *os.Root) error {
 	return nil
 }
 
+// workTreeMode is the mode of the synced directory and of the directories on the way to
+// it that the agent makes. With the umask of the agent (0002) they are 0775, so that
+// the application that shares the claim, as another user in the same group, can write
+// in them (R-12).
+const workTreeMode fs.FileMode = 0o777
+
+// MakeWorkTree makes the synced directory, and the directories on the way to it, that
+// are not there yet. The claim itself is there already. Each part is made before it is
+// looked at, and none is followed if it is a link, so a link that appeared where a
+// directory was to be made is refused as Prepare refuses one. What is there is left as
+// it is: the application owns that directory, and its owner and mode are its business.
+func (l Layout) MakeWorkTree() error {
+	if l.SubPath == "" {
+		return nil
+	}
+	root, err := os.OpenRoot(l.Root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	parts := strings.Split(l.SubPath, "/")
+	for i := range parts {
+		name := strings.Join(parts[:i+1], "/")
+		if err := root.Mkdir(name, workTreeMode); err != nil && !errors.Is(err, fs.ErrExist) {
+			return atPath(l.Root, err)
+		}
+		info, err := root.Lstat(name)
+		if err != nil {
+			return atPath(l.Root, err)
+		}
+		if problem := notADirectory(info); problem != "" {
+			return &UnsafeError{Path: filepath.Join(l.Root, filepath.FromSlash(name)), Problem: problem, OnTheWay: true}
+		}
+	}
+	return nil
+}
+
 // privateDir makes the directory in parent if it is not there, checks it, and returns
 // it opened. parentPath is where parent is, for the words of an error.
 func (l Layout) privateDir(parent *os.Root, parentPath, name string) (*os.Root, error) {

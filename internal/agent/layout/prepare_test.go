@@ -256,7 +256,7 @@ func TestPrepareRefusesAFileWhereADirectoryShouldBe(t *testing.T) {
 
 	err := layout.Prepare()
 
-	wantUnsafe(t, err, stateName, "is not a directory")
+	wantUnsafe(t, err, stateName, isNotADir)
 }
 
 func TestPrepareRefusesADirectoryOfAnotherUser(t *testing.T) {
@@ -444,7 +444,7 @@ func TestPrepareRefusesALinkOnTheWayToTheSyncedDirectory(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			path: dashboardsDir, problem: "is not a directory",
+			path: dashboardsDir, problem: isNotADir,
 		},
 		{
 			name: "a directory on the way is a file", subPath: teamDashboards,
@@ -453,7 +453,7 @@ func TestPrepareRefusesALinkOnTheWayToTheSyncedDirectory(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			path: teamDir, problem: "is not a directory",
+			path: teamDir, problem: isNotADir,
 		},
 	}
 	for _, tt := range tests {

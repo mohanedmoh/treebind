@@ -179,6 +179,43 @@ func CheckSubPath(subPath string) error {
 	return nil
 }
 
+// MaxBranchLength is the most characters that repository.branch of the CRD may have.
+const MaxBranchLength = 255
+
+// CheckBranch returns the reason when a value cannot be the branch of a Treebind, and
+// nil when it can. An empty one is the default branch of the repository. The rules are
+// the ones that the CRD puts on repository.branch, and a name that Git would take for
+// an option, a revision range or a pattern is one of those they keep out: the branch
+// goes into the refs and the refspec of the commands the agent runs.
+func CheckBranch(branch string) error {
+	if branch == "" {
+		return nil
+	}
+	switch {
+	case utf8.RuneCountInString(branch) > MaxBranchLength:
+		return fmt.Errorf("must be at most %d characters", MaxBranchLength)
+	case strings.Contains(branch, "..") || strings.Contains(branch, "@{") || branch == "@":
+		return errors.New("must not contain '..' or '@{', or be '@'")
+	case strings.HasPrefix(branch, "-") || strings.HasPrefix(branch, "/"):
+		return errors.New("must not start with '-' or '/'")
+	case strings.HasSuffix(branch, ".lock") || strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, "."):
+		return errors.New("must not end with '.lock', '/' or '.'")
+	case strings.Contains(branch, "//"):
+		return errors.New("must not contain '//'")
+	}
+	for _, c := range branch {
+		if c <= ' ' || c == 0x7f || strings.ContainsRune("~^:?*[\\", c) {
+			return errors.New("must not contain whitespace, control characters, '~', '^', ':', '?', '*', '[' or a backslash")
+		}
+	}
+	for component := range strings.SplitSeq(branch, "/") {
+		if strings.HasPrefix(component, ".") {
+			return errors.New("must not have a component that starts with '.'")
+		}
+	}
+	return nil
+}
+
 // validAddress reports whether an address is a host, which may be empty, and a
 // number for a port.
 func validAddress(address string) bool {
