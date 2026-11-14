@@ -226,6 +226,10 @@ dev: ko ## Create a kind cluster, build the images into it, deploy the operator 
 	echo ""; \
 	echo "Delete the cluster with 'make dev-down'."
 
+.PHONY: dev-ssh
+dev-ssh: ## Start an ssh Git remote in the dev cluster, with a deploy key and known hosts, and print a Treebind for it.
+	@KUBECTL="$(KUBECTL)" hack/dev-ssh.sh
+
 .PHONY: dev-down
 dev-down: ## Delete the kind cluster used by 'make dev'.
 	@$(KIND) delete cluster --name $(KIND_DEV_CLUSTER)

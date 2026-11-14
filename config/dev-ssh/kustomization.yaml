@@ -1,0 +1,6 @@
+# A throwaway Git remote that speaks ssh, for the `make dev` loop. The agent refuses the
+# git:// protocol of config/dev, so a Treebind needs this one. Applied by `make dev-ssh`
+# (hack/dev-ssh.sh) only and deliberately not referenced from config/default, so it can
+# never ship in a release.
+resources:
+- git-remote-ssh.yaml

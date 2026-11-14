@@ -82,9 +82,35 @@ kill %1
 
 The remote accepts anonymous pushes, so keep it behind the port-forward and do
 not expose it. The repository lives in an emptyDir, so it is empty again after
-the pod is recreated. The `git://` URL is for your terminal only; once the sync agent
-lands, the dev remote grows smart HTTP so a Treebind can point at it with an
-`http://` URL.
+the pod is recreated. The `git://` URL is for your terminal only: the sync agent
+speaks ssh and https and refuses the rest, so a Treebind needs the ssh remote below.
+
+### An ssh remote for a Treebind
+
+```sh
+make dev-ssh
+```
+
+starts a second remote, `git-remote-ssh`, that speaks ssh, and makes what a Treebind
+needs to reach it: a deploy key in the Secret `dev-deploy-key`, the host key of the remote
+in the ConfigMap `dev-known-hosts`, both in the namespace `default` (`hack/dev-ssh.sh
+<namespace>` takes another), and it prints a claim and a Treebind to apply. The pod runs
+sshd as root and installs it with `apk` when it starts, so it needs the network and is for
+the dev cluster only. The repository is `/srv/sample.git`, empty until you put something in it:
+
+```sh
+kubectl -n treebind-dev exec deploy/git-remote-ssh -- su git -c '
+  git init -q --initial-branch=main /tmp/seed && cd /tmp/seed &&
+  git config user.name dev && git config user.email dev@example.com &&
+  echo hello > hello.txt && git add -A && git commit -q -m first &&
+  git push -q /srv/sample.git main'
+```
+
+The sync agent then clones it into the claim, and its log and report say so:
+
+```sh
+kubectl logs dev-ssh-sync-0 | grep Checkout
+```
 
 ```sh
 make dev-down
@@ -98,6 +124,7 @@ deletes the cluster.
 | :-- | :-- | :-- |
 | `make test` | Generates code, formats, vets, then runs unit tests and envtest | Available |
 | `make lint` | golangci-lint (`make lint-config` checks its configuration) | Available |
+| `make dev-ssh` | Starts an ssh Git remote in the dev cluster with a deploy key and known hosts, and prints a Treebind for it | Available |
 | `make generate manifests` | Regenerates deepcopy code, CRDs, the chart's copy of the CRD and RBAC from the Go types | Available |
 | `make test-e2e` | End-to-end suite on a kind cluster, created if missing | Available |
 | `make cleanup-test-e2e` | Deletes the kind cluster used by the e2e suite | Available |
