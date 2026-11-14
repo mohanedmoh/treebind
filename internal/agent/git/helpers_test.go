@@ -43,6 +43,8 @@ const (
 	cmdCommit      = "commit"
 	cmdStatus      = "status"
 	cmdPush        = "push"
+	cmdRevParse    = "rev-parse"
+	cmdVersion     = "version"
 	cmdFetch       = "fetch"
 	cmdMerge       = "merge"
 	cmdCatFile     = "cat-file"

@@ -219,7 +219,7 @@ func TestTheEnvironmentIsBuiltFromNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := r.command(context.Background(), []string{"version"}).Env
+	env := r.command(context.Background(), []string{cmdVersion}).Env
 
 	want := map[string]string{
 		"PATH":                "/usr/local/bin:/usr/bin:/bin",
@@ -235,8 +235,9 @@ func TestTheEnvironmentIsBuiltFromNothing(t *testing.T) {
 		envSSHCommand: "/usr/bin/ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes " +
 			"-o UpdateHostKeys=no -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/hosts/known " +
 			"-o IdentitiesOnly=yes -i /keys/id",
-		"GIT_ALLOW_PROTOCOL": "ssh:https",
-		"GIT_ATTR_SOURCE":    emptyTree,
+		"GIT_ALLOW_PROTOCOL":     "ssh:https",
+		"GIT_ATTR_SOURCE":        emptyTree,
+		"GIT_NO_REPLACE_OBJECTS": "1",
 	}
 	// With no bundle given, the system's is named, so that one that a repository
 	// config names is not used.
@@ -389,7 +390,7 @@ func TestAnAliasCannotTakeTheNameOfABuiltIn(t *testing.T) {
 	if _, err := r.run(r.runner(), cmdStatus, flagPorcelain); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.run(r.runner(), "version"); err != nil {
+	if _, err := r.run(r.runner(), cmdVersion); err != nil {
 		t.Fatal(err)
 	}
 	wantNotRan(t, marker, "an alias")
@@ -397,14 +398,14 @@ func TestAnAliasCannotTakeTheNameOfABuiltIn(t *testing.T) {
 
 func TestRunReturnsWhatGitWrites(t *testing.T) {
 	r := newRepo(t, outsideWork)
-	result, err := r.run(r.runner(), "version")
+	result, err := r.run(r.runner(), cmdVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(string(result.Stdout), "git version ") {
 		t.Errorf("got %q", result.Stdout)
 	}
-	result, err = r.run(r.runner(), "rev-parse", refHead)
+	result, err = r.run(r.runner(), cmdRevParse, refHead)
 	if err != nil {
 		t.Fatal(err)
 	}

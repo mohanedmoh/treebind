@@ -84,6 +84,12 @@ type Options struct {
 	// sub path.
 	AllowGitDirInWorkTree bool
 
+	// VerifyGitDir makes the Runner look at the Git directory before every command and refuse,
+	// with an error that is ErrGitDirUntrusted, when it holds something that the agent did not
+	// put there (docs/adr/0019). The agent turns it on for the checkout it syncs, whose Git
+	// directory is made by the agent with an empty template.
+	VerifyGitDir bool
+
 	// SSH says how Git connects to an ssh:// repository.
 	SSH SSH
 
@@ -130,6 +136,7 @@ type Runner struct {
 	git       string
 	gitDir    string
 	workTree  string
+	verify    bool
 	path      string
 	ssh       SSH
 	caBundle  string
@@ -216,6 +223,7 @@ func New(o Options) (*Runner, error) {
 		git:       o.Git,
 		gitDir:    o.GitDir,
 		workTree:  o.WorkTree,
+		verify:    o.VerifyGitDir,
 		path:      defaultPath,
 		ssh:       o.SSH,
 		caBundle:  o.CABundle,
@@ -425,6 +433,11 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, args []string) 
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
+	}
+	if r.verify {
+		if err := VerifyGitDir(r.gitDir, r.workTree); err != nil {
+			return Result{}, &Error{Subcommand: sub, Cause: err}
+		}
 	}
 
 	ctx, cancelTimeout := context.WithTimeoutCause(ctx, timeout, ErrTimeout)

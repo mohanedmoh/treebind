@@ -69,6 +69,8 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("git: the option %s is not one the agent may pass to %s", quote(e.Option), e.Subcommand)
 	case errors.Is(e.Cause, ErrNotAllowed):
 		return fmt.Sprintf("git: the subcommand %s is not one the agent may run", quote(e.Subcommand))
+	case errors.Is(e.Cause, ErrGitDirUntrusted):
+		return fmt.Sprintf("git %s was not run: %v", e.Subcommand, e.Cause)
 	case errors.Is(e.Cause, ErrTimeout):
 		text = fmt.Sprintf("git %s did not finish within %s and was stopped", e.Subcommand, e.Timeout)
 	case errors.Is(e.Cause, ErrCanceled):

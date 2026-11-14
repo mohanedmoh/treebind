@@ -132,6 +132,9 @@ func (r *Runner) environment() []string {
 		// The attributes of the work tree select filters, diff drivers and
 		// end-of-line conversion. Reading them from an empty tree applies none.
 		"GIT_ATTR_SOURCE=" + emptyTree,
+		// A replace ref makes Git see another object where a commit, a tree or a blob is, and
+		// the application can make one, in the refs or in packed-refs.
+		"GIT_NO_REPLACE_OBJECTS=1",
 	}
 	if r.caBundle != "" {
 		// Read after http.sslCAInfo, so it beats a repository config, which an
