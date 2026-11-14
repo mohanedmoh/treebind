@@ -196,13 +196,18 @@ func Open(ctx context.Context, o Options) (Result, error) {
 // runnerOptions are the settings of the Runner for the checkout: the directories of the
 // layout, and a look at the Git directory before every command, so that Git is not run
 // against one that holds something the agent did not put there (docs/adr/0019).
-func (o Options) runnerOptions() git.Options {
-	options := o.Git
-	options.GitDir = o.Layout.GitDir
-	options.WorkTree = o.Layout.WorkTree
-	options.AllowGitDirInWorkTree = o.Layout.GitDirInWorkTree
-	options.VerifyGitDir = true
-	return options
+func (o Options) runnerOptions() git.Options { return RunnerOptions(o.Layout, o.Git) }
+
+// RunnerOptions are the settings of the Runner for the checkout that a layout describes: the
+// directories of the layout, and a look at the Git directory before every command, so that Git
+// is not run against one that holds something the agent did not put there (docs/adr/0019).
+// What else the agent runs against the checkout, the pull for one, takes them from here.
+func RunnerOptions(l layout.Layout, g git.Options) git.Options {
+	g.GitDir = l.GitDir
+	g.WorkTree = l.WorkTree
+	g.AllowGitDirInWorkTree = l.GitDirInWorkTree
+	g.VerifyGitDir = true
+	return g
 }
 
 // checkout is one call of Open.
@@ -497,19 +502,35 @@ func fail(reason, format string, args ...any) *Error {
 			e.Err = err
 		}
 	}
-	if untrusted, ok := errors.AsType[*git.GitDirError](e.Err); ok {
-		e.Reason = ReasonGitDirUnsafe
-		// What a Runner refused says which command it did not run, and what the directory
-		// check found says that none was.
-		what := untrusted.Error() + ". Git was not run against it"
-		if refused, ok := errors.AsType[*git.Error](e.Err); ok {
-			what = refused.Error()
-		}
-		e.Message = fmt.Sprintf("%s. Remove the file or the setting that it names, or empty "+
-			"%s at the root of the claim for the agent to make it again, which loses the commits that were not pushed; see %s",
-			what, filepath.Join(config.StateDirName, layout.GitDirName), gitDirDocsURL)
+	if refusal, ok := Refusal(e.Err); ok {
+		return refusal
 	}
 	return e
+}
+
+// Refusal returns the *Error, with ReasonGitDirUnsafe, for an error that is a refusal to run
+// Git against the Git directory (git.ErrGitDirUntrusted), and false for any other. The message
+// says which command was not run when a Runner refused, which file or setting is the cause, and
+// how to put it right. Whatever else runs Git against the checkout turns its errors into the
+// same reason with this, because what to do about it is the same.
+func Refusal(err error) (*Error, bool) {
+	untrusted, ok := errors.AsType[*git.GitDirError](err)
+	if !ok {
+		return nil, false
+	}
+	// What a Runner refused says which command it did not run, and what the directory check
+	// found says that none was.
+	what := untrusted.Error() + ". Git was not run against it"
+	if refused, ok := errors.AsType[*git.Error](err); ok {
+		what = refused.Error()
+	}
+	return &Error{
+		Reason: ReasonGitDirUnsafe,
+		Err:    err,
+		Message: fmt.Sprintf("%s. Remove the file or the setting that it names, or empty "+
+			"%s at the root of the claim for the agent to make it again, which loses the commits that were not pushed; see %s",
+			what, filepath.Join(config.StateDirName, layout.GitDirName), gitDirDocsURL),
+	}, true
 }
 
 // describeHead says what a checkout follows, for a message.

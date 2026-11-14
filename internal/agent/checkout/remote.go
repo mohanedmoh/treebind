@@ -23,6 +23,7 @@ import (
 
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
+	"github.com/mohanedmoh/treebind/internal/agent/layout"
 )
 
 const (
@@ -133,10 +134,17 @@ func (c *checkout) fetch(ctx context.Context) (string, error) {
 // a sub path the state directory is beside the work tree and the paths of the commit
 // cannot reach it.
 func (c *checkout) checkReserved(ctx context.Context, tip string) *Error {
-	if !c.Layout.GitDirInWorkTree {
+	return CheckReserved(ctx, c.git, c.Layout, c.branch, tip)
+}
+
+// CheckReserved is checkReserved for a commit that something other than the first checkout is
+// about to bring in: the pull checks the commit it is going to fast-forward to the same way, so
+// that no commit writes into the state directory later either.
+func CheckReserved(ctx context.Context, runner *git.Runner, l layout.Layout, branch, tip string) *Error {
+	if !l.GitDirInWorkTree {
 		return nil
 	}
-	out, err := c.git.Run(ctx, "ls-tree", "-z", "--name-only", tip)
+	out, err := runner.Run(ctx, "ls-tree", "-z", "--name-only", tip)
 	if err != nil {
 		return fail(ReasonCheckoutFailed, "the files of the branch cannot be listed: %v", err)
 	}
@@ -144,7 +152,7 @@ func (c *checkout) checkReserved(ctx context.Context, tip string) *Error {
 		if strings.EqualFold(name, config.StateDirName) {
 			return fail(ReasonReservedPath,
 				"the branch %s has a file named %s at its root, where Treebind keeps its own state when the whole claim is synced. "+
-					"Use a subPath, or rename the file", c.branch, name)
+					"Use a subPath, or rename the file", branch, name)
 		}
 	}
 	return nil
