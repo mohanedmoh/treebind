@@ -70,6 +70,29 @@ with less protection: the directory is closed to other users (mode 0700, owned b
 and it is never committed. An application that runs as the same user as the agent, or as
 root, can still read and write it. A `subPath` cannot be `.treebind` or start with it.
 
+## What the agent checks
+
+At start the agent makes `.treebind` and `.treebind/git` with mode 0700 and checks them. It
+refuses a directory that is a link, is not a directory, belongs to another user than the one the
+agent runs as, or is open to group or others. It refuses a link on the way to the synced
+directory too, because a link there could point the work tree into `.treebind`. It follows no
+link in `.treebind` and `.treebind/git`, and refuses one of them that was swapped for a link, or
+for another directory, while it was being checked. The way to the synced directory is looked at
+once, at start.
+
+A directory that fails is reported by the check `GitDir` with the reason `GitDirUnsafe`, and Git
+is not run against it. The agent keeps running and checks again, with a longer wait each time
+up to a minute, so it carries on once the directory is put right. A claim that cannot be written
+to fails the check with `ReadOnlyVolume`, `NotWritable` or `WriteFailed`, as the check
+`Writable` does. The result is in the agent's log, once for each change, and in its status
+report, which [the status page](agent-status.md) shows how to read by hand. The operator does not show it as
+a condition yet.
+
+To put it right, remove `.treebind` or `.treebind/git` when the message names one of them, or
+make it a directory of the user the agent runs as with mode 0700. When the message names a link
+or a file on the way to the synced directory, replace it with a real directory. The agent does
+not change a directory that is not its own.
+
 ## Room on the claim
 
 The Git directory holds the history of the branch, so the claim needs room for it besides

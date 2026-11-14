@@ -30,6 +30,11 @@ func within(p, dir string) bool {
 }
 
 const (
+	teamDashboards   = "team-a/dashboards"
+	stateName        = ".treebind"
+	dashboardsDir    = "dashboards"
+	isALink          = "is a link"
+	teamDir          = "team-a"
 	claimRoot        = "/work"
 	claimState       = "/work/.treebind"
 	claimGit         = "/work/.treebind/git"
@@ -56,9 +61,9 @@ func TestNewPlacesTheGitDirectoryBesideTheSyncedDirectory(t *testing.T) {
 		},
 		{
 			name: "a nested sub path",
-			root: "/data/claim", subPath: "team-a/dashboards",
+			root: "/data/claim", subPath: teamDashboards,
 			want: Layout{
-				Root: "/data/claim", SubPath: "team-a/dashboards", WorkTree: "/data/claim/team-a/dashboards",
+				Root: "/data/claim", SubPath: teamDashboards, WorkTree: "/data/claim/team-a/dashboards",
 				StateDir: "/data/claim/.treebind", GitDir: "/data/claim/.treebind/git",
 			},
 		},
@@ -141,7 +146,7 @@ func TestTheGitDirectoryIsOutsideTheWorkTreeExactlyWhenThereIsASubPath(t *testin
 	if !whole.GitDirInWorkTree || !within(whole.GitDir, whole.WorkTree) {
 		t.Errorf("without a sub path the Git directory is in the work tree: %+v", whole)
 	}
-	if got := whole.NeverSynced(); got != ".treebind" {
+	if got := whole.NeverSynced(); got != stateName {
 		t.Errorf("NeverSynced = %q, want .treebind, relative to the work tree", got)
 	}
 }
@@ -160,7 +165,7 @@ func TestNewRefusesWhatCannotBeALayout(t *testing.T) {
 		{"a root with a double slash", "//work", "", mountPathProblem},
 		{"an absolute sub path", claimRoot, "/etc", "must be relative"},
 		{"a sub path that climbs out", claimRoot, "../etc", "must not contain a '..'"},
-		{"the state directory as the sub path", claimRoot, ".treebind", "must not start with '.treebind'"},
+		{"the state directory as the sub path", claimRoot, stateName, "must not start with '.treebind'"},
 		{"a sub path inside the state directory", claimRoot, ".treebind/git", "must not start with '.treebind'"},
 		{"a .git sub path", claimRoot, "a/.git", "must not contain"},
 	}

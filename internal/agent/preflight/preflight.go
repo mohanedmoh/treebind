@@ -15,8 +15,9 @@ limitations under the License.
 */
 
 // Package preflight checks, once at start, that the volume the agent writes to
-// can hold a checkout: that it is a mounted volume and that the agent's own user
-// can write to it.
+// can hold a checkout: that it is a mounted volume, that the agent's own user can
+// write to it, and that the directories where the agent keeps its Git directory are
+// its own and private (docs/adr/0016).
 //
 // A check never refuses a setup that works. One that cannot tell, because the
 // mount table is unreadable or a check it depends on failed, is skipped, and that
@@ -30,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -56,6 +58,7 @@ const (
 const (
 	CheckMount    = "Mount"
 	CheckWritable = "Writable"
+	CheckGitDir   = "GitDir"
 )
 
 // The reasons of a result that did not pass. Each distinct cause has its own, and
@@ -75,6 +78,10 @@ const (
 	// ReasonWriteFailed means writing the test file failed for another reason,
 	// such as a full volume or an I/O error.
 	ReasonWriteFailed = "WriteFailed"
+	// ReasonGitDirUnsafe means the state directory, the Git directory or a directory on
+	// the way to the synced directory is a link, is not a directory, belongs to another
+	// user or is open to group or others. Git is not run against it.
+	ReasonGitDirUnsafe = "GitDirUnsafe"
 	// ReasonTimedOut means the volume did not answer in time.
 	ReasonTimedOut = "TimedOut"
 	// ReasonNotChecked means the check was skipped. The message says why.
@@ -107,24 +114,36 @@ func AnyFailed(results []Result) bool {
 }
 
 // Volume runs the checks on the directory where the agent writes, in order, and
-// returns one result for each. The writable check is skipped when the mount check
-// failed, because a directory that is not usable cannot be tested. The checks
-// share Timeout, whatever the context allows.
-func Volume(ctx context.Context, path string) []Result {
-	return volume(ctx, path, procMountInfo)
+// returns one result for each. subPath is the directory of the claim that is synced,
+// or empty for the whole claim. A check is skipped when one before it failed, because
+// a directory that is not usable cannot be tested, and the result says which failure
+// caused it. The checks share Timeout, whatever the context allows.
+func Volume(ctx context.Context, path, subPath string) []Result {
+	return volume(ctx, path, subPath, procMountInfo)
 }
 
 // volume is Volume with the mount table passed in, so that a test can give it one.
-func volume(ctx context.Context, path, mountInfo string) []Result {
+func volume(ctx context.Context, path, subPath, mountInfo string) []Result {
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 
 	mount := run(ctx, CheckMount, func() Result { return checkMount(path, mountInfo) })
 	if mount.Outcome == Failed {
-		return []Result{mount, skipped(CheckWritable,
-			fmt.Sprintf("not tried, because the mount check failed (%s)", mount.Reason))}
+		return []Result{mount, notTried(CheckWritable, mount), notTried(CheckGitDir, mount)}
 	}
-	return []Result{mount, run(ctx, CheckWritable, func() Result { return checkWritable(path) })}
+	writable := run(ctx, CheckWritable, func() Result { return checkWritable(path) })
+	if writable.Outcome == Failed {
+		return []Result{mount, writable, notTried(CheckGitDir, writable)}
+	}
+	gitDir := run(ctx, CheckGitDir, func() Result { return checkGitDir(path, subPath) })
+	return []Result{mount, writable, gitDir}
+}
+
+// notTried is the result of a check that was not run because the one it depends on
+// failed.
+func notTried(check string, failed Result) Result {
+	return skipped(check, fmt.Sprintf("not tried, because the %s check failed (%s)",
+		strings.ToLower(failed.Check), failed.Reason))
 }
 
 // skipped is the result of a check that could not tell.

@@ -25,39 +25,61 @@ import (
 )
 
 func TestVolume(t *testing.T) {
-	t.Run("both checks run on a mounted, writable volume", func(t *testing.T) {
+	t.Run("all three checks run on a mounted, writable volume", func(t *testing.T) {
 		dir := tempDir(t)
 
-		results := volume(context.Background(), dir, mountTable(t, rootMountLine, mountLine(dir, "rw", fsExt4)))
+		results := volume(context.Background(), dir, "grafana", mountTable(t, rootMountLine, mountLine(dir, "rw", fsExt4)))
 
-		if len(results) != 2 {
-			t.Fatalf("got %d results, want 2: %+v", len(results), results)
+		if len(results) != 3 {
+			t.Fatalf("got %d results, want 3: %+v", len(results), results)
 		}
 		wantResult(t, results[0], CheckMount, Passed, "")
 		wantResult(t, results[1], CheckWritable, Passed, "")
+		wantResult(t, results[2], CheckGitDir, Passed, "")
 	})
 
-	t.Run("a failed mount check skips the writable one and says which failure", func(t *testing.T) {
-		results := volume(context.Background(), tempDir(t), mountTable(t, rootMountLine))
+	t.Run("the sub path reaches the Git directory check", func(t *testing.T) {
+		withDir, wholeDir := tempDir(t), tempDir(t)
+		table := mountTable(t, rootMountLine, mountLine(withDir, "rw", fsExt4), mountLine(wholeDir, "rw", fsExt4))
 
-		if len(results) != 2 {
-			t.Fatalf("got %d results, want 2: %+v", len(results), results)
+		withSubPath := volume(context.Background(), withDir, "grafana", table)
+		wholeClaim := volume(context.Background(), wholeDir, "", table)
+
+		wantResult(t, withSubPath[2], CheckGitDir, Passed, "")
+		wantResult(t, wholeClaim[2], CheckGitDir, Passed, "")
+		if strings.Contains(withSubPath[2].Message, "application can see") {
+			t.Errorf("a Git directory beside the synced directory is described as visible: %s", withSubPath[2].Message)
+		}
+		if !strings.Contains(wholeClaim[2].Message, "application can see") {
+			t.Errorf("a Git directory inside the synced directory is not described as visible: %s", wholeClaim[2].Message)
+		}
+	})
+
+	t.Run("a failed mount check skips the two after it and says which failure", func(t *testing.T) {
+		results := volume(context.Background(), tempDir(t), "grafana", mountTable(t, rootMountLine))
+
+		if len(results) != 3 {
+			t.Fatalf("got %d results, want 3: %+v", len(results), results)
 		}
 		wantResult(t, results[0], CheckMount, Failed, ReasonNotMounted)
 		wantResult(t, results[1], CheckWritable, Skipped, ReasonNotChecked)
-		if !strings.Contains(results[1].Message, ReasonNotMounted) {
-			t.Errorf("the skipped check does not name the failure that caused it: %s", results[1].Message)
+		wantResult(t, results[2], CheckGitDir, Skipped, ReasonNotChecked)
+		for _, skipped := range results[1:] {
+			if !strings.Contains(skipped.Message, "the mount check failed ("+ReasonNotMounted+")") {
+				t.Errorf("the skipped %s check does not name the failure that caused it: %s", skipped.Check, skipped.Message)
+			}
 		}
 	})
 
-	t.Run("a mount check that cannot tell still lets the writable one run", func(t *testing.T) {
-		results := volume(context.Background(), tempDir(t), noMountTable(t))
+	t.Run("a mount check that cannot tell still lets the others run", func(t *testing.T) {
+		results := volume(context.Background(), tempDir(t), "grafana", noMountTable(t))
 
 		wantResult(t, results[0], CheckMount, Skipped, ReasonNotChecked)
 		wantResult(t, results[1], CheckWritable, Passed, "")
+		wantResult(t, results[2], CheckGitDir, Passed, "")
 	})
 
-	t.Run("a mounted volume that cannot be written to fails the writable check", func(t *testing.T) {
+	t.Run("a mounted volume that cannot be written to fails the writable check and skips the Git directory", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root writes to a directory whatever its mode")
 		}
@@ -66,10 +88,27 @@ func TestVolume(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		results := volume(context.Background(), dir, mountTable(t, rootMountLine, mountLine(dir, "rw", fsExt4)))
+		results := volume(context.Background(), dir, "grafana", mountTable(t, rootMountLine, mountLine(dir, "rw", fsExt4)))
 
 		wantResult(t, results[0], CheckMount, Passed, "")
 		wantResult(t, results[1], CheckWritable, Failed, ReasonNotWritable)
+		wantResult(t, results[2], CheckGitDir, Skipped, ReasonNotChecked)
+		if !strings.Contains(results[2].Message, "the writable check failed ("+ReasonNotWritable+")") {
+			t.Errorf("the skipped check does not name the failure that caused it: %s", results[2].Message)
+		}
+	})
+
+	t.Run("a link where the state directory should be fails only the Git directory check", func(t *testing.T) {
+		dir := tempDir(t)
+		if err := os.Symlink(t.TempDir(), dir+"/.treebind"); err != nil {
+			t.Fatal(err)
+		}
+
+		results := volume(context.Background(), dir, "grafana", mountTable(t, rootMountLine, mountLine(dir, "rw", fsExt4)))
+
+		wantResult(t, results[0], CheckMount, Passed, "")
+		wantResult(t, results[1], CheckWritable, Passed, "")
+		wantResult(t, results[2], CheckGitDir, Failed, ReasonGitDirUnsafe)
 	})
 }
 

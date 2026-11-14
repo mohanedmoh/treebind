@@ -64,8 +64,9 @@ type Options struct {
 	Config config.Config
 	// Verifier decides which callers may read the report.
 	Verifier status.Verifier
-	// Preflight runs the volume checks. It defaults to preflight.Volume.
-	Preflight func(ctx context.Context, path string) []preflight.Result
+	// Preflight runs the volume checks on the mount path, for the sub path of the
+	// Treebind. It defaults to preflight.Volume.
+	Preflight func(ctx context.Context, path, subPath string) []preflight.Result
 	// Ready says whether the agent has synced. It defaults to never: there is no
 	// sync yet, and a Treebind must not turn ready before anything syncs.
 	Ready func() bool
@@ -202,7 +203,7 @@ func (a *agent) checkVolume(ctx context.Context) {
 	wait := a.RetryMin
 	var logged []string
 	for {
-		results := a.Preflight(ctx, a.Config.MountPath)
+		results := a.Preflight(ctx, a.Config.MountPath, a.Config.SubPath)
 		if ctx.Err() != nil {
 			return
 		}
