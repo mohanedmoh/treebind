@@ -169,6 +169,25 @@ func (f *Fixture) Publish(branch string, files map[string]string) string {
 	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
 }
 
+// PublishIgnored is Publish for files that a .gitignore of the scratch repository hides: they are
+// added by name, which Git does for an ignored file only when it is forced.
+func (f *Fixture) PublishIgnored(branch string, files map[string]string) string {
+	f.T.Helper()
+	for name, content := range files {
+		path := filepath.Join(f.scratch, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			f.T.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			f.T.Fatal(err)
+		}
+		f.Plain(f.scratch, "add", "-f", "--", name)
+	}
+	f.Plain(f.scratch, "commit", "-q", "--allow-empty", "-m", "change")
+	f.Plain(f.scratch, "push", "-q", "--force", f.Bare, "HEAD:refs/heads/"+branch)
+	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
+}
+
 // Rewrite resets the history of the scratch repository to the commit before its last, as a
 // force-push of an amended branch would, and the next Publish is a history that does not contain
 // what was there.

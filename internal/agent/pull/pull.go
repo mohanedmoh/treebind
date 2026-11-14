@@ -297,8 +297,10 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 
 	// --ff-only: Git applies the update, or writes nothing. It refuses when a file the update
 	// changes has a local edit, and when an untracked file is in the way, and leaves every other
-	// local edit as it is.
-	_, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", to)
+	// local edit as it is. --no-overwrite-ignore: Git writes over an untracked file that a .gitignore
+	// hides, unless it is told not to, and a file that the application keeps out of the repository,
+	// a .env or a local config, is the application's all the same.
+	_, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to)
 	if err != nil {
 		return Result{}, p.mergeFailed(ctx, from, to, err)
 	}

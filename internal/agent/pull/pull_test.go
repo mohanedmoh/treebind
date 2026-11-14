@@ -697,3 +697,27 @@ func TestPullGivesAFailureToLookAtTheUpdateTheReasonOfAPullAndNotOfTheCheckout(t
 		t.Errorf("message = %q, error underneath = %v, want it to say the files of the update cannot be listed, with the cause", got.Message, got.Err)
 	}
 }
+
+func TestPullDoesNotWriteOverAFileOfTheApplicationThatAGitignoreHides(t *testing.T) {
+	// A .env that the application keeps out of the repository is its own. Git writes over such a file when
+	// an update adds one at the same path, unless it is told not to.
+	f := gittest.New(t)
+	f.Publish(branchMain, map[string]string{".gitignore": ".env\n", fileA: contentA})
+	l := f.Layout(subPath)
+	if _, err := checkout.Open(context.Background(), f.CheckoutOptions(l, branchMain)); err != nil {
+		t.Fatal(err)
+	}
+	p := puller(t, f, l)
+	gittest.Write(t, l, ".env", "SECRET=mine\n")
+	theirs := f.PublishIgnored(branchMain, map[string]string{".env": "SECRET=theirs\n"})
+
+	_, err := p.Pull(context.Background())
+
+	got := errorOf(t, err, ReasonBlocked)
+	if !strings.Contains(got.Message, ".env") || gittest.Read(t, l, ".env") != "SECRET=mine\n" {
+		t.Errorf("message = %q, .env = %q, want the file named and left as it was", got.Message, gittest.Read(t, l, ".env"))
+	}
+	if head := f.InCheckout(l, "rev-parse", "HEAD"); head == theirs {
+		t.Error("the checkout moved to a commit that holds a file of the application's")
+	}
+}

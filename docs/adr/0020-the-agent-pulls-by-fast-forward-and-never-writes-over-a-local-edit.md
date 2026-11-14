@@ -40,7 +40,8 @@ The fast-forward is Git's, and so is the refusal. `merge --ff-only` writes nothi
 file that the update changes has a local edit, or when an untracked file is in the way, and it keeps
 every other local edit. That is FR-2, and it is Git's own check and not a list of mine: it knows
 about the index, about files that the update deletes, and about a file that the update adds where
-the application made one of its own. The pull then says `Blocked`, names a few of the files, and
+the application made one of its own, one that a `.gitignore` hides included: Git
+writes over such a file unless it is told not to, and the pull tells it not to. The pull then says `Blocked`, names a few of the files, and
 writes nothing. The next pull tries again, and goes on once the files are committed or given up.
 
 A pull that finds the two sides have gone different ways does not merge. It says `Diverged` with how
