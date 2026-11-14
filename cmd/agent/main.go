@@ -16,8 +16,9 @@ limitations under the License.
 
 // Command agent is the Treebind sync agent.
 //
-// It checks the volume it works on and serves its status to the operator. The
-// sync loop is not implemented yet, so the agent never reports itself ready.
+// It checks the volume it works on, makes the checkout of the repository or opens
+// the one that is there, and serves its status to the operator. The sync loop is not
+// implemented yet, so the agent never reports itself ready.
 package main
 
 import (
@@ -31,7 +32,9 @@ import (
 
 	"github.com/mohanedmoh/treebind/internal/agent/app"
 	"github.com/mohanedmoh/treebind/internal/agent/auth"
+	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/agent/umask"
 )
 
@@ -43,6 +46,10 @@ const (
 	exitConfig = 2
 )
 
+// openCheckout makes the checkout, or opens the one that is there. A test replaces it, so
+// that no test starts Git against a repository.
+var openCheckout = checkout.Open
+
 func main() {
 	umask.Set()
 
@@ -53,6 +60,12 @@ func main() {
 	code := run(ctx, os.Getenv, os.Stderr)
 	stop()
 	os.Exit(code)
+}
+
+// agentOptions is what the agent runs with: its settings, the check of the operator's token,
+// and the checkout that it makes once the volume is in order.
+func agentOptions(settings config.Config, verifier status.Verifier, logger *slog.Logger) app.Options {
+	return app.Options{Config: settings, Verifier: verifier, Logger: logger, Checkout: openCheckout}
 }
 
 // run does what main does, with its environment and its output passed in.
@@ -75,7 +88,7 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) int 
 		return exitConfig
 	}
 
-	if err := app.Run(ctx, app.Options{Config: settings, Verifier: verifier, Logger: logger}); err != nil {
+	if err := app.Run(ctx, agentOptions(settings, verifier, logger)); err != nil {
 		logger.Error("the agent stopped", "error", err)
 		return exitFailed
 	}

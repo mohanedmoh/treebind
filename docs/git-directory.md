@@ -68,7 +68,12 @@ are two other ways, and neither needs a change in Treebind:
 The whole claim is synced, so `.treebind` is inside what the application mounts. That works,
 with less protection: the directory is closed to other users (mode 0700, owned by the agent),
 and it is never committed. An application that runs as the same user as the agent, or as
-root, can still read and write it. A `subPath` cannot be `.treebind` or start with it.
+root, can still read and write it. The agent looks at what is in `.treebind/git` before every
+Git command, and refuses to start Git when it finds a config key, a hook or another file that it
+did not put there (see below), so what such an application plants there stops the sync instead
+of being run. A change made between that look and the start of Git is not ruled out: the look
+narrows the gap for such an application and does not close it. A `subPath` cannot be `.treebind`
+or start with it.
 
 ## What the agent checks
 
@@ -80,18 +85,51 @@ link in `.treebind` and `.treebind/git`, and refuses one of them that was swappe
 for another directory, while it was being checked. The way to the synced directory is looked at
 once, at start.
 
+The agent also looks at what is in `.treebind/git`: at start, after the directories, and again
+before every Git command it runs, so that a file that turns up later is found too. It takes only
+what it puts there itself, because some of what a Git directory can hold makes Git run a program
+or read from somewhere else, and the agent cannot switch all of it off from the command line:
+
+- **The config** may hold only the keys that `git init` writes, in the sections `core` and
+  `extensions`, with the synced directory as the work tree. Any other key or section is refused,
+  among them `url.<base>.insteadOf`, a key for one URL such as `http.<url>.sslVerify`,
+  `http.sslCAPath`, `core.sshCommand`, a filter and an include.
+- **`hooks` and `info`** have to be empty, so a hook, `info/attributes` or `info/exclude` is refused.
+- **`objects/info/alternates` and `objects/info/http-alternates`** have to be absent, so that no
+  object is read from another place.
+- **At the top of `.treebind/git`** only the files and directories that Git writes for the commands
+  the agent runs are taken. Anything else, such as `commondir`, `packed-refs` or a file of your
+  own, is refused, and so is a link.
+- **Replace refs** are not looked at but switched off for every command, so one in the refs
+  changes nothing that Git sees.
+
 A directory that fails is reported by the check `GitDir` with the reason `GitDirUnsafe`, and Git
-is not run against it. The agent keeps running and checks again, with a longer wait each time
-up to a minute, so it carries on once the directory is put right. A claim that cannot be written
-to fails the check with `ReadOnlyVolume`, `NotWritable` or `WriteFailed`, as the check
-`Writable` does. The result is in the agent's log, once for each change, and in its status
-report, which [the status page](agent-status.md) shows how to read by hand. The operator does not show it as
-a condition yet.
+is not run against it. The message names the directory, or the file in `.treebind/git` and what
+is wrong with it, with the line for the config. The agent keeps running and checks again, with a
+longer wait each time up to a minute, so it carries on once the directory is put right. A Git
+directory that the agent cannot look at, because it is not readable by the agent, is refused the same
+way: what it cannot look at it cannot tell is its own. A claim
+that cannot be written to fails the check with `ReadOnlyVolume`, `NotWritable` or `WriteFailed`,
+as the check `Writable` does. The result is in the agent's log, once for each change, and in its
+status report, which [the status page](agent-status.md) shows how to read by hand. The operator
+does not show it as a condition yet.
+
+The checkout looks as well, before it starts and before each command. When it finds such a file
+it stops with the same reason, `GitDirUnsafe`, and the name of the file, and runs no more Git. It
+leaves `.treebind/git` as it is, so that you can see what is there, and when the file was there
+before it began, it changes nothing in the synced directory either.
 
 To put it right, remove `.treebind` or `.treebind/git` when the message names one of them, or
 make it a directory of the user the agent runs as with mode 0700. When the message names a link
 or a file on the way to the synced directory, replace it with a real directory. The agent does
 not change a directory that is not its own.
+
+When the message names something inside `.treebind/git`, find out how it got there: something
+other than the agent wrote to the directory. Then remove the file it names, or the line of the
+config. The agent checks again, carries on, and reopens the checkout as it was. You can instead
+empty `.treebind/git`. The agent then makes it again and makes the checkout as on a first start,
+which takes the files in the synced directory when they match the branch and refuses them with
+`DirectoryNotEmpty` when they do not. The commits that were not pushed are lost with it.
 
 ## Room on the claim
 

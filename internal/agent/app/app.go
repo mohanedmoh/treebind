@@ -14,12 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package app runs the agent: it serves the status endpoint and the probes, and
-// it checks the volume until the checks pass.
+// Package app runs the agent: it serves the status endpoint and the probes, it
+// checks the volume until the checks pass, and then it makes the checkout of the
+// repository or opens the one that is there.
 //
 // A failed check does not end the agent. It stays up, says what failed in its
 // report, and checks again, so the operator can read the failure and the failure
-// goes away when the volume is put right (docs/adr/0009 and 0011).
+// goes away when the volume is put right (docs/adr/0009 and 0011). The checkout is
+// the same: a repository that cannot be reached, or a directory that is not empty,
+// is reported and tried again, and the agent carries on once it is put right
+// (docs/adr/0017).
 package app
 
 import (
@@ -34,7 +38,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/git"
+	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 )
@@ -57,6 +64,16 @@ const (
 
 	// maxReasonLog bounds the reason of a refusal that is logged.
 	maxReasonLog = 200
+
+	// CheckCheckout is the name of the check that says whether the checkout of the
+	// repository is made. It is in the report after the checks of the volume.
+	CheckCheckout = "Checkout"
+
+	// shortCommit is how much of a commit id a message shows.
+	shortCommit = 12
+
+	// maxMessage is the most bytes of a message of the checkout that the report holds.
+	maxMessage = 4096
 )
 
 // Options is what Run needs. Only Config and Verifier are required.
@@ -67,6 +84,10 @@ type Options struct {
 	// Preflight runs the volume checks on the mount path, for the sub path of the
 	// Treebind. It defaults to preflight.Volume.
 	Preflight func(ctx context.Context, path, subPath string) []preflight.Result
+	// Checkout makes the checkout of the repository, or opens the one that is there. It
+	// is run once the volume checks pass, and again with a growing wait while it fails.
+	// It defaults to none, so that nothing is fetched: the agent starts with checkout.Open.
+	Checkout func(ctx context.Context, options checkout.Options) (checkout.Result, error)
 	// Ready says whether the agent has synced. It defaults to never: there is no
 	// sync yet, and a Treebind must not turn ready before anything syncs.
 	Ready func() bool
@@ -84,7 +105,7 @@ type Options struct {
 type agent struct {
 	Options
 	startedAt time.Time
-	// checks is the latest results of the volume checks, as a report carries them.
+	// checks is the latest results of the checks, as a report carries them.
 	checks atomic.Pointer[checked]
 	refuse *rateLimit
 }
@@ -124,7 +145,7 @@ func Run(ctx context.Context, options Options) error {
 	var checking sync.WaitGroup
 	checkCtx, stopChecking := context.WithCancel(ctx)
 	defer stopChecking()
-	checking.Go(func() { a.checkVolume(checkCtx) })
+	checking.Go(func() { a.prepare(checkCtx) })
 
 	var serveErr error
 	select {
@@ -197,20 +218,90 @@ func (a *agent) report() status.Report {
 	return report
 }
 
+// prepare checks the volume, and once it is in order makes the checkout.
+func (a *agent) prepare(ctx context.Context) {
+	if volume, ok := a.checkVolume(ctx); ok {
+		a.openCheckout(ctx, volume)
+	}
+}
+
 // checkVolume runs the volume checks, and runs them again with a growing wait while
-// one fails. Once none fails the volume is in order and the loop ends.
-func (a *agent) checkVolume(ctx context.Context) {
+// one fails. Once none fails the volume is in order, the loop ends and it returns the
+// results of that run and true. It returns false when the agent is told to stop first.
+func (a *agent) checkVolume(ctx context.Context) ([]preflight.Result, bool) {
 	wait := a.RetryMin
 	var logged []string
 	for {
 		results := a.Preflight(ctx, a.Config.MountPath, a.Config.SubPath)
 		if ctx.Err() != nil {
+			return nil, false
+		}
+		failed := preflight.AnyFailed(results)
+		a.publish(results, a.waitingForTheVolume(failed))
+		logged = a.logChanges("volume check", results, logged)
+
+		if !failed {
+			return results, true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, a.RetryMax)
+	}
+}
+
+// waitingForTheVolume is the result of the checkout while the volume checks have not
+// passed: none, when the agent makes no checkout, and otherwise a skipped check that says
+// why it has not been tried.
+func (a *agent) waitingForTheVolume(failed bool) *preflight.Result {
+	if a.Checkout == nil {
+		return nil
+	}
+	// With the volume in order the checkout starts at once, and this stays in the report until
+	// its result is there, which for a large repository takes a while.
+	message := "running: its result is here when it ends"
+	if failed {
+		message = "not tried, because a volume check failed"
+	}
+	return &preflight.Result{Check: CheckCheckout, Outcome: preflight.Skipped, Reason: preflight.ReasonNotChecked, Message: message}
+}
+
+// publish stores the report's checks: the volume checks and the result of the checkout, if
+// there is one.
+func (a *agent) publish(volume []preflight.Result, checkoutResult *preflight.Result) {
+	results := append([]preflight.Result(nil), volume...)
+	if checkoutResult != nil {
+		results = append(results, *checkoutResult)
+	}
+	a.checks.Store(&checked{at: a.Now().UTC(), checks: status.ChecksFrom(results)})
+}
+
+// openCheckout makes the checkout of the repository, or opens the one that is there, and
+// does it again with a growing wait while it fails: the repository may not be reachable
+// yet, or the directory may be emptied. Once it succeeds the loop ends.
+func (a *agent) openCheckout(ctx context.Context, volume []preflight.Result) {
+	if a.Checkout == nil {
+		return
+	}
+	options, err := a.checkoutOptions()
+	wait := a.RetryMin
+	var logged []string
+	for {
+		var result preflight.Result
+		if err != nil {
+			result = failedCheckout(err)
+		} else {
+			result = a.runCheckout(ctx, options)
+		}
+		if ctx.Err() != nil {
 			return
 		}
-		a.checks.Store(&checked{at: a.Now().UTC(), checks: status.ChecksFrom(results)})
-		logged = a.logChanges(results, logged)
+		a.publish(volume, &result)
+		logged = a.logChanges("checkout", []preflight.Result{result}, logged)
 
-		if !preflight.AnyFailed(results) {
+		if result.Outcome == preflight.Passed {
 			return
 		}
 		select {
@@ -222,10 +313,73 @@ func (a *agent) checkVolume(ctx context.Context) {
 	}
 }
 
+// checkoutOptions says what to check out and where from the settings of the pod. The
+// credentials are the files that the operator mounted, and never their content.
+func (a *agent) checkoutOptions() (checkout.Options, error) {
+	where, err := layout.New(a.Config.MountPath, a.Config.SubPath)
+	if err != nil {
+		return checkout.Options{}, err
+	}
+	return checkout.Options{
+		Layout: where,
+		URL:    a.Config.RepoURL,
+		Branch: a.Config.RepoBranch,
+		Git: git.Options{SSH: git.SSH{
+			IdentityFile:   a.Config.SSHKeyFile,
+			KnownHostsFile: a.Config.KnownHostsFile,
+		}},
+	}, nil
+}
+
+// runCheckout runs the checkout once and turns what came of it into a result of the check.
+func (a *agent) runCheckout(ctx context.Context, options checkout.Options) preflight.Result {
+	made, err := a.Checkout(ctx, options)
+	if err != nil {
+		return failedCheckout(err)
+	}
+	commit := "no commit yet"
+	if made.Commit != "" {
+		commit = made.Commit[:min(len(made.Commit), shortCommit)]
+	}
+	var message string
+	switch made.Outcome {
+	case checkout.Cloned:
+		message = fmt.Sprintf("cloned the branch %s (%s) into %s", made.Branch, commit, options.Layout.WorkTree)
+	case checkout.Adopted:
+		message = fmt.Sprintf("%s holds exactly the files of the branch %s (%s) and is the checkout now",
+			options.Layout.WorkTree, made.Branch, commit)
+	default:
+		message = fmt.Sprintf("reopened the checkout of the branch %s (%s) in %s", made.Branch, commit, options.Layout.WorkTree)
+	}
+	return preflight.Result{Check: CheckCheckout, Outcome: preflight.Passed, Message: message}
+}
+
+// failedCheckout is the failed result for an error of the checkout: its own reason when
+// the error has one, and the reason for a checkout that could not be made when it has not.
+func failedCheckout(err error) preflight.Result {
+	result := preflight.Result{
+		Check: CheckCheckout, Outcome: preflight.Failed, Reason: checkout.ReasonCheckoutFailed, Message: shortened(err.Error()),
+	}
+	if refused, ok := errors.AsType[*checkout.Error](err); ok {
+		result.Reason = refused.Reason
+	}
+	return result
+}
+
+// shortened cuts a message to maxMessage bytes, at a character. What Git wrote is already
+// short and has the credentials of any URL removed, and this keeps the report small whatever
+// else a message holds.
+func shortened(message string) string {
+	if len(message) <= maxMessage {
+		return message
+	}
+	return strings.ToValidUTF8(message[:maxMessage], "") + "..."
+}
+
 // logChanges logs the results that differ from the ones last logged, so that a
 // check that keeps failing is logged once and not at every retry. It returns what
 // was logged.
-func (a *agent) logChanges(results []preflight.Result, before []string) []string {
+func (a *agent) logChanges(what string, results []preflight.Result, before []string) []string {
 	now := make([]string, len(results))
 	for i, result := range results {
 		now[i] = result.Check + "|" + string(result.Outcome) + "|" + result.Reason + "|" + result.Message
@@ -236,7 +390,7 @@ func (a *agent) logChanges(results []preflight.Result, before []string) []string
 		if result.Outcome != preflight.Passed {
 			level = slog.LevelWarn
 		}
-		a.Logger.Log(context.Background(), level, "volume check",
+		a.Logger.Log(context.Background(), level, what,
 			"check", result.Check, "outcome", string(result.Outcome), "reason", result.Reason, "message", result.Message)
 	}
 	return now

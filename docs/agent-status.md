@@ -75,3 +75,19 @@ The operator may create and patch ConfigMaps in every namespace for this, and no
 else: it reads no ConfigMap and changes only one that the Treebind owns. A ConfigMap
 of the name `<name>-sync-keys` that someone else made is left alone, and the
 condition says `KeysUnavailable` when that is why the agent refuses the token.
+
+## What the report holds
+
+The report lists the agent's checks, in the order the agent runs them, each with an outcome
+(`Passed`, `Failed` or `Skipped`), a reason when it did not pass, and a message:
+
+| Check | What it is | More |
+| :-- | :-- | :-- |
+| `Mount` | The claim is a mounted volume | [Pod security](pod-security.md) |
+| `Writable` | The agent can write to it | [Pod security](pod-security.md) |
+| `GitDir` | The directories where the agent keeps its Git directory are its own and private | [The Git directory](git-directory.md) |
+| `Checkout` | The checkout of the repository is made, or the one that is there is opened | [The checkout](checkout.md) |
+
+A check that cannot be tried because one before it failed is `Skipped`, with the reason
+`NotChecked` and the check that failed in the message. The operator does not show the checks as
+conditions yet: they are in the report and in the agent's log.

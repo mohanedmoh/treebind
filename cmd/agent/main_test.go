@@ -25,8 +25,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 )
+
+// No test of the agent's main starts Git: the checkout is the one of the package, which has
+// its own tests, and here it does nothing.
+func init() {
+	openCheckout = func(context.Context, checkout.Options) (checkout.Result, error) {
+		return checkout.Result{Outcome: checkout.Cloned, Branch: "main"}, nil
+	}
+}
 
 func environment(extra map[string]string) func(string) string {
 	env := map[string]string{
@@ -129,5 +138,26 @@ func TestRunRefusesAnHTTPRepositoryAndSaysWhy(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("the message does not say %q:\n%s", want, stderr.String())
 		}
+	}
+}
+
+func TestTheAgentRunsTheCheckoutOfThePackage(t *testing.T) {
+	var asked checkout.Options
+	previous := openCheckout
+	openCheckout = func(_ context.Context, options checkout.Options) (checkout.Result, error) {
+		asked = options
+		return checkout.Result{Outcome: checkout.Reopened}, nil
+	}
+	t.Cleanup(func() { openCheckout = previous })
+	options := agentOptions(config.Config{RepoURL: "https://example.com/a.git"}, nil, nil)
+
+	made, err := options.Checkout(context.Background(), checkout.Options{URL: "https://example.com/b.git"})
+
+	if err != nil || made.Outcome != checkout.Reopened || asked.URL != "https://example.com/b.git" {
+		t.Errorf("Checkout = %+v, %v with %+v, want the function of the package, called with what it is given",
+			made, err, asked)
+	}
+	if options.Config.RepoURL != "https://example.com/a.git" {
+		t.Errorf("the settings were not passed on: %+v", options.Config)
 	}
 }
