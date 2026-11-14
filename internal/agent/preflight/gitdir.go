@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"path/filepath"
 
+	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 )
 
@@ -30,8 +31,10 @@ import (
 const gitDirDocsURL = "https://github.com/mohanedmoh/treebind/blob/main/docs/git-directory.md"
 
 // checkGitDir makes the directories where the agent keeps its Git directory and checks
-// that they are the agent's own and private (docs/adr/0016). A directory that is a link,
-// belongs to another user or is open to group or others is refused, because the Git
+// that they are the agent's own and private (docs/adr/0016), and then that the Git
+// directory holds nothing the agent did not put there (docs/adr/0019). A directory that is
+// a link, belongs to another user or is open to group or others is refused, and so is a
+// config key, a hook or another file that the agent does not make, because the Git
 // directory is where a hook or a config key would run code with the agent's credentials.
 // A claim that cannot be written to fails like the writable check says it does.
 func checkGitDir(path, subPath string) Result {
@@ -50,11 +53,7 @@ func checkGitDir(path, subPath string) Result {
 	var unsafe *layout.UnsafeError
 	switch err := where.Prepare(); {
 	case err == nil:
-		return Result{
-			Check:   CheckGitDir,
-			Outcome: Passed,
-			Message: passedMessage(where),
-		}
+		return checkContent(where)
 	case errors.As(err, &unsafe):
 		return Result{
 			Check:   CheckGitDir,
@@ -64,6 +63,41 @@ func checkGitDir(path, subPath string) Result {
 		}
 	default:
 		return writeFailure(CheckGitDir, failedIn(where, err), "make the Git directory in", err)
+	}
+}
+
+// checkContent looks at what is in the Git directory, which Prepare found to be the agent's
+// own and private, and refuses what the agent did not put there: a config key, a hook, a
+// file in info, alternates or an entry it does not make. An empty Git directory, which is
+// what Prepare makes on the first start, holds nothing to refuse.
+func checkContent(where layout.Layout) Result {
+	err := git.VerifyGitDir(where.GitDir, where.WorkTree)
+	if untrusted, ok := errors.AsType[*git.GitDirError](err); ok {
+		return Result{
+			Check:   CheckGitDir,
+			Outcome: Failed,
+			Reason:  ReasonGitDirUnsafe,
+			Message: fmt.Sprintf("%s. Git is not run against it. Remove the file or the setting that it names, or empty %s "+
+				"for the agent to make it again, which loses the commits that were not pushed; see %s",
+				untrusted, where.GitDir, gitDirDocsURL),
+		}
+	}
+	if err != nil {
+		// What the agent cannot look at, it cannot tell is its own, so Git is not run against it
+		// either.
+		return Result{
+			Check:   CheckGitDir,
+			Outcome: Failed,
+			Reason:  ReasonGitDirUnsafe,
+			Message: fmt.Sprintf("the agent cannot look at what is in %s: %v. Git is not run against what it cannot look at. "+
+				"Make it readable by the agent, which owns it, or empty it for the agent to make it again; see %s",
+				where.GitDir, err, gitDirDocsURL),
+		}
+	}
+	return Result{
+		Check:   CheckGitDir,
+		Outcome: Passed,
+		Message: passedMessage(where),
 	}
 }
 

@@ -23,7 +23,9 @@ limitations under the License.
 // the repository and branch that the Treebind names.
 //
 // Everything goes through the Runner of internal/agent/git, so the protections of
-// docs/adr/0013 apply to every command.
+// docs/adr/0013 apply to every command. Git is not run against a Git directory that holds
+// something the agent did not put there: Open looks at it first, and the Runner looks again
+// before every command (docs/adr/0019).
 package checkout
 
 import (
@@ -44,6 +46,10 @@ import (
 // DefaultFetchTimeout is how long the first fetch and the checkout may take. A large
 // repository over a slow link needs far longer than the Runner's own timeout.
 const DefaultFetchTimeout = 30 * time.Minute
+
+// gitDirDocsURL is where a user finds how the agent keeps its Git directory, and how to put
+// right one that the agent refuses.
+const gitDirDocsURL = "https://github.com/mohanedmoh/treebind/blob/main/docs/git-directory.md"
 
 // Outcome says what Open did.
 type Outcome string
@@ -81,6 +87,14 @@ const (
 	ReasonFetchFailed = "FetchFailed"
 	// ReasonCheckoutFailed means the agent could not make the checkout on the volume.
 	ReasonCheckoutFailed = "CheckoutFailed"
+	// ReasonGitDirUnsafe means the Git directory holds something that the agent did not put
+	// there, such as a config key, a hook, a file in info or the alternates of the object
+	// store, which could make Git run a program or read from another place (docs/adr/0019), or
+	// that the agent cannot look at it to tell.
+	// Git is not run against it from the step that found it on, whichever step that was, and
+	// the Git directory is left as it is. It is the reason of the preflight check GitDir for
+	// the same cause.
+	ReasonGitDirUnsafe = "GitDirUnsafe"
 )
 
 // Error is a checkout that was refused or that failed. The message is for people and holds
@@ -113,7 +127,8 @@ type Options struct {
 	// Branch is the branch to follow, or empty for the default branch of the repository.
 	Branch string
 	// Git are the settings of the Runner: the git binary, ssh and the CA bundle. GitDir,
-	// WorkTree and AllowGitDirInWorkTree are taken from Layout.
+	// WorkTree and AllowGitDirInWorkTree are taken from Layout, and VerifyGitDir is always
+	// set.
 	Git git.Options
 	// FetchTimeout is how long the first fetch and the checkout may take.
 	// DefaultFetchTimeout when it is zero.
@@ -150,21 +165,44 @@ func Open(ctx context.Context, o Options) (Result, error) {
 	if o.FetchTimeout == 0 {
 		o.FetchTimeout = DefaultFetchTimeout
 	}
+	// The Runner looks before every command as well. Looking here first, before anything is
+	// made, means that a refusal changes nothing, not even the synced directory, and that a Git
+	// directory that cannot be read is said before the repository is asked anything. What
+	// cannot be looked at is not run Git against, which is a refusal too.
+	if err := git.VerifyGitDir(o.Layout.GitDir, o.Layout.WorkTree); err != nil {
+		if _, refused := errors.AsType[*git.GitDirError](err); !refused {
+			return Result{}, &Error{
+				Reason: ReasonGitDirUnsafe, Err: err,
+				Message: fmt.Sprintf("the agent cannot look at what is in %s: %v. Git is not run against what it cannot look at. "+
+					"Make it readable by the agent, which owns it, or empty it for the agent to make it again; see %s",
+					o.Layout.GitDir, err, gitDirDocsURL),
+			}
+		}
+		return Result{}, fail(ReasonCheckoutFailed, "the Git directory cannot be looked at: %v", err)
+	}
 	if err := o.Layout.MakeWorkTree(); err != nil {
 		return Result{}, fail(ReasonCheckoutFailed, "the synced directory cannot be made: %v", err)
 	}
 
-	options := o.Git
-	options.GitDir = o.Layout.GitDir
-	options.WorkTree = o.Layout.WorkTree
-	options.AllowGitDirInWorkTree = o.Layout.GitDirInWorkTree
-	runner, err := git.New(options)
+	runner, err := git.New(o.runnerOptions())
 	if err != nil {
 		return Result{}, fail(ReasonCheckoutFailed, "Git cannot be set up: %v", err)
 	}
 
 	c := &checkout{Options: o, git: runner}
 	return c.open(ctx)
+}
+
+// runnerOptions are the settings of the Runner for the checkout: the directories of the
+// layout, and a look at the Git directory before every command, so that Git is not run
+// against one that holds something the agent did not put there (docs/adr/0019).
+func (o Options) runnerOptions() git.Options {
+	options := o.Git
+	options.GitDir = o.Layout.GitDir
+	options.WorkTree = o.Layout.WorkTree
+	options.AllowGitDirInWorkTree = o.Layout.GitDirInWorkTree
+	options.VerifyGitDir = true
+	return options
 }
 
 // checkout is one call of Open.
@@ -295,7 +333,7 @@ func (c *checkout) first(ctx context.Context, remote remoteState) (Result, error
 	if remote.tip == "" {
 		// The repository has no commits, so nothing can be overwritten, and the first sync
 		// commits whatever is in the directory.
-		return c.result(ctx, outcome), nil
+		return c.result(ctx, outcome)
 	}
 
 	tip, err := c.fetch(ctx)
@@ -330,7 +368,7 @@ func (c *checkout) populate(ctx context.Context, tip string) (Result, error) {
 		return Result{}, fail(ReasonCheckoutFailed, "the files cannot be written to %s: %v", c.Layout.WorkTree, err)
 	}
 	c.removeMarker()
-	return c.result(ctx, Cloned), nil
+	return c.result(ctx, Cloned)
 }
 
 // adopt makes a directory that is not empty the checkout, if it matches the branch
@@ -361,7 +399,7 @@ func (c *checkout) adopt(ctx context.Context, tip string) (Result, error) {
 	if _, err := c.git.Run(ctx, "update-ref", headsPrefix+c.branch, tip); err != nil {
 		return Result{}, fail(ReasonCheckoutFailed, "the branch %s cannot be made: %v", c.branch, err)
 	}
-	return c.result(ctx, Adopted), nil
+	return c.result(ctx, Adopted)
 }
 
 // reopen opens a checkout from an earlier start, after checking that it shares history
@@ -372,7 +410,7 @@ func (c *checkout) reopen(ctx context.Context, remote remoteState) (Result, erro
 	c.removeMarker()
 	if remote.tip == "" {
 		// The repository has no commits: there is nothing to compare with.
-		return c.result(ctx, Reopened), nil
+		return c.result(ctx, Reopened)
 	}
 	if _, err := c.fetch(ctx); err != nil {
 		return Result{}, err
@@ -387,7 +425,7 @@ func (c *checkout) reopen(ctx context.Context, remote remoteState) (Result, erro
 				"and Treebind does not sync it with this one. Empty %s to start again, or set the URL back",
 			c.Layout.GitDir, c.branch, c.Layout.GitDir)
 	}
-	return c.result(ctx, Reopened), nil
+	return c.result(ctx, Reopened)
 }
 
 // resume finishes a first checkout that stopped half way, which the marker says the agent
@@ -423,8 +461,13 @@ func (c *checkout) resume(ctx context.Context, sha string, remote remoteState) (
 
 // refuse takes back what a checkout that was refused made, so that the next start looks at
 // the directory afresh and the refusal does not hold a full history. It returns the
-// refusal, with a word about it if taking it back failed.
+// refusal, with a word about it if taking it back failed. A Git directory that holds
+// something the agent did not put there is left as it is: what is in it is not the agent's
+// to remove, and the user is to see what the refusal names.
 func (c *checkout) refuse(refusal *Error) *Error {
+	if refusal.Reason == ReasonGitDirUnsafe {
+		return refusal
+	}
 	err := c.clearGitDir()
 	if err == nil {
 		return refusal
@@ -436,18 +479,35 @@ func (c *checkout) refuse(refusal *Error) *Error {
 }
 
 // result describes the checkout as it is.
-func (c *checkout) result(ctx context.Context, outcome Outcome) Result {
-	commit, _, _ := c.try(ctx, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
-	return Result{Outcome: outcome, Branch: c.branch, Commit: commit}
+func (c *checkout) result(ctx context.Context, outcome Outcome) (Result, error) {
+	commit, _, err := c.try(ctx, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+	if err != nil {
+		return Result{}, fail(ReasonCheckoutFailed, "the checkout in %s cannot be read: %v", c.Layout.GitDir, err)
+	}
+	return Result{Outcome: outcome, Branch: c.branch, Commit: commit}, nil
 }
 
 // fail returns an *Error. The last of the arguments that is an error is the one underneath.
+// One that is a refusal to run Git against the Git directory makes the *Error that refusal,
+// with ReasonGitDirUnsafe, whichever step it stopped: what to do about it is the same.
 func fail(reason, format string, args ...any) *Error {
 	e := &Error{Reason: reason, Message: fmt.Sprintf(format, args...)}
 	for _, arg := range args {
 		if err, ok := arg.(error); ok {
 			e.Err = err
 		}
+	}
+	if untrusted, ok := errors.AsType[*git.GitDirError](e.Err); ok {
+		e.Reason = ReasonGitDirUnsafe
+		// What a Runner refused says which command it did not run, and what the directory
+		// check found says that none was.
+		what := untrusted.Error() + ". Git was not run against it"
+		if refused, ok := errors.AsType[*git.Error](e.Err); ok {
+			what = refused.Error()
+		}
+		e.Message = fmt.Sprintf("%s. Remove the file or the setting that it names, or empty "+
+			"%s at the root of the claim for the agent to make it again, which loses the commits that were not pushed; see %s",
+			what, filepath.Join(config.StateDirName, layout.GitDirName), gitDirDocsURL)
 	}
 	return e
 }
