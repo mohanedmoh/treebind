@@ -16,8 +16,9 @@ limitations under the License.
 
 // Package preflight checks, once at start, that the volume the agent writes to
 // can hold a checkout: that it is a mounted volume, that the agent's own user can
-// write to it, and that the directories where the agent keeps its Git directory are
-// its own and private (docs/adr/0016).
+// write to it, that the directories where the agent keeps its Git directory are
+// its own and private (docs/adr/0016), and that the Git directory holds nothing the
+// agent did not put there (docs/adr/0019).
 //
 // A check never refuses a setup that works. One that cannot tell, because the
 // mount table is unreadable or a check it depends on failed, is skipped, and that
@@ -80,7 +81,9 @@ const (
 	ReasonWriteFailed = "WriteFailed"
 	// ReasonGitDirUnsafe means the state directory, the Git directory or a directory on
 	// the way to the synced directory is a link, is not a directory, belongs to another
-	// user or is open to group or others. Git is not run against it.
+	// user or is open to group or others, or that the Git directory holds something the
+	// agent did not put there, such as a config key or a hook (docs/adr/0019), or that the
+	// agent cannot look at it to tell. Git is not run against it.
 	ReasonGitDirUnsafe = "GitDirUnsafe"
 	// ReasonTimedOut means the volume did not answer in time.
 	ReasonTimedOut = "TimedOut"

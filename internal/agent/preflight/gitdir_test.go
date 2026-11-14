@@ -22,6 +22,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/mohanedmoh/treebind/internal/agent/layout"
 )
 
 func TestCheckGitDirPassesOnAClaimItCanMakeTheDirectoriesIn(t *testing.T) {
@@ -45,7 +47,7 @@ func TestCheckGitDirSaysWhenTheApplicationCanSeeTheGitDirectory(t *testing.T) {
 	result := checkGitDir(tempDir(t), "")
 
 	wantResult(t, result, CheckGitDir, Passed, "")
-	for _, want := range []string{"application can see", "subPath", "git-directory.md"} {
+	for _, want := range []string{"application can see", "subPath", docsPage} {
 		if !strings.Contains(result.Message, want) {
 			t.Errorf("the message of a Git directory inside the synced directory does not say %q: %s", want, result.Message)
 		}
@@ -85,7 +87,7 @@ func TestCheckGitDirRefusesADirectoryThatIsNotTheAgents(t *testing.T) {
 			result := checkGitDir(dir, "grafana")
 
 			wantResult(t, result, CheckGitDir, Failed, ReasonGitDirUnsafe)
-			for _, want := range []string{filepath.Join(dir, ".treebind"), tt.want, "Git is not run against it", "git-directory.md", "uid", "with mode 0700"} {
+			for _, want := range []string{filepath.Join(dir, ".treebind"), tt.want, notRunHere, docsPage, "uid", "with mode 0700"} {
 				if !strings.Contains(result.Message, want) {
 					t.Errorf("the message does not say %q: %s", want, result.Message)
 				}
@@ -191,6 +193,164 @@ func TestGitDirReasonIsItsOwn(t *testing.T) {
 	} {
 		if other == ReasonGitDirUnsafe {
 			t.Errorf("%q is used for two causes (docs/adr/0009)", other)
+		}
+	}
+}
+
+// Names that the tests of what is in the Git directory use again and again.
+const (
+	subGrafana = "grafana"
+	gitConfig  = "config"
+	notRunHere = "Git is not run against it"
+	docsPage   = "git-directory.md"
+)
+
+// fillGitDir writes what the agent's checkout leaves in the Git directory: HEAD, the config
+// that init writes, with the work tree of the layout, and the directories of the objects and
+// the refs.
+func fillGitDir(t *testing.T, where layout.Layout) {
+	t.Helper()
+	for _, dir := range []string{"objects", filepath.Join("refs", "heads")} {
+		if err := os.MkdirAll(filepath.Join(where.GitDir, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeIn(t, where, "HEAD", "ref: refs/heads/main\n", 0o600)
+	writeIn(t, where, gitConfig, "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n"+
+		"\tlogallrefupdates = true\n\tworktree = "+where.WorkTree+"\n", 0o600)
+}
+
+// writeIn writes a file in the Git directory, as an application that can write there would.
+func writeIn(t *testing.T, where layout.Layout, rel, content string, mode os.FileMode) {
+	t.Helper()
+	path := filepath.Join(where.GitDir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// layoutOf returns the layout of a claim, with the directories made as the check makes them.
+func layoutOf(t *testing.T, dir, subPath string) layout.Layout {
+	t.Helper()
+	where, err := layout.New(dir, subPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := where.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	return where
+}
+
+func TestCheckGitDirPassesOnAGitDirectoryThatIsEmptyOrHoldsWhatTheAgentMakes(t *testing.T) {
+	for _, subPath := range []string{subGrafana, ""} {
+		t.Run("sub path "+subPath, func(t *testing.T) {
+			dir := tempDir(t)
+			where := layoutOf(t, dir, subPath)
+
+			// Empty, as the first start makes it.
+			wantResult(t, checkGitDir(dir, subPath), CheckGitDir, Passed, "")
+
+			fillGitDir(t, where)
+
+			result := checkGitDir(dir, subPath)
+
+			wantResult(t, result, CheckGitDir, Passed, "")
+			if result.Message != passedMessage(where) {
+				t.Errorf("message = %q, want the one of a Git directory that is private: %q", result.Message, passedMessage(where))
+			}
+		})
+	}
+}
+
+func TestCheckGitDirRefusesAGitDirectoryThatHoldsWhatTheAgentDidNotPutThere(t *testing.T) {
+	tests := []struct {
+		name string
+		// plant puts it in the Git directory, and returns what puts it right.
+		plant func(t *testing.T, where layout.Layout) (undo func())
+		// path is the file that the message names, and problem what it says about it.
+		path, problem string
+	}{
+		{"a hook", func(t *testing.T, where layout.Layout) func() {
+			writeIn(t, where, filepath.Join("hooks", "post-checkout"), "#!/bin/sh\n", 0o700)
+			return func() { remove(t, filepath.Join(where.GitDir, "hooks", "post-checkout")) }
+		}, "hooks", "holds post-checkout"},
+		{"a config key", func(t *testing.T, where layout.Layout) func() {
+			config, err := os.ReadFile(filepath.Join(where.GitDir, gitConfig))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeIn(t, where, gitConfig, string(config)+"\tsshCommand = /tmp/evil\n", 0o600)
+			return func() { writeIn(t, where, gitConfig, string(config), 0o600) }
+		}, gitConfig, "line 7 sets core.sshcommand"},
+		{"info/attributes", func(t *testing.T, where layout.Layout) func() {
+			writeIn(t, where, filepath.Join("info", "attributes"), "* filter=x\n", 0o600)
+			return func() { remove(t, filepath.Join(where.GitDir, "info", "attributes")) }
+		}, "info", "holds attributes"},
+		{"a file at the top that the agent does not make", func(t *testing.T, where layout.Layout) func() {
+			writeIn(t, where, "notes.txt", "x\n", 0o600)
+			return func() { remove(t, filepath.Join(where.GitDir, "notes.txt")) }
+		}, "notes.txt", "is not a file that the agent makes"},
+	}
+	for _, tt := range tests {
+		for _, subPath := range []string{subGrafana, ""} {
+			t.Run(tt.name+", sub path "+subPath, func(t *testing.T) {
+				dir := tempDir(t)
+				where := layoutOf(t, dir, subPath)
+				fillGitDir(t, where)
+				undo := tt.plant(t, where)
+
+				result := checkGitDir(dir, subPath)
+
+				wantResult(t, result, CheckGitDir, Failed, ReasonGitDirUnsafe)
+				for _, want := range []string{
+					filepath.Join(where.GitDir, tt.path) + " " + tt.problem, notRunHere, "Remove the file or the setting",
+					"empty " + where.GitDir, docsPage,
+				} {
+					if !strings.Contains(result.Message, want) {
+						t.Errorf("the message does not say %q: %s", want, result.Message)
+					}
+				}
+
+				// The agent checks again, and carries on once it is put right.
+				undo()
+				wantResult(t, checkGitDir(dir, subPath), CheckGitDir, Passed, "")
+			})
+		}
+	}
+}
+
+func remove(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckGitDirSaysWhenItCannotLookInTheGitDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a directory whatever its mode")
+	}
+	dir := tempDir(t)
+	where := layoutOf(t, dir, subGrafana)
+	fillGitDir(t, where)
+	hooks := filepath.Join(where.GitDir, "hooks")
+	if err := os.Mkdir(hooks, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
+
+	result := checkGitDir(dir, subGrafana)
+
+	// The agent is shut out of a directory of its own. It cannot tell what is in it, so Git is
+	// not run against it, and the advice is to make it readable, not writable.
+	wantResult(t, result, CheckGitDir, Failed, ReasonGitDirUnsafe)
+	for _, want := range []string{"cannot look at what is in " + where.GitDir + ":", "Git is not run", "Make it readable"} {
+		if !strings.Contains(result.Message, want) {
+			t.Errorf("the message does not say %q: %s", want, result.Message)
 		}
 	}
 }

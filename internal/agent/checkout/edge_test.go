@@ -470,23 +470,34 @@ func TestOpenDoesNotClearAGitDirectoryThatItDidNotMake(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, f *fixture, l layout.Layout)
-		want  string
+		// want is what the message names: one of these, split at "|".
+		want   string
+		reason string
 	}{
+		// What Git would read as configuration, or that the agent never writes, is refused
+		// before Git is run (docs/adr/0019). A ref, or a file that Git itself writes, is a sign
+		// of somebody else's repository and is refused as one.
 		{"one made with the default template, which has hooks", func(t *testing.T, f *fixture, l layout.Layout) {
 			f.inCheckout(l, "init", "-q", "--initial-branch="+branchMain)
-		}, "branches|description|hooks|info"},
+		}, "branches|description|hooks|info", ReasonGitDirUnsafe},
 		{"a file that Git does not make", func(t *testing.T, f *fixture, l layout.Layout) {
 			f.inCheckout(l, "init", "-q", "--template=", "--initial-branch="+branchMain)
 			if err := os.WriteFile(filepath.Join(l.GitDir, "notes.txt"), []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, "notes.txt"},
+		}, "notes.txt", ReasonGitDirUnsafe},
+		{"a file that Git makes and the first checkout does not", func(t *testing.T, f *fixture, l layout.Layout) {
+			f.inCheckout(l, "init", "-q", "--template=", "--initial-branch="+branchMain)
+			if err := os.WriteFile(filepath.Join(l.GitDir, "ORIG_HEAD"), []byte(notAnObject+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "ORIG_HEAD", ReasonRepositoryMismatch},
 		{"a ref that is not a branch or a tag", func(t *testing.T, f *fixture, l layout.Layout) {
 			f.inCheckout(l, "init", "-q", "--template=", "--initial-branch="+branchMain)
 			tree := f.inCheckout(l, "write-tree")
 			commit := f.inCheckout(l, "commit-tree", tree, "-m", "theirs")
 			f.inCheckout(l, "update-ref", "refs/stash", commit)
-		}, "refs/stash"},
+		}, "refs/stash", ReasonRepositoryMismatch},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -500,14 +511,22 @@ func TestOpenDoesNotClearAGitDirectoryThatItDidNotMake(t *testing.T) {
 
 			_, err := open(t, f, l, branchMain)
 
-			got := errorOf(t, err, ReasonRepositoryMismatch)
+			got := errorOf(t, err, tt.reason)
 			// Which entry of a default template comes first depends on the release of Git.
 			named := false
 			for name := range strings.SplitSeq(tt.want, "|") {
-				named = named || strings.Contains(got.Message, "holds "+name+",")
+				if tt.reason == ReasonGitDirUnsafe {
+					named = named || strings.Contains(got.Message, filepath.Join(l.GitDir, name)+" ")
+				} else {
+					named = named || strings.Contains(got.Message, "holds "+name+",")
+				}
 			}
-			if !named || !strings.Contains(got.Message, "did not make") {
-				t.Errorf("message = %q, want it to name %s and say Treebind did not make it", got.Message, tt.want)
+			say := "did not make"
+			if tt.reason == ReasonGitDirUnsafe {
+				say = "Git was not run against it"
+			}
+			if !named || !strings.Contains(got.Message, say) {
+				t.Errorf("message = %q, want it to name %s and say %q", got.Message, tt.want, say)
 			}
 			if !exists(filepath.Join(l.GitDir, "HEAD")) {
 				t.Error("the Git directory was cleared")
