@@ -43,6 +43,7 @@ const (
 	subPathOne       = "grafana"
 	subPathNested    = "team-a/dashboards"
 	subPathLookalike = ".treebindx"
+	subPathRelease   = "release-1.2"
 	subPathState     = ".treebind"
 	subPathStateGit  = ".treebind/git"
 )
@@ -72,7 +73,7 @@ func TestAgentEnvironmentWithASubPath(t *testing.T) {
 	}
 	want := []string{
 		"TREEBIND_NAME", "TREEBIND_NAMESPACE", "TREEBIND_MOUNT_PATH", "TREEBIND_SUB_PATH",
-		"TREEBIND_STATUS_ADDR", "TREEBIND_STATUS_ISSUER", "TREEBIND_STATUS_AUDIENCE",
+		"TREEBIND_REPO_URL", "TREEBIND_REPO_BRANCH", "TREEBIND_STATUS_ADDR", "TREEBIND_STATUS_ISSUER", "TREEBIND_STATUS_AUDIENCE",
 		"TREEBIND_STATUS_SUBJECT", "TREEBIND_STATUS_KEYS_FILE",
 	}
 	if !reflect.DeepEqual(names, want) {
@@ -186,7 +187,7 @@ func agentconfigMountPath(t *testing.T, container corev1.Container) string {
 func subPathCandidates() []string {
 	long := strings.Repeat("a", agentconfig.MaxSubPathLength)
 	return []string{
-		"", subPathOne, subPathNested, "a/b/c/d", "release-1.2", ".config", ".github/dashboards",
+		"", subPathOne, subPathNested, "a/b/c/d", subPathRelease, ".config", ".github/dashboards",
 		subPathLookalike, ".treebind-old", "a/.treebind", "a/b/.treebind", ".treebind2/git",
 		"my dashboards", " a", "a ", " a b ", "é/ü", "日本語", strings.Repeat("é", agentconfig.MaxSubPathLength),
 		long, long + "a", strings.Repeat("é", agentconfig.MaxSubPathLength+1),

@@ -37,6 +37,7 @@ func environment(extra map[string]string) func(string) string {
 		config.EnvStatusSubject:  "system:serviceaccount:treebind-system:treebind-controller-manager",
 		config.EnvStatusAddr:     "127.0.0.1:0",
 		config.EnvMountPath:      "/work",
+		config.EnvRepoURL:        "https://example.com/acme/dashboards.git",
 	}
 	maps.Copy(env, extra)
 	return func(name string) string { return env[name] }
@@ -51,7 +52,7 @@ func TestRunRefusesAWrongConfiguration(t *testing.T) {
 		t.Errorf("exit code %d, want %d", code, exitConfig)
 	}
 	for _, want := range []string{
-		"configuration is wrong", config.EnvNamespace, config.EnvStatusIssuer, config.EnvStatusSubject,
+		"configuration is wrong", config.EnvNamespace, config.EnvStatusIssuer, config.EnvStatusSubject, config.EnvRepoURL,
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("the message does not say %q:\n%s", want, stderr.String())
@@ -111,5 +112,22 @@ func TestRunFailsWhenItCannotServe(t *testing.T) {
 
 	if code != exitFailed {
 		t.Errorf("exit code %d, want %d:\n%s", code, exitFailed, stderr.String())
+	}
+}
+
+func TestRunRefusesAnHTTPRepositoryAndSaysWhy(t *testing.T) {
+	var stderr bytes.Buffer
+
+	env := environment(map[string]string{config.EnvRepoURL: "http://git.internal/acme/dashboards.git"})
+
+	code := run(context.Background(), env, &stderr)
+
+	if code != exitConfig {
+		t.Errorf("exit code %d, want %d: a restart does not make plain http safe", code, exitConfig)
+	}
+	for _, want := range []string{config.EnvRepoURL, "must not use http://", "NFR-15"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("the message does not say %q:\n%s", want, stderr.String())
+		}
 	}
 }

@@ -29,6 +29,14 @@ const (
 	subject  = "system:serviceaccount:treebind-system:treebind-controller-manager"
 	issuer   = "https://kubernetes.default.svc.cluster.local"
 	audience = "treebind.example.org/apps/dashboards"
+	repoURL  = "https://example.com/acme/dashboards.git"
+	sshURL   = "ssh://git@example.com/acme/dashboards.git"
+	keyFile  = "/etc/treebind/ssh/id_ed25519"
+	hostFile = "/etc/treebind/known-hosts/known_hosts"
+
+	branchRelease  = "release/1.2"
+	problemScheme  = "must use ssh:// or https://"
+	problemControl = "whitespace or control"
 )
 
 func complete() map[string]string {
@@ -38,6 +46,7 @@ func complete() map[string]string {
 		EnvStatusIssuer:   issuer,
 		EnvStatusAudience: audience,
 		EnvStatusSubject:  subject,
+		EnvRepoURL:        repoURL,
 	}
 }
 
@@ -52,7 +61,7 @@ func TestFromEnvReadsTheSettingsAndFillsTheDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{
-		Namespace: "apps", Name: "dashboards", MountPath: DefaultMountPath,
+		Namespace: "apps", Name: "dashboards", MountPath: DefaultMountPath, RepoURL: repoURL,
 		StatusAddr:     DefaultStatusAddr,
 		StatusIssuer:   issuer,
 		StatusAudience: audience,
@@ -77,6 +86,152 @@ func TestFromEnvTakesWhatTheOperatorSets(t *testing.T) {
 	}
 	if config.MountPath != "/data/dashboards" || config.StatusAddr != "127.0.0.1:9000" || config.StatusKeysFile != "/keys/jwks.json" {
 		t.Errorf("the settings were not taken: %+v", config)
+	}
+}
+
+func TestFromEnvTakesTheRepositoryTheBranchAndTheFilesOfTheCredentials(t *testing.T) {
+	env := complete()
+	env[EnvRepoURL] = sshURL
+	env[EnvRepoBranch] = branchRelease
+	env[EnvSSHKeyFile] = keyFile
+	env[EnvKnownHostsFile] = hostFile
+
+	config, err := fromMap(env)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.RepoURL != sshURL || config.RepoBranch != branchRelease || config.SSHKeyFile != keyFile || config.KnownHostsFile != hostFile {
+		t.Errorf("the settings were not taken: %+v", config)
+	}
+}
+
+func TestFromEnvLeavesTheBranchEmptyForTheDefaultBranchAndTakesFilesItDoesNotNeed(t *testing.T) {
+	// An https:// repository has no use for the key and the host keys, and the CRD admits both
+	// next to it, so the agent does not refuse them.
+	env := complete()
+	env[EnvSSHKeyFile] = keyFile
+	env[EnvKnownHostsFile] = hostFile
+
+	config, err := fromMap(env)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.RepoBranch != "" || config.RepoURL != repoURL {
+		t.Errorf("settings = %+v, want the default branch and the address", config)
+	}
+}
+
+func TestFromEnvRefusesARepositoryThatCannotBeSyncedWith(t *testing.T) {
+	tests := []struct {
+		name   string
+		change map[string]string
+		want   string
+	}{
+		{"no repository", map[string]string{EnvRepoURL: ""}, EnvRepoURL + " is not set"},
+		{"a repository of spaces", map[string]string{EnvRepoURL: " \n"}, EnvRepoURL + " is not set"},
+		{"plain http", map[string]string{EnvRepoURL: "http://git.internal/acme/dashboards.git"}, "must not use http://"},
+		{"another scheme", map[string]string{EnvRepoURL: "git://example.com/acme/dashboards.git"}, problemScheme},
+		{"a local path", map[string]string{EnvRepoURL: "file:///srv/dashboards.git"}, problemScheme},
+		{"the scp shorthand", map[string]string{EnvRepoURL: "git@example.com:acme/dashboards.git"}, "explicit scheme"},
+		{"no scheme", map[string]string{EnvRepoURL: "example.com/acme/dashboards.git"}, problemScheme},
+		{"a space inside", map[string]string{EnvRepoURL: "https://example.com/a b.git"}, problemControl},
+		{"a control character", map[string]string{EnvRepoURL: "https://example.com/a\x01b.git"}, problemControl},
+		{"an ssh repository without a key", map[string]string{EnvRepoURL: sshURL, EnvKnownHostsFile: hostFile}, EnvSSHKeyFile + " is not set"},
+		{"an ssh repository without host keys", map[string]string{EnvRepoURL: sshURL, EnvSSHKeyFile: keyFile}, EnvKnownHostsFile + " is not set"},
+		{"an ssh repository with neither", map[string]string{EnvRepoURL: sshURL}, EnvSSHKeyFile + " is not set"},
+		{"an ssh repository in capitals without a key", map[string]string{
+			EnvRepoURL: "SSH://git@example.com/acme/dashboards.git", EnvKnownHostsFile: hostFile,
+		}, EnvSSHKeyFile + " is not set"},
+		{"a relative key file", map[string]string{EnvSSHKeyFile: "id_ed25519"}, EnvSSHKeyFile + " must be an absolute path"},
+		{"a key file that climbs out", map[string]string{EnvSSHKeyFile: "/etc/treebind/../id"}, EnvSSHKeyFile + " must be an absolute path"},
+		{"relative host keys", map[string]string{EnvKnownHostsFile: "known_hosts"}, EnvKnownHostsFile + " must be an absolute path"},
+		{"a branch that starts with a dash", map[string]string{EnvRepoBranch: "-x"}, EnvRepoBranch + " must not start with '-'"},
+		{"a branch with a colon", map[string]string{EnvRepoBranch: "a:b"}, EnvRepoBranch + " must not contain whitespace"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := complete()
+			maps.Copy(env, test.change)
+
+			_, err := fromMap(env)
+
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("got %v, want a problem that says %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestFromEnvSaysTheMissingFilesOfAnSSHRepositoryWhateverElseIsWrongWithIt(t *testing.T) {
+	env := complete()
+	env[EnvRepoURL] = "ssh://git@example.com:badport/acme/dashboards.git"
+
+	_, err := fromMap(env)
+
+	if err == nil {
+		t.Fatal("an address with a bad port was accepted")
+	}
+	for _, want := range []string{EnvRepoURL, EnvSSHKeyFile + " is not set", EnvKnownHostsFile + " is not set"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not say %q, and a user would have to fix one problem to meet the next:\n%v", want, err)
+		}
+	}
+}
+
+func TestFromEnvDoesNotAskForTheFilesOfAnAddressThatOnlyStartsLikeSSH(t *testing.T) {
+	env := complete()
+	env[EnvRepoURL] = "ssl://example.com/acme/dashboards.git"
+
+	_, err := fromMap(env)
+
+	if err == nil || !strings.Contains(err.Error(), problemScheme) || strings.Contains(err.Error(), EnvSSHKeyFile) {
+		t.Errorf("error = %v, want the scheme and nothing about the key", err)
+	}
+}
+
+func TestFromEnvSaysAMissingRepositoryOnce(t *testing.T) {
+	env := complete()
+	env[EnvRepoURL] = ""
+
+	_, err := fromMap(env)
+
+	if err == nil || strings.Count(err.Error(), EnvRepoURL) != 1 {
+		t.Errorf("error = %v, want one problem about %s: an address that is not there has no scheme to complain of", err, EnvRepoURL)
+	}
+}
+
+func TestCheckRepositoryURL(t *testing.T) {
+	tests := []struct {
+		name, url, scheme, want string
+	}{
+		{"ssh", sshURL, SchemeSSH, ""},
+		{"ssh with a port", "ssh://git@example.com:2222/acme/d.git", SchemeSSH, ""},
+		{"ssh in capitals, which the CRD admits", "SSH://git@example.com/acme/d.git", SchemeSSH, ""},
+		{"https", repoURL, SchemeHTTPS, ""},
+		{"https in capitals", "HTTPS://example.com/acme/d.git", SchemeHTTPS, ""},
+		{"https with a port and no .git", "https://example.com:8443/acme/d", SchemeHTTPS, ""},
+		{"an ssh address without a host, which Git refuses and the CRD admits", "ssh:///acme/d.git", SchemeSSH, ""},
+		{"http", "http://example.com/acme/d.git", "", "NFR-15"},
+		{"http in capitals", "HTTP://example.com/acme/d.git", "", "NFR-15"},
+		{"git", "git://example.com/acme/d.git", "", "ssh:// or https://"},
+		{"ftp", "ftp://example.com/d.git", "", "ssh:// or https://"},
+		{"nothing but a scheme", "ssh:", SchemeSSH, ""},
+		{"a tab", "https://example.com/\td", "", "whitespace"},
+		{"a DEL", "https://example.com/\x7fd", "", problemControl},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme, err := CheckRepositoryURL(tt.url)
+
+			switch {
+			case tt.want == "" && (err != nil || scheme != tt.scheme):
+				t.Errorf("CheckRepositoryURL(%q) = %q, %v, want %s", tt.url, scheme, err, tt.scheme)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Errorf("CheckRepositoryURL(%q) = %q, %v, want a problem that says %q", tt.url, scheme, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -229,7 +384,7 @@ func TestCheckBranch(t *testing.T) {
 	}{
 		{"none, which is the default branch", "", ""},
 		{"a name", "main", ""},
-		{"a name with a slash", "release/1.2", ""},
+		{"a name with a slash", branchRelease, ""},
 		{"a dot and a dash inside", "feature-1.x", ""},
 		{"a letter of more than one byte", "é/ü", ""},
 		{"the longest branch", long, ""},

@@ -323,7 +323,7 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(getStatefulSet().Spec.Replicas).To(HaveValue(Equal(int32(1))))
 		})
 
-		It("rewrites the pod template when the mount path or the credentials change, and only then", func() {
+		It("rewrites the pod template when what the pod reads changes, and only then", func() {
 			reconcileOnce()
 			hash := getStatefulSet().Annotations[templateHashAnnotation]
 
@@ -347,8 +347,20 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(statefulSet.Spec.Template.Spec.Volumes).To(HaveLen(3))
 			hash = statefulSet.Annotations[templateHashAnnotation]
 
+			// The repository and the branch are read by the agent, so a change of either is a
+			// change of the pod.
 			resource = get()
 			resource.Spec.Repository.Branch = "release"
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			reconcileOnce()
+
+			statefulSet = getStatefulSet()
+			Expect(statefulSet.Annotations[templateHashAnnotation]).NotTo(Equal(hash))
+			hash = statefulSet.Annotations[templateHashAnnotation]
+
+			// The pod does not read how often to sync, yet.
+			resource = get()
+			resource.Spec.Sync.Interval = &metav1.Duration{Duration: 45 * time.Second}
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			reconcileOnce()
 

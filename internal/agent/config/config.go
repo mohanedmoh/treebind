@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -38,6 +39,15 @@ const (
 	// EnvSubPath is the directory of the claim that is synced, relative to the mount
 	// path. It is not set when the whole claim is (docs/adr/0016).
 	EnvSubPath = "TREEBIND_SUB_PATH"
+	// EnvRepoURL is the address of the repository, and EnvRepoBranch the branch to follow. The
+	// branch is not set when the repository's default branch is.
+	EnvRepoURL    = "TREEBIND_REPO_URL"
+	EnvRepoBranch = "TREEBIND_REPO_BRANCH"
+	// EnvSSHKeyFile and EnvKnownHostsFile are the files, in the pod, of the SSH key and of the
+	// host keys that are trusted. They are paths and never the content (NFR-3), and they are
+	// set when the Treebind names the Secret and the ConfigMap they come from.
+	EnvSSHKeyFile     = "TREEBIND_SSH_KEY_FILE"
+	EnvKnownHostsFile = "TREEBIND_KNOWN_HOSTS_FILE"
 
 	EnvStatusAddr     = "TREEBIND_STATUS_ADDR"
 	EnvStatusIssuer   = "TREEBIND_STATUS_ISSUER"
@@ -63,6 +73,13 @@ type Config struct {
 	// relative to MountPath. It is empty when the whole claim is.
 	SubPath string
 
+	// RepoURL is the address of the repository, and RepoBranch the branch to follow, which
+	// is empty for the default branch of the repository.
+	RepoURL, RepoBranch string
+	// SSHKeyFile and KnownHostsFile are the files of the SSH key and of the trusted host
+	// keys. Both are set for an ssh:// repository. They are ignored for an https:// one.
+	SSHKeyFile, KnownHostsFile string
+
 	// StatusAddr is the address the status endpoint and the probes listen on.
 	StatusAddr string
 	// StatusIssuer, StatusAudience and StatusSubject are the iss, aud and sub
@@ -86,6 +103,10 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		// Not trimmed: the CRD accepts a path with spaces around it, the operator passes
 		// it on as it is, and it names the directory the user meant.
 		SubPath:        getenv(EnvSubPath),
+		RepoURL:        get(EnvRepoURL),
+		RepoBranch:     get(EnvRepoBranch),
+		SSHKeyFile:     get(EnvSSHKeyFile),
+		KnownHostsFile: get(EnvKnownHostsFile),
 		StatusAddr:     orDefault(get(EnvStatusAddr), DefaultStatusAddr),
 		StatusIssuer:   get(EnvStatusIssuer),
 		StatusAudience: get(EnvStatusAudience),
@@ -115,6 +136,7 @@ func (c Config) validate() error {
 	require(EnvStatusIssuer, c.StatusIssuer)
 	require(EnvStatusAudience, c.StatusAudience)
 	require(EnvStatusSubject, c.StatusSubject)
+	require(EnvRepoURL, c.RepoURL)
 
 	if !cleanAbsolute(c.MountPath) {
 		problems = append(problems, fmt.Errorf("%s must be an absolute path with no .. and no trailing slash", EnvMountPath))
@@ -122,6 +144,10 @@ func (c Config) validate() error {
 	if err := CheckSubPath(c.SubPath); err != nil {
 		problems = append(problems, fmt.Errorf("%s %w", EnvSubPath, err))
 	}
+	if err := CheckBranch(c.RepoBranch); err != nil {
+		problems = append(problems, fmt.Errorf("%s %w", EnvRepoBranch, err))
+	}
+	problems = append(problems, c.checkRepository()...)
 	if !cleanAbsolute(c.StatusKeysFile) {
 		problems = append(problems, fmt.Errorf("%s must be an absolute path with no .. and no trailing slash", EnvStatusKeysFile))
 	}
@@ -177,6 +203,63 @@ func CheckSubPath(subPath string) error {
 		return fmt.Errorf("must not start with '%s', which the agent keeps for its own state", StateDirName)
 	}
 	return nil
+}
+
+// checkRepository returns the problems with the settings of the repository that are not
+// the branch's: the address, and the files that an ssh:// repository needs.
+func (c Config) checkRepository() []error {
+	var problems []error
+	if c.RepoURL != "" {
+		if _, err := CheckRepositoryURL(c.RepoURL); err != nil {
+			problems = append(problems, fmt.Errorf("%s %w", EnvRepoURL, err))
+		}
+	}
+	// An ssh:// address needs its files whether or not the rest of it parses, so that the
+	// problems are all said at once.
+	ssh := strings.HasPrefix(strings.ToLower(c.RepoURL), SchemeSSH+":")
+	for _, file := range []struct{ env, value string }{
+		{EnvSSHKeyFile, c.SSHKeyFile}, {EnvKnownHostsFile, c.KnownHostsFile},
+	} {
+		if file.value != "" && !cleanAbsolute(file.value) {
+			problems = append(problems, fmt.Errorf("%s must be an absolute path with no .. and no trailing slash", file.env))
+		}
+		if ssh && file.value == "" {
+			problems = append(problems, fmt.Errorf("%s is not set, and an ssh:// repository needs it: host keys are always verified", file.env))
+		}
+	}
+	return problems
+}
+
+// The schemes of a repository that the agent can sync with. The CRD admits http:// too, and
+// the Runner refuses it, because Git over plain http sends everything in the clear (NFR-15).
+const (
+	SchemeSSH   = "ssh"
+	SchemeHTTPS = "https"
+)
+
+// CheckRepositoryURL returns the scheme of the address of a repository, or the reason it
+// cannot be synced with. It is not stricter than the CRD about anything but the scheme: a
+// value that the API server accepts and the agent refuses leaves a sync pod that exits at
+// start for ever, and the one value that does, http://, is the one the agent says so about.
+func CheckRepositoryURL(raw string) (string, error) {
+	for _, c := range raw {
+		if c <= ' ' || c == 0x7f {
+			return "", errors.New("must not contain whitespace or control characters")
+		}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", errors.New("must be a URL with an explicit scheme, such as ssh:// or https://")
+	}
+	switch parsed.Scheme {
+	case SchemeSSH, SchemeHTTPS:
+		return parsed.Scheme, nil
+	case "http":
+		return "", errors.New("must not use http://: Git over plain http sends everything in the clear, and the agent " +
+			"refuses it (NFR-15). Use https://")
+	default:
+		return "", errors.New("must use ssh:// or https://")
+	}
 }
 
 // MaxBranchLength is the most characters that repository.branch of the CRD may have.

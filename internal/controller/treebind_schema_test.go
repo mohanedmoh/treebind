@@ -46,6 +46,16 @@ const existingSubPath = "grafana"
 // key and known hosts for every ssh:// repository.
 const sshRepositoryURL = "ssh://git@github.com/example/dashboards.git"
 
+// Addresses and branches that more than one test uses.
+const (
+	httpsRepositoryURL    = "https://github.com/example/dashboards.git"
+	httpRepositoryURL     = "http://git.internal/example/dashboards.git"
+	upperSSHRepositoryURL = "SSH://git@github.com/example/dashboards.git"
+	branchMain            = "main"
+	branchRelease         = "release-1.2"
+	branchReleaseSlash    = "release/1.2"
+)
+
 // newSSHAuth returns the auth block an ssh:// repository needs.
 func newSSHAuth() *treebindv1alpha1.AuthSpec {
 	return &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef(), KnownHostsConfigMapRef: knownHostsRef()}
@@ -59,8 +69,8 @@ func newTreebind(name string) *treebindv1alpha1.Treebind {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: treebindv1alpha1.TreebindSpec{
 			Repository: treebindv1alpha1.RepositorySpec{
-				URL:    "https://github.com/example/dashboards.git",
-				Branch: "main",
+				URL:    httpsRepositoryURL,
+				Branch: branchMain,
 			},
 			Target: treebindv1alpha1.TargetSpec{ClaimName: "grafana-data"},
 			Sync:   treebindv1alpha1.SyncSpec{Direction: treebindv1alpha1.SyncDirectionBidirectional},
@@ -283,17 +293,17 @@ var _ = Describe("Treebind schema", func() {
 			tb.Spec.Repository.Auth = newSSHAuth()
 		}),
 		Entry("with an upper-case ssh scheme, a key and known hosts", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Repository.URL = "SSH://git@github.com/example/dashboards.git"
+			tb.Spec.Repository.URL = upperSSHRepositoryURL
 			tb.Spec.Repository.Auth = newSSHAuth()
 		}),
 		Entry("with an https URL and an unused key and known hosts", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Repository.Auth = newSSHAuth()
 		}),
 		Entry("with an https URL", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Repository.URL = "https://github.com/example/dashboards.git"
+			tb.Spec.Repository.URL = httpsRepositoryURL
 		}),
 		Entry("with an http URL", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Repository.URL = "http://git.internal/example/dashboards.git"
+			tb.Spec.Repository.URL = httpRepositoryURL
 		}),
 		Entry("with a nested repository path", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Repository.Path = "grafana/dashboards"
@@ -311,7 +321,7 @@ var _ = Describe("Treebind schema", func() {
 			tb.Spec.Repository.Path = ".github/dashboards"
 		}),
 		Entry("with dots inside a release branch name", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Repository.Branch = "release-1.2"
+			tb.Spec.Repository.Branch = branchRelease
 		}),
 		Entry("with an absolute mountPath", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Target.MountPath = "/work"
@@ -547,7 +557,7 @@ var _ = Describe("Treebind schema", func() {
 			"spec.repository"),
 		Entry("with an upper-case ssh scheme and no auth",
 			func(tb *treebindv1alpha1.Treebind) {
-				tb.Spec.Repository.URL = "SSH://git@github.com/example/dashboards.git"
+				tb.Spec.Repository.URL = upperSSHRepositoryURL
 			},
 			"spec.repository"),
 	)
