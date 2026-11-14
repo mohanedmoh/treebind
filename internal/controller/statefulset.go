@@ -265,6 +265,21 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	if subPath := treebind.Spec.Target.SubPath; subPath != "" {
 		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSubPath, Value: subPath})
 	}
+	// The repository, with the files the credentials are in (docs/adr/0018). Never the
+	// credentials themselves: they stay in the Secret and the ConfigMap that are mounted, and
+	// the operator does not read them.
+	env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoURL, Value: treebind.Spec.Repository.URL})
+	if branch := treebind.Spec.Repository.Branch; branch != "" {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoBranch, Value: branch})
+	}
+	if auth := treebind.Spec.Repository.Auth; auth != nil {
+		if ref := auth.SSHKeySecretRef; ref != nil {
+			env = append(env, corev1.EnvVar{Name: agentconfig.EnvSSHKeyFile, Value: path.Join(sshMountPath, ref.Key)})
+		}
+		if ref := auth.KnownHostsConfigMapRef; ref != nil {
+			env = append(env, corev1.EnvVar{Name: agentconfig.EnvKnownHostsFile, Value: path.Join(knownHostsMountPath, ref.Key)})
+		}
+	}
 	env = append(env,
 		corev1.EnvVar{Name: agentconfig.EnvStatusAddr, Value: fmt.Sprintf(":%d", statusPort)},
 		corev1.EnvVar{Name: agentconfig.EnvStatusIssuer, Value: agent.StatusIssuer},

@@ -306,9 +306,24 @@ func TestTemplateHash(t *testing.T) {
 			wantChange: true,
 		},
 		{
-			name: "settings the pod does not read leave it alone",
+			name: "the repository changes it",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "https://example.com/other/repository.git"
+			},
+			image:      testImage,
+			wantChange: true,
+		},
+		{
+			name: "the branch changes it",
 			mutate: func(tb *treebindv1alpha1.Treebind) {
 				tb.Spec.Repository.Branch = "release"
+			},
+			image:      testImage,
+			wantChange: true,
+		},
+		{
+			name: "settings the pod does not read leave it alone",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
 				tb.Spec.Sync.Direction = treebindv1alpha1.SyncDirectionPull
 			},
 			image: testImage,
@@ -383,6 +398,8 @@ func TestAgentEnvironment(t *testing.T) {
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 		}},
 		{Name: "TREEBIND_MOUNT_PATH", Value: testCustomPath},
+		{Name: "TREEBIND_REPO_URL", Value: httpsRepositoryURL},
+		{Name: "TREEBIND_REPO_BRANCH", Value: branchMain},
 		{Name: "TREEBIND_STATUS_ADDR", Value: ":8080"},
 		{Name: "TREEBIND_STATUS_ISSUER", Value: testIssuer},
 		{Name: "TREEBIND_STATUS_AUDIENCE", Value: "treebind.example.org/" + testNamespace + "/" + testTreebindName},
