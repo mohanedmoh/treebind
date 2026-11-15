@@ -23,6 +23,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,6 +35,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/auth"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/agent/umask"
 )
@@ -44,7 +46,14 @@ const (
 	exitFailed = 1
 	// exitConfig is for a pod that is set up wrongly, which a restart does not cure.
 	exitConfig = 2
+	// exitLockLost is for an agent that lost the writer lock to another one. It has stopped what it
+	// was doing, and the restart of its pod waits for the lock again.
+	exitLockLost = 3
 )
+
+// acquireLock takes the writer lock of the volume. A test replaces it, so that no test of the agent's main
+// writes to a volume.
+var acquireLock = lock.Acquire
 
 // openCheckout makes the checkout, or opens the one that is there. A test replaces it, so
 // that no test starts Git against a repository.
@@ -65,7 +74,18 @@ func main() {
 // agentOptions is what the agent runs with: its settings, the check of the operator's token,
 // and the checkout that it makes once the volume is in order.
 func agentOptions(settings config.Config, verifier status.Verifier, logger *slog.Logger) app.Options {
-	return app.Options{Config: settings, Verifier: verifier, Logger: logger, Checkout: openCheckout}
+	return app.Options{
+		Config: settings, Verifier: verifier, Logger: logger, AcquireLock: acquireLock, Checkout: openCheckout,
+	}
+}
+
+// exitCodeOf is the exit code for an error of the agent that stopped: its own for the loss of the
+// lock, which is not a fault of the pod, and the general one for the rest.
+func exitCodeOf(err error) int {
+	if errors.Is(err, app.ErrLockLost) {
+		return exitLockLost
+	}
+	return exitFailed
 }
 
 // run does what main does, with its environment and its output passed in.
@@ -90,7 +110,7 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) int 
 
 	if err := app.Run(ctx, agentOptions(settings, verifier, logger)); err != nil {
 		logger.Error("the agent stopped", "error", err)
-		return exitFailed
+		return exitCodeOf(err)
 	}
 	logger.Info("the agent stopped on request")
 	return exitOK

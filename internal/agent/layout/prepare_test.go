@@ -89,7 +89,7 @@ func modeOf(t *testing.T, path string) fs.FileMode {
 	return info.Mode()
 }
 
-func TestPrepareMakesTheStateAndGitDirectoriesPrivate(t *testing.T) {
+func TestPrepareMakesTheStateGitAndLockDirectoriesPrivate(t *testing.T) {
 	for _, subPath := range []string{"", "grafana", teamDashboards} {
 		t.Run("sub path "+subPath, func(t *testing.T) {
 			root, layout := claim(t, subPath)
@@ -98,14 +98,16 @@ func TestPrepareMakesTheStateAndGitDirectoriesPrivate(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for _, dir := range []string{filepath.Join(root, stateName), filepath.Join(root, stateName, "git")} {
+			for _, dir := range []string{
+				filepath.Join(root, stateName), filepath.Join(root, stateName, "git"), filepath.Join(root, stateName, "lock"),
+			} {
 				mode := modeOf(t, dir)
 				if !mode.IsDir() || mode.Perm() != 0o700 {
 					t.Errorf("%s has mode %v, want a directory with 0700", dir, mode)
 				}
 			}
-			if layout.GitDir != filepath.Join(root, stateName, "git") {
-				t.Errorf("the Git directory the layout names, %s, is not the one that was made", layout.GitDir)
+			if layout.GitDir != filepath.Join(root, stateName, "git") || layout.LockDir != filepath.Join(root, stateName, "lock") {
+				t.Errorf("the directories the layout names, %s and %s, are not the ones that were made", layout.GitDir, layout.LockDir)
 			}
 		})
 	}
@@ -151,6 +153,7 @@ func TestPrepareAcceptsADirectoryThatIsClosedToGroupAndOthers(t *testing.T) {
 		t.Run(mode.String(), func(t *testing.T) {
 			root, layout := claim(t, "grafana")
 			mustMkdir(t, filepath.Join(root, stateName, "git"), 0o700)
+			mustMkdir(t, filepath.Join(root, stateName, "lock"), 0o700)
 			if err := os.Chmod(filepath.Join(root, stateName), mode); err != nil {
 				t.Fatal(err)
 			}
@@ -184,6 +187,23 @@ func TestPrepareRefusesDirectoriesThatAreOpenToGroupOrOthers(t *testing.T) {
 		err := layout.Prepare()
 
 		wantUnsafe(t, err, filepath.Join(stateName, "git"), "open to group or others")
+	})
+	t.Run("the lock directory", func(t *testing.T) {
+		// The application shares the group of the claim, and a slot that it made would take or
+		// break the lock.
+		root, layout := claim(t, "grafana")
+		mustMkdir(t, filepath.Join(root, stateName, "lock"), 0o775)
+		for path, mode := range map[string]fs.FileMode{
+			filepath.Join(root, stateName): 0o700, filepath.Join(root, stateName, "lock"): 0o775,
+		} {
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		err := layout.Prepare()
+
+		wantUnsafe(t, err, filepath.Join(stateName, "lock"), "open to group or others")
 	})
 }
 
@@ -231,6 +251,14 @@ func TestPrepareRefusesALinkWhereADirectoryShouldBe(t *testing.T) {
 				mustSymlink(t, outside, filepath.Join(root, stateName, "git"))
 			},
 			path: filepath.Join(stateName, "git"),
+		},
+		{
+			name: "a link in the place of the lock directory",
+			setup: func(t *testing.T, root string) {
+				mustMkdir(t, filepath.Join(root, stateName), 0o700)
+				mustSymlink(t, outside, filepath.Join(root, stateName, "lock"))
+			},
+			path: filepath.Join(stateName, "lock"),
 		},
 	}
 	for _, tt := range tests {

@@ -35,8 +35,12 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 )
 
-// GitDirName is the Git directory inside the state directory.
-const GitDirName = "git"
+// GitDirName is the Git directory inside the state directory, and LockDirName the directory of the
+// writer lock (docs/adr/0012).
+const (
+	GitDirName  = "git"
+	LockDirName = "lock"
+)
 
 // Layout is where the agent's files are. Every path is absolute.
 type Layout struct {
@@ -51,6 +55,9 @@ type Layout struct {
 	StateDir string
 	// GitDir is the Git directory.
 	GitDir string
+	// LockDir is the directory of the writer lock, in the state directory, where the application
+	// cannot write: a slot that it made would take or break the lock.
+	LockDir string
 	// GitDirInWorkTree is true when the whole claim is synced, which puts the state
 	// directory, and so the Git directory, inside the work tree.
 	GitDirInWorkTree bool
@@ -73,6 +80,7 @@ func New(root, subPath string) (Layout, error) {
 	}
 	layout.StateDir = path.Join(root, config.StateDirName)
 	layout.GitDir = path.Join(layout.StateDir, GitDirName)
+	layout.LockDir = path.Join(layout.StateDir, LockDirName)
 	return layout, nil
 }
 

@@ -1,0 +1,505 @@
+/*
+Copyright The Treebind Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/mohanedmoh/treebind/internal/agent/checkout"
+	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/preflight"
+)
+
+const (
+	testPod      = "dashboards-sync-0"
+	lockTTL      = 150 * time.Millisecond
+	lockOther    = "another-agent"
+	messageHolds = "holds the writer lock"
+)
+
+// fakeClock is a clock that moves when a test says. A timer set on it fires when the clock is advanced
+// past it.
+type fakeClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	waiters []fakeWaiter
+}
+
+type fakeWaiter struct {
+	at time.Time
+	ch chan time.Time
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{now: time.Unix(1_700_000_000, 0)} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	if d <= 0 {
+		ch <- c.now
+		return ch
+	}
+	c.waiters = append(c.waiters, fakeWaiter{at: c.now.Add(d), ch: ch})
+	return ch
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	kept := c.waiters[:0]
+	for _, w := range c.waiters {
+		if w.at.After(c.now) {
+			kept = append(kept, w)
+			continue
+		}
+		w.ch <- c.now
+	}
+	c.waiters = kept
+}
+
+// claimWithState makes a claim, with the state directory the agent makes, and returns the directory of
+// the lock.
+func claimWithState(t *testing.T) (root, lockDir string) {
+	t.Helper()
+	root = t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".treebind"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockDir = filepath.Join(root, ".treebind", "lock")
+	if err := os.Mkdir(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root, lockDir
+}
+
+// takesTheLock makes the agent of a test take the real writer lock on a claim, with a TTL that is short.
+func takesTheLock(root string, open func(context.Context, checkout.Options) (checkout.Result, error)) func(*Options) {
+	return func(o *Options) {
+		o.Config = config.Config{
+			Namespace: testNS, Name: testName, PodName: testPod, MountPath: root, RepoURL: "https://example.com/a.git",
+		}
+		o.AcquireLock = lock.Acquire
+		o.LockTTL = lockTTL
+		if open != nil {
+			o.Checkout = open
+		}
+	}
+}
+
+func lockCheck(t *testing.T, r *running) (check struct{ Outcome, Reason, Message string }, found bool) {
+	t.Helper()
+	for _, c := range r.report(t).Checks {
+		if c.Name == CheckLock {
+			return struct{ Outcome, Reason, Message string }{c.Outcome, c.Reason, c.Message}, true
+		}
+	}
+	return check, false
+}
+
+func checkNames(t *testing.T, r *running) string {
+	t.Helper()
+	names := make([]string, 0, 4)
+	for _, c := range r.report(t).Checks {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, ",")
+}
+
+// holderOf returns the holder in the last slot of the lock.
+func holderOf(t *testing.T, lockDir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(lockDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("the lock directory holds no slot: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	data, err := os.ReadFile(filepath.Join(lockDir, names[len(names)-1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct{ Holder string }
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("the last slot is not a record: %v: %q", err, data)
+	}
+	return record.Holder
+}
+
+func TestTakesTheLockBeforeTheCheckoutAndReportsIt(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	var slotsAtCheckout atomic.Int64
+	r := start(t, takesTheLock(root, func(ctx context.Context, o checkout.Options) (checkout.Result, error) {
+		entries, _ := os.ReadDir(lockDir)
+		slotsAtCheckout.Store(int64(len(entries)))
+		return cloned(ctx, o)
+	}))
+
+	eventually(t, "the checkout in the report", func() bool {
+		got, _ := checkoutCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+
+	if slotsAtCheckout.Load() == 0 {
+		t.Error("the checkout ran before the lock was held: it writes, and nothing writes without the lock")
+	}
+	got, _ := lockCheck(t, r)
+	if got.Outcome != outcomePassed || !strings.Contains(got.Message, messageHolds) {
+		t.Errorf("lock = %+v, want it passed and holding", got)
+	}
+	if names := checkNames(t, r); names != "Mount,Writable,Lock,Checkout" {
+		t.Errorf("checks = %s, want the lock between the volume checks and the checkout", names)
+	}
+}
+
+func TestNamesTheHolderOfTheLockAfterThePodAndAToken(t *testing.T) {
+	holders := map[string]bool{}
+	for range 2 {
+		root, lockDir := claimWithState(t)
+		r := start(t, takesTheLock(root, nil))
+		eventually(t, "the lock in the report", func() bool {
+			got, _ := lockCheck(t, r)
+			return got.Outcome == outcomePassed
+		})
+
+		holder := holderOf(t, lockDir)
+
+		if !strings.HasPrefix(holder, testPod+"-") || len(holder) != len(testPod)+1+2*tokenBytes {
+			t.Errorf("holder = %q, want the name of the pod, a dash and %d hex characters", holder, 2*tokenBytes)
+		}
+		holders[holder] = true
+	}
+	if len(holders) != 2 {
+		t.Errorf("two starts of one pod named their holders %v, want two names: the pod's name is the same after a restart", holders)
+	}
+}
+
+func TestWaitsForAnotherAgentThatHoldsTheLockAndTakesItWhenItIsGivenUp(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	other, err := lock.Acquire(context.Background(), lock.Config{Dir: lockDir, Holder: lockOther, TTL: lockTTL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeping, stopKeeping := context.WithCancel(context.Background())
+	kept := make(chan error, 1)
+	go func() { kept <- other.Keep(keeping) }()
+	var opened atomic.Int64
+	r := start(t, takesTheLock(root, func(ctx context.Context, o checkout.Options) (checkout.Result, error) {
+		opened.Add(1)
+		return cloned(ctx, o)
+	}))
+
+	eventually(t, "the wait in the report", func() bool {
+		got, found := lockCheck(t, r)
+		return found && got.Outcome == outcomeSkipped && strings.Contains(got.Message, "waiting")
+	})
+	if opened.Load() != 0 {
+		t.Error("the checkout ran while another agent held the lock")
+	}
+	if got, _ := checkoutCheck(t, r); got.Outcome != outcomeSkipped || !strings.Contains(got.Message, "lock is not held yet") {
+		t.Errorf("checkout = %+v, want it skipped, and the message to say that the lock comes first", got)
+	}
+
+	stopKeeping()
+	if err := <-kept; err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, "the lock to be taken", func() bool {
+		got, _ := lockCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+	eventually(t, "the checkout to be made", func() bool {
+		got, _ := checkoutCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+}
+
+func TestKeepsTryingToTakeTheLockWhileTheVolumeRefuses(t *testing.T) {
+	root, _ := claimWithState(t)
+	var tries atomic.Int64
+	var opened atomic.Int64
+	r := start(t, func(o *Options) {
+		takesTheLock(root, func(ctx context.Context, options checkout.Options) (checkout.Result, error) {
+			opened.Add(1)
+			return cloned(ctx, options)
+		})(o)
+		o.AcquireLock = func(ctx context.Context, cfg lock.Config) (*lock.Lock, error) {
+			if tries.Add(1) <= 3 {
+				return nil, errors.New("lock: create the lock directory: read-only file system")
+			}
+			return lock.Acquire(ctx, cfg)
+		}
+	})
+
+	eventually(t, "the failure in the report", func() bool {
+		got, found := lockCheck(t, r)
+		return found && got.Outcome == outcomeFailed
+	})
+	if got, _ := lockCheck(t, r); got.Reason != ReasonLockFailed || !strings.Contains(got.Message, "read-only") {
+		t.Errorf("lock = %+v, want the reason and what the volume said", got)
+	}
+	if opened.Load() != 0 {
+		t.Error("the checkout ran while the lock could not be taken")
+	}
+	eventually(t, "the lock to be taken", func() bool {
+		got, _ := lockCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+	eventually(t, "the checkout to be made", func() bool {
+		got, _ := checkoutCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+	if tries.Load() != 4 {
+		t.Errorf("the lock was asked for %d times, want 4: three refusals and a lock", tries.Load())
+	}
+}
+
+func TestSaysTheLockAndTheCheckoutWereNotTriedWhileAVolumeCheckFails(t *testing.T) {
+	root, _ := claimWithState(t)
+	var asked atomic.Int64
+	r := start(t, func(o *Options) {
+		takesTheLock(root, cloned)(o)
+		o.AcquireLock = func(context.Context, lock.Config) (*lock.Lock, error) { asked.Add(1); return nil, errors.New("no") }
+		o.Preflight = func(context.Context, string, string) []preflight.Result { return failed }
+	})
+
+	eventually(t, "the lock to be skipped", func() bool {
+		got, found := lockCheck(t, r)
+		return found && got.Outcome == outcomeSkipped
+	})
+
+	got, _ := lockCheck(t, r)
+	if got.Reason != preflight.ReasonNotChecked || !strings.Contains(got.Message, "volume check failed") {
+		t.Errorf("lock = %+v, want it skipped with the reason that says why", got)
+	}
+	if next, _ := checkoutCheck(t, r); !strings.Contains(next.Message, "volume check failed") {
+		t.Errorf("checkout = %+v, want it to say why it was not tried", next)
+	}
+	if asked.Load() != 0 {
+		t.Error("the lock was asked for while a volume check failed")
+	}
+}
+
+func TestSaysALayoutThatCannotBeWorkedOutAsAFailureOfTheLock(t *testing.T) {
+	var asked, opened atomic.Int64
+	r := start(t, func(o *Options) {
+		takesTheLock("work", func(ctx context.Context, options checkout.Options) (checkout.Result, error) {
+			opened.Add(1)
+			return cloned(ctx, options)
+		})(o)
+		o.AcquireLock = func(context.Context, lock.Config) (*lock.Lock, error) { asked.Add(1); return nil, errors.New("no") }
+	})
+
+	eventually(t, "the failure in the report", func() bool {
+		got, found := lockCheck(t, r)
+		return found && got.Outcome == outcomeFailed
+	})
+
+	got, _ := lockCheck(t, r)
+	if got.Reason != ReasonLockFailed || !strings.Contains(got.Message, "mount path") || asked.Load() != 0 {
+		t.Errorf("lock = %+v, asked %d times, want a failure that says what is wrong with the mount path, and no lock asked for", got, asked.Load())
+	}
+	if opened.Load() != 0 {
+		t.Error("the checkout was made by an agent that could not say where its lock is: nothing writes without the lock")
+	}
+}
+
+func TestStopsWithTheLossOfTheLockWhenAnotherAgentTakesItAndStopsTheCheckout(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	clock := newFakeClock()
+	checkoutStopped := make(chan struct{})
+	started := make(chan struct{})
+	r := start(t, func(o *Options) {
+		takesTheLock(root, func(ctx context.Context, _ checkout.Options) (checkout.Result, error) {
+			close(started)
+			<-ctx.Done()
+			close(checkoutStopped)
+			return checkout.Result{}, ctx.Err()
+		})(o)
+		o.LockClock = clock
+	})
+	<-started
+
+	// The clock of this agent does not move, so it makes no heartbeat, and another agent, with the clock of
+	// the system, sees the lock unchanged for a whole TTL and takes it over.
+	thief, err := lock.Acquire(context.Background(), lock.Config{Dir: lockDir, Holder: lockOther, TTL: lockTTL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = thief.Release() })
+	// Now the agent makes its heartbeat, and finds that another holds the lock.
+	clock.Advance(lockTTL)
+
+	err = r.waitStopped(t)
+
+	if !errors.Is(err, ErrLockLost) || !errors.Is(err, lock.ErrLost) {
+		t.Errorf("Run returned %v, want ErrLockLost, with the loss of the lock underneath", err)
+	}
+	select {
+	case <-checkoutStopped:
+	default:
+		t.Error("the checkout was not told to stop: it would go on writing without the lock")
+	}
+	if n := r.logs.count("the writer lock was lost to another agent"); n != 1 {
+		t.Errorf("the loss was logged %d times, want once\n%s", n, r.logs.String())
+	}
+}
+
+func TestGivesTheLockUpWhenToldToStop(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	r := start(t, takesTheLock(root, nil))
+	eventually(t, "the lock in the report", func() bool {
+		got, _ := lockCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+
+	r.cancel()
+	if err := r.waitStopped(t); err != nil {
+		t.Fatal(err)
+	}
+
+	// A lock that was given up is taken at once. One that was not would take the TTL of an hour.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	next, err := lock.Acquire(ctx, lock.Config{Dir: lockDir, Holder: lockOther, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("the next agent could not take the lock: %v: the agent that stopped did not give it up", err)
+	}
+	if next.Epoch() == 0 {
+		t.Error("the lock has no epoch")
+	}
+}
+
+func TestTakesNoLockWhenNoneIsToBeTaken(t *testing.T) {
+	r := start(t, func(o *Options) { withRepository(cloned)(o) })
+
+	eventually(t, "the checkout in the report", func() bool {
+		got, _ := checkoutCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+
+	if _, found := lockCheck(t, r); found {
+		t.Error("a lock is reported, and none was asked for")
+	}
+}
+
+func TestAsksForTheLockInItsDirectoryWithTheDefaultTTLAndAHolderOfItsOwn(t *testing.T) {
+	root, _ := claimWithState(t)
+	asked := make(chan lock.Config, 1)
+	start(t, func(o *Options) {
+		takesTheLock(root, nil)(o)
+		o.LockTTL = 0
+		o.AcquireLock = func(_ context.Context, cfg lock.Config) (*lock.Lock, error) {
+			select {
+			case asked <- cfg:
+			default:
+			}
+			return nil, errors.New("no lock for this test")
+		}
+	})
+
+	cfg := <-asked
+
+	if cfg.Dir != filepath.Join(root, ".treebind", "lock") || cfg.TTL != DefaultLockTTL ||
+		!strings.HasPrefix(cfg.Holder, testPod+"-") || cfg.Clock != nil {
+		t.Errorf("lock.Config = %+v, want the lock directory of the layout, the default TTL, the holder after the pod, and the system clock", cfg)
+	}
+}
+
+func TestStopsWhileWaitingForTheLockWithoutAFailureOfItAndWithoutACheckout(t *testing.T) {
+	root, _ := claimWithState(t)
+	asking := make(chan struct{})
+	var once sync.Once
+	var opened atomic.Int64
+	r := start(t, func(o *Options) {
+		takesTheLock(root, func(ctx context.Context, options checkout.Options) (checkout.Result, error) {
+			opened.Add(1)
+			return cloned(ctx, options)
+		})(o)
+		o.AcquireLock = func(ctx context.Context, _ lock.Config) (*lock.Lock, error) {
+			once.Do(func() { close(asking) })
+			<-ctx.Done()
+			return nil, errors.Join(errors.New("lock: waiting for the holder to give it up"), ctx.Err())
+		}
+	})
+	<-asking
+
+	r.cancel()
+	if err := r.waitStopped(t); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := r.logs.count("outcome=Failed"); n != 0 {
+		t.Errorf("an agent told to stop while it waited for the lock logged %d failures of it, want none\n%s", n, r.logs.String())
+	}
+	if opened.Load() != 0 {
+		t.Error("the checkout was made by an agent that stopped before it had the lock")
+	}
+}
+
+func TestGivesUpALockThatWasMadeInTheInstantOfTheStop(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	asked := make(chan struct{})
+	var once sync.Once
+	r := start(t, func(o *Options) {
+		takesTheLock(root, nil)(o)
+		o.AcquireLock = func(ctx context.Context, cfg lock.Config) (*lock.Lock, error) {
+			once.Do(func() { close(asked) })
+			<-ctx.Done()
+			// The lock is made after the agent was told to stop, as when the two come together.
+			return lock.Acquire(context.Background(), cfg)
+		}
+	})
+	<-asked
+
+	r.cancel()
+	if err := r.waitStopped(t); err != nil {
+		t.Fatal(err)
+	}
+
+	// A lock that was given up is taken at once. One that was not would take the TTL of an hour.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := lock.Acquire(ctx, lock.Config{Dir: lockDir, Holder: lockOther, TTL: time.Hour}); err != nil {
+		t.Fatalf("the next agent could not take the lock: %v: the agent that stopped did not give it up", err)
+	}
+}
