@@ -21,6 +21,7 @@ limitations under the License.
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -30,6 +31,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mohanedmoh/treebind/internal/agent/paths"
 )
 
 // The names of the environment variables.
@@ -55,6 +58,10 @@ const (
 	EnvSyncDirection = "TREEBIND_SYNC_DIRECTION"
 	// EnvPodName is the name of the sync pod. The writer lock names its holder with it.
 	EnvPodName = "TREEBIND_POD_NAME"
+	// EnvPathsInclude and EnvPathsExclude are the patterns of spec.paths, each list as a JSON
+	// array of strings. A list that is empty is not set (docs/adr/0022).
+	EnvPathsInclude = "TREEBIND_PATHS_INCLUDE"
+	EnvPathsExclude = "TREEBIND_PATHS_EXCLUDE"
 
 	EnvStatusAddr     = "TREEBIND_STATUS_ADDR"
 	EnvStatusIssuer   = "TREEBIND_STATUS_ISSUER"
@@ -105,6 +112,9 @@ type Config struct {
 	SyncDirection string
 	// PodName is the name of the sync pod.
 	PodName string
+	// PathsInclude and PathsExclude are the include and exclude patterns of spec.paths, which
+	// paths.Check takes. They are empty when the spec has none.
+	PathsInclude, PathsExclude []string
 
 	// StatusAddr is the address the status endpoint and the probes listen on.
 	StatusAddr string
@@ -123,6 +133,8 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	// or space, which would never match a claim.
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
 	interval, intervalErr := CheckSyncInterval(get(EnvSyncInterval))
+	include, includeErr := readPatterns(EnvPathsInclude, get(EnvPathsInclude))
+	exclude, excludeErr := readPatterns(EnvPathsExclude, get(EnvPathsExclude))
 	config := Config{
 		Namespace: get(EnvNamespace),
 		Name:      get(EnvName),
@@ -137,6 +149,8 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		SyncInterval:   interval,
 		SyncDirection:  get(EnvSyncDirection),
 		PodName:        get(EnvPodName),
+		PathsInclude:   include,
+		PathsExclude:   exclude,
 		StatusAddr:     orDefault(get(EnvStatusAddr), DefaultStatusAddr),
 		StatusIssuer:   get(EnvStatusIssuer),
 		StatusAudience: get(EnvStatusAudience),
@@ -147,7 +161,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	if intervalErr != nil {
 		err = errors.Join(fmt.Errorf("%s %w", EnvSyncInterval, intervalErr), err)
 	}
-	return config, err
+	return config, errors.Join(err, includeErr, excludeErr)
 }
 
 func orDefault(value, fallback string) string {
@@ -390,4 +404,58 @@ func cleanAbsolute(p string) bool {
 func IsServiceAccount(subject string) bool {
 	parts := strings.Split(subject, ":")
 	return len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" && parts[2] != "" && parts[3] != ""
+}
+
+// The limits of a list of spec.paths, as in the CRD. MaxPathPatternsLength is the most
+// characters that the patterns of a list may have in all. JSON writes a character in six
+// bytes at most, so the longest list fits in one environment variable, which Linux limits
+// to 128 KiB, with nearly 32 KiB to spare.
+const (
+	MaxPathPatterns       = 64
+	MaxPathPatternsLength = 16384
+)
+
+// readPatterns reads a list of patterns of spec.paths from the environment variable env, a
+// JSON array of strings. A list that is not set is empty.
+func readPatterns(env, raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	// JSON reads a byte that is not UTF-8 as U+FFFD without a word, which would be a
+	// pattern that the spec does not have. It reads an escape of half a UTF-16 pair, such
+	// as \ud800, the same way, which the operator never writes: it writes the value from
+	// the spec, which is UTF-8.
+	if !utf8.ValidString(raw) {
+		return nil, fmt.Errorf("%s must be UTF-8", env)
+	}
+	var patterns []string
+	if err := json.Unmarshal([]byte(raw), &patterns); err != nil {
+		return nil, fmt.Errorf("%s must be a JSON array of strings: %w", env, err)
+	}
+	if err := CheckPathPatterns(patterns); err != nil {
+		return nil, fmt.Errorf("%s %w", env, err)
+	}
+	return patterns, nil
+}
+
+// CheckPathPatterns returns the reason a list cannot be spec.paths.include or
+// spec.paths.exclude, and nil when it can. The rules are the ones that the CRD puts on the
+// lists and on their patterns, which are those of paths.Check, and a test holds the two
+// together: a list that the API server accepts and the agent refuses would leave a sync pod
+// that exits at start for ever.
+func CheckPathPatterns(patterns []string) error {
+	if len(patterns) > MaxPathPatterns {
+		return fmt.Errorf("must have at most %d patterns", MaxPathPatterns)
+	}
+	length := 0
+	for _, pattern := range patterns {
+		if err := paths.Check(pattern); err != nil {
+			return fmt.Errorf("has a pattern, %q, that %w", pattern, err)
+		}
+		length += utf8.RuneCountInString(pattern)
+	}
+	if length > MaxPathPatternsLength {
+		return fmt.Errorf("must have at most %d characters in all, and has %d", MaxPathPatternsLength, length)
+	}
+	return nil
 }

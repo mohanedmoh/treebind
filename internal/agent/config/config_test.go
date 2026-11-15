@@ -18,6 +18,7 @@ package config
 
 import (
 	"maps"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func TestFromEnvReadsTheSettingsAndFillsTheDefaults(t *testing.T) {
 		StatusSubject:  subject,
 		StatusKeysFile: DefaultStatusKeys,
 	}
-	if config != want {
+	if !reflect.DeepEqual(config, want) {
 		t.Errorf("got %+v\nwant %+v", config, want)
 	}
 }
