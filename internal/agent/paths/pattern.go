@@ -26,8 +26,8 @@ limitations under the License.
 // negation. Matching is on bytes, as in Git: "?" is one byte, so it does not match "é",
 // which is two.
 //
-// Check refuses a pattern that Git would never match, or would read in a way its own
-// documentation does not say, so that an exclude cannot silently do nothing.
+// Check refuses a pattern that Git would never match, or whose meaning is not plain, so
+// that an exclude cannot silently do nothing.
 package paths
 
 import (
@@ -75,9 +75,9 @@ func Check(pattern string) error {
 }
 
 // checkSegment returns the reason a segment of a pattern, the text between two slashes,
-// is refused. Git reads a "**" that is not a whole segment as two stars when it comes
-// after other wildcards, and as "**" when it comes first, so "ab**/c" matches "abx/y/c"
-// in Git. Refusing it leaves only the meaning that Git's documentation gives.
+// is refused. A "**" that is not a whole segment is two plain stars by Git's documentation,
+// but releases of Git differ on it: "ab**/c" takes "abx/y/c" in Git 2.34 and does not in
+// 2.56. So it is refused and not given a meaning of its own, and "*" says the same.
 func checkSegment(segment string) error {
 	for i := 0; i < len(segment); i++ {
 		switch segment[i] {
