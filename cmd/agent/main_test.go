@@ -19,14 +19,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/app"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/lock"
 )
 
 // No test of the agent's main starts Git: the checkout is the one of the package, which has
@@ -35,7 +39,13 @@ func init() {
 	openCheckout = func(context.Context, checkout.Options) (checkout.Result, error) {
 		return checkout.Result{Outcome: checkout.Cloned, Branch: "main"}, nil
 	}
+	acquireLock = func(context.Context, lock.Config) (*lock.Lock, error) {
+		return nil, errors.New("the tests of the main take no lock")
+	}
 }
+
+// repoURL is an address that the tests of the main give the agent. Nothing asks it.
+const repoURL = "https://example.com/a.git"
 
 func environment(extra map[string]string) func(string) string {
 	env := map[string]string{
@@ -151,7 +161,7 @@ func TestTheAgentRunsTheCheckoutOfThePackage(t *testing.T) {
 		return checkout.Result{Outcome: checkout.Reopened}, nil
 	}
 	t.Cleanup(func() { openCheckout = previous })
-	options := agentOptions(config.Config{RepoURL: "https://example.com/a.git"}, nil, nil)
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
 
 	made, err := options.Checkout(context.Background(), checkout.Options{URL: "https://example.com/b.git"})
 
@@ -159,7 +169,35 @@ func TestTheAgentRunsTheCheckoutOfThePackage(t *testing.T) {
 		t.Errorf("Checkout = %+v, %v with %+v, want the function of the package, called with what it is given",
 			made, err, asked)
 	}
-	if options.Config.RepoURL != "https://example.com/a.git" {
+	if options.Config.RepoURL != repoURL {
 		t.Errorf("the settings were not passed on: %+v", options.Config)
+	}
+}
+
+func TestTheLossOfTheLockHasAnExitCodeOfItsOwn(t *testing.T) {
+	lost := fmt.Errorf("%w: %w", app.ErrLockLost, lock.ErrLost)
+
+	if got := exitCodeOf(lost); got != exitLockLost {
+		t.Errorf("exit code %d, want %d: the pod did nothing wrong, and its restart waits for the lock", got, exitLockLost)
+	}
+	if got := exitCodeOf(errors.New("serve the status endpoint: closed")); got != exitFailed {
+		t.Errorf("exit code %d, want %d for any other error", got, exitFailed)
+	}
+}
+
+func TestTheAgentTakesTheLockOfThePackage(t *testing.T) {
+	previous := acquireLock
+	var asked lock.Config
+	acquireLock = func(_ context.Context, cfg lock.Config) (*lock.Lock, error) {
+		asked = cfg
+		return nil, errors.New("no lock in a test")
+	}
+	t.Cleanup(func() { acquireLock = previous })
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
+
+	_, err := options.AcquireLock(context.Background(), lock.Config{Holder: "holder"})
+
+	if err == nil || asked.Holder != "holder" {
+		t.Errorf("AcquireLock asked for %+v, %v, want the function of the package, called with what it is given", asked, err)
 	}
 }

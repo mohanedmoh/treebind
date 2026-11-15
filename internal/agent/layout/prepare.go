@@ -99,7 +99,16 @@ func (l Layout) Prepare() error {
 	if err != nil {
 		return err
 	}
-	return git.Close()
+	if err := git.Close(); err != nil {
+		return err
+	}
+	// The directory of the lock is made here, private to the agent, and not by the lock, which
+	// would make it open to the group: the application shares the group of the claim.
+	lock, err := l.privateDir(state, l.StateDir, LockDirName)
+	if err != nil {
+		return err
+	}
+	return lock.Close()
 }
 
 // checkWayToWorkTree refuses a link or a file on the way to the synced directory. A

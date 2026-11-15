@@ -39,6 +39,7 @@ const (
 	claimRoot        = "/work"
 	claimState       = "/work/.treebind"
 	claimGit         = "/work/.treebind/git"
+	claimLock        = "/work/.treebind/lock"
 	oneSubPath       = "grafana"
 	lookalike        = ".treebindx"
 	nestedState      = "a/.treebind"
@@ -57,7 +58,7 @@ func TestNewPlacesTheGitDirectoryBesideTheSyncedDirectory(t *testing.T) {
 			root: claimRoot, subPath: oneSubPath,
 			want: Layout{
 				Root: claimRoot, SubPath: oneSubPath, WorkTree: "/work/grafana",
-				StateDir: claimState, GitDir: claimGit,
+				StateDir: claimState, GitDir: claimGit, LockDir: claimLock,
 			},
 		},
 		{
@@ -65,14 +66,14 @@ func TestNewPlacesTheGitDirectoryBesideTheSyncedDirectory(t *testing.T) {
 			root: "/data/claim", subPath: teamDashboards,
 			want: Layout{
 				Root: "/data/claim", SubPath: teamDashboards, WorkTree: "/data/claim/team-a/dashboards",
-				StateDir: "/data/claim/.treebind", GitDir: "/data/claim/.treebind/git",
+				StateDir: "/data/claim/.treebind", GitDir: "/data/claim/.treebind/git", LockDir: "/data/claim/.treebind/lock",
 			},
 		},
 		{
 			name: "no sub path: the whole claim is synced and the Git directory is inside it",
 			root: claimRoot, subPath: "",
 			want: Layout{
-				Root: claimRoot, WorkTree: claimRoot, StateDir: claimState, GitDir: claimGit,
+				Root: claimRoot, WorkTree: claimRoot, StateDir: claimState, GitDir: claimGit, LockDir: claimLock,
 				GitDirInWorkTree: true,
 			},
 		},
@@ -80,7 +81,7 @@ func TestNewPlacesTheGitDirectoryBesideTheSyncedDirectory(t *testing.T) {
 			name: "a claim mounted at the root of the file system",
 			root: "/", subPath: oneSubPath,
 			want: Layout{
-				Root: "/", SubPath: oneSubPath, WorkTree: "/grafana", StateDir: "/.treebind", GitDir: "/.treebind/git",
+				Root: "/", SubPath: oneSubPath, WorkTree: "/grafana", StateDir: "/.treebind", GitDir: "/.treebind/git", LockDir: "/.treebind/lock",
 			},
 		},
 		{
@@ -88,7 +89,7 @@ func TestNewPlacesTheGitDirectoryBesideTheSyncedDirectory(t *testing.T) {
 			root: claimRoot, subPath: lookalike,
 			want: Layout{
 				Root: claimRoot, SubPath: lookalike, WorkTree: "/work/.treebindx",
-				StateDir: claimState, GitDir: claimGit,
+				StateDir: claimState, GitDir: claimGit, LockDir: claimLock,
 			},
 		},
 		{
@@ -96,7 +97,7 @@ func TestNewPlacesTheGitDirectoryBesideTheSyncedDirectory(t *testing.T) {
 			root: claimRoot, subPath: nestedState,
 			want: Layout{
 				Root: claimRoot, SubPath: nestedState, WorkTree: "/work/a/.treebind",
-				StateDir: claimState, GitDir: claimGit,
+				StateDir: claimState, GitDir: claimGit, LockDir: claimLock,
 			},
 		},
 	}

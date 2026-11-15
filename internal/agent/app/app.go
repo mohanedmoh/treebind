@@ -15,15 +15,16 @@ limitations under the License.
 */
 
 // Package app runs the agent: it serves the status endpoint and the probes, it
-// checks the volume until the checks pass, and then it makes the checkout of the
-// repository or opens the one that is there.
+// checks the volume until the checks pass, takes the writer lock of the volume, and
+// then makes the checkout of the repository or opens the one that is there.
 //
 // A failed check does not end the agent. It stays up, says what failed in its
 // report, and checks again, so the operator can read the failure and the failure
 // goes away when the volume is put right (docs/adr/0009 and 0011). The checkout is
 // the same: a repository that cannot be reached, or a directory that is not empty,
 // is reported and tried again, and the agent carries on once it is put right
-// (docs/adr/0017).
+// (docs/adr/0017). The writer lock is taken before anything writes, and an agent that
+// loses it stops with ErrLockLost (docs/adr/0023).
 package app
 
 import (
@@ -42,6 +43,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
+	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 )
@@ -84,6 +86,15 @@ type Options struct {
 	// Preflight runs the volume checks on the mount path, for the sub path of the
 	// Treebind. It defaults to preflight.Volume.
 	Preflight func(ctx context.Context, path, subPath string) []preflight.Result
+	// AcquireLock takes the writer lock of the volume, and waits for it while another agent holds
+	// it. It is called once the volume checks pass and before anything is written, and the lock
+	// is kept until the agent stops. It defaults to none, so that no lock is taken: the agent
+	// starts with lock.Acquire.
+	AcquireLock func(ctx context.Context, cfg lock.Config) (*lock.Lock, error)
+	// LockTTL is how long another agent has to see no heartbeat before it takes the lock over.
+	// DefaultLockTTL when it is zero. LockClock is the system clock when nil.
+	LockTTL   time.Duration
+	LockClock lock.Clock
 	// Checkout makes the checkout of the repository, or opens the one that is there. It
 	// is run once the volume checks pass, and again with a growing wait while it fails.
 	// It defaults to none, so that nothing is fetched: the agent starts with checkout.Open.
@@ -108,6 +119,12 @@ type agent struct {
 	// checks is the latest results of the checks, as a report carries them.
 	checks atomic.Pointer[checked]
 	refuse *rateLimit
+	// holder names this start of the agent in the writer lock: the name of its pod, and a token
+	// that differs between two starts of it.
+	holder string
+	// lost is where the keeper of the lock says it was lost, and background waits for it to end.
+	lost       chan error
+	background sync.WaitGroup
 }
 
 // checked is the results of one run of the volume checks and when it finished.
@@ -120,7 +137,7 @@ type checked struct {
 // stops cleanly: requests that are being answered finish and the checks stop.
 // It returns an error only when the endpoint cannot be served.
 func Run(ctx context.Context, options Options) error {
-	a := &agent{Options: options}
+	a := &agent{Options: options, lost: make(chan error, 1)}
 	a.fillDefaults()
 	a.startedAt = a.Now()
 	a.refuse = &rateLimit{every: refusedLogEvery, now: a.Now}
@@ -147,10 +164,12 @@ func Run(ctx context.Context, options Options) error {
 	defer stopChecking()
 	checking.Go(func() { a.prepare(checkCtx) })
 
-	var serveErr error
+	var serveErr, lostErr error
 	select {
 	case <-ctx.Done():
 	case serveErr = <-served:
+	case lostErr = <-a.lost:
+		a.Logger.Error("the writer lock was lost to another agent, and this one stops", "error", lostErr)
 	}
 
 	// The endpoint stops taking requests first. A volume check that does not return
@@ -165,6 +184,7 @@ func Run(ctx context.Context, options Options) error {
 	finished := make(chan struct{})
 	go func() {
 		checking.Wait()
+		a.background.Wait()
 		close(finished)
 	}()
 	timer := time.NewTimer(a.ShutdownGrace)
@@ -175,6 +195,9 @@ func Run(ctx context.Context, options Options) error {
 		a.Logger.Warn("a volume check did not stop in time and was left behind")
 	}
 
+	if lostErr != nil {
+		return fmt.Errorf("%w: %w", ErrLockLost, lostErr)
+	}
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return fmt.Errorf("serve the status endpoint: %w", serveErr)
 	}
@@ -203,6 +226,7 @@ func (a *agent) fillDefaults() {
 	if a.Now == nil {
 		a.Now = time.Now
 	}
+	a.fillLockDefaults()
 }
 
 // report is what the endpoint serves.
@@ -218,11 +242,25 @@ func (a *agent) report() status.Report {
 	return report
 }
 
-// prepare checks the volume, and once it is in order makes the checkout.
+// progress is what the report holds of the steps that the agent takes one after another: the
+// volume checks, the writer lock if there is one to take, and the checkout if there is one to make.
+type progress struct {
+	volume         []preflight.Result
+	lock, checkout *preflight.Result
+}
+
+// prepare checks the volume, and once it is in order takes the writer lock, which is held
+// until the agent stops, and makes the checkout.
 func (a *agent) prepare(ctx context.Context) {
-	if volume, ok := a.checkVolume(ctx); ok {
-		a.openCheckout(ctx, volume)
+	volume, ok := a.checkVolume(ctx)
+	if !ok {
+		return
 	}
+	p := &progress{volume: volume}
+	if a.AcquireLock != nil && !a.takeLock(ctx, p) {
+		return
+	}
+	a.openCheckout(ctx, p)
 }
 
 // checkVolume runs the volume checks, and runs them again with a growing wait while
@@ -237,7 +275,7 @@ func (a *agent) checkVolume(ctx context.Context) ([]preflight.Result, bool) {
 			return nil, false
 		}
 		failed := preflight.AnyFailed(results)
-		a.publish(results, a.waitingForTheVolume(failed))
+		a.publish(a.waitingForTheVolume(results, failed))
 		logged = a.logChanges("volume check", results, logged)
 
 		if !failed {
@@ -252,28 +290,42 @@ func (a *agent) checkVolume(ctx context.Context) ([]preflight.Result, bool) {
 	}
 }
 
-// waitingForTheVolume is the result of the checkout while the volume checks have not
-// passed: none, when the agent makes no checkout, and otherwise a skipped check that says
-// why it has not been tried.
-func (a *agent) waitingForTheVolume(failed bool) *preflight.Result {
-	if a.Checkout == nil {
-		return nil
+// waitingForTheVolume is the progress while the volume checks run: skipped checks that say why the
+// steps that come after have not been tried, for the steps that there are. With the volume in order the
+// next step starts at once, and what it says stays in the report until its result is there, which for the
+// lock of another agent and for a large repository takes a while.
+func (a *agent) waitingForTheVolume(volume []preflight.Result, failed bool) *progress {
+	p := &progress{volume: volume}
+	later := "running: its result is here when it ends"
+	switch {
+	case failed:
+		later = "not tried, because a volume check failed"
+		if a.AcquireLock != nil {
+			p.lock = notTried(CheckLock, later)
+		}
+	case a.AcquireLock != nil:
+		p.lock = notTried(CheckLock, "waiting: the lock is being asked for, and another agent may hold it")
+		later = "not tried, because the lock is not held yet"
 	}
-	// With the volume in order the checkout starts at once, and this stays in the report until
-	// its result is there, which for a large repository takes a while.
-	message := "running: its result is here when it ends"
-	if failed {
-		message = "not tried, because a volume check failed"
+	if a.Checkout != nil {
+		p.checkout = notTried(CheckCheckout, later)
 	}
-	return &preflight.Result{Check: CheckCheckout, Outcome: preflight.Skipped, Reason: preflight.ReasonNotChecked, Message: message}
+	return p
 }
 
-// publish stores the report's checks: the volume checks and the result of the checkout, if
-// there is one.
-func (a *agent) publish(volume []preflight.Result, checkoutResult *preflight.Result) {
-	results := append([]preflight.Result(nil), volume...)
-	if checkoutResult != nil {
-		results = append(results, *checkoutResult)
+// notTried is the result of a check that has not been tried, with the reason that says so.
+func notTried(check, message string) *preflight.Result {
+	return &preflight.Result{Check: check, Outcome: preflight.Skipped, Reason: preflight.ReasonNotChecked, Message: message}
+}
+
+// publish stores the report's checks: the volume checks, then the lock and the checkout, for the steps
+// that there are.
+func (a *agent) publish(p *progress) {
+	results := append([]preflight.Result(nil), p.volume...)
+	for _, step := range []*preflight.Result{p.lock, p.checkout} {
+		if step != nil {
+			results = append(results, *step)
+		}
 	}
 	a.checks.Store(&checked{at: a.Now().UTC(), checks: status.ChecksFrom(results)})
 }
@@ -281,7 +333,7 @@ func (a *agent) publish(volume []preflight.Result, checkoutResult *preflight.Res
 // openCheckout makes the checkout of the repository, or opens the one that is there, and
 // does it again with a growing wait while it fails: the repository may not be reachable
 // yet, or the directory may be emptied. Once it succeeds the loop ends.
-func (a *agent) openCheckout(ctx context.Context, volume []preflight.Result) {
+func (a *agent) openCheckout(ctx context.Context, p *progress) {
 	if a.Checkout == nil {
 		return
 	}
@@ -298,7 +350,8 @@ func (a *agent) openCheckout(ctx context.Context, volume []preflight.Result) {
 		if ctx.Err() != nil {
 			return
 		}
-		a.publish(volume, &result)
+		p.checkout = &result
+		a.publish(p)
 		logged = a.logChanges("checkout", []preflight.Result{result}, logged)
 
 		if result.Outcome == preflight.Passed {
