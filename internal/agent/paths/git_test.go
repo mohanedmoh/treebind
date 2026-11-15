@@ -18,6 +18,7 @@ package paths
 
 import (
 	"bytes"
+	"fmt"
 	"maps"
 	"os"
 	"os/exec"
@@ -118,15 +119,7 @@ type gitOracle struct {
 
 func newGitOracle(t *testing.T) *gitOracle {
 	t.Helper()
-	git, err := exec.LookPath("git")
-	if err != nil {
-		t.Skip("git is not installed, and this test asks the real git binary")
-	}
-	dir := t.TempDir()
-	if foldsCase(t, dir) {
-		t.Skip("the temporary directory folds case, and the corpus has names that differ only by it")
-	}
-	o := &gitOracle{git: git, workTree: filepath.Join(dir, "tree"), gitDir: filepath.Join(dir, "git")}
+	o := newRepository(t)
 	for _, file := range corpusFiles {
 		name := filepath.Join(o.workTree, filepath.FromSlash(file))
 		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
@@ -141,13 +134,32 @@ func newGitOracle(t *testing.T) *gitOracle {
 			t.Fatal(err)
 		}
 	}
-	o.run(t, "init", "--quiet", "--template=")
 	o.files = files(o.run(t, "ls-files", "-z", "--others"))
 	want := slices.Concat(corpusFiles, slices.Collect(maps.Keys(corpusLinks)))
 	slices.Sort(want)
 	if !slices.Equal(o.files, want) {
 		t.Fatalf("Git lists %q in the corpus, want %q", o.files, want)
 	}
+	return o
+}
+
+// newRepository makes an empty repository whose Git directory is beside its work tree, as
+// the agent's is when it syncs a sub path.
+func newRepository(t *testing.T) *gitOracle {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is not installed, and this test asks the real git binary")
+	}
+	dir := t.TempDir()
+	if foldsCase(t, dir) {
+		t.Skip("the temporary directory folds case, and the tests have names that differ only by it")
+	}
+	o := &gitOracle{git: git, workTree: filepath.Join(dir, "tree"), gitDir: filepath.Join(dir, "git")}
+	if err := os.Mkdir(o.workTree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o.run(t, "init", "--quiet", "--template=")
 	return o
 }
 
@@ -189,10 +201,10 @@ func files(out string) []string {
 	return list
 }
 
-// run runs Git on the corpus with an environment of its own, so that nothing of the
-// user's or the system's configuration is read.
-func (o *gitOracle) run(t *testing.T, args ...string) string {
-	t.Helper()
+// try runs Git on the repository with an environment of its own, so that nothing of the
+// user's or the system's configuration is read, and returns what it printed, or an error
+// with what it wrote to its standard error.
+func (o *gitOracle) try(args ...string) (string, error) {
 	cmd := exec.Command(o.git, slices.Concat([]string{"-c", "core.excludesFile=/dev/null"}, args)...)
 	cmd.Dir = o.workTree
 	cmd.Env = []string{
@@ -203,9 +215,19 @@ func (o *gitOracle) run(t *testing.T, args ...string) string {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
+		return string(out), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
 	}
-	return string(out)
+	return string(out), nil
+}
+
+// run is try for a command that has to succeed.
+func (o *gitOracle) run(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := o.try(args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // matches returns the files of the corpus that match.
