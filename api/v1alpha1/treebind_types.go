@@ -215,27 +215,43 @@ type CommitSpec struct {
 	MessageTemplate string `json:"messageTemplate,omitempty"`
 }
 
-// PathsSpec limits which files are synced, using glob patterns relative to the
-// synced directory.
+// PathsSpec limits which files of the synced directory the agent commits. The files of the
+// repository are written to the volume as they are. A pattern is a line of a .gitignore file,
+// relative to the synced directory: "*", "?", "[...]", "\" and "**" as Git reads them, with no
+// negation and no comment, and with spaces kept. A pattern is refused when it starts with '/' or
+// '!', has an empty, '.' or '..' segment, ends with '\' or has one before a '/', leaves a '['
+// open in its segment, has a '[' or a '/' inside a class (classes like [:alpha:] are not
+// supported), or has a '**' that is not a whole segment. Whatever the lists say, the agent never
+// commits some files, such as those of .git and files named like secrets (docs/adr/0022).
 type PathsSpec struct {
-	// include lists the patterns of files to sync. Everything is included when
-	// the list is empty.
+	// include lists the patterns of the files to commit. Every file is included when the
+	// list is empty.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.map(p, size(p)).sum() <= 16384",message="the patterns of a list must have at most 16384 characters in all"
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=512
 	// +kubebuilder:validation:items:XValidation:rule="!self.startsWith('/') && !('..' in self.split('/'))",message="patterns must be relative and must not contain '..'"
+	// +kubebuilder:validation:items:XValidation:rule="!self.startsWith('!')",message="patterns must not start with '!': there is no negation; write '\\!' for a name that starts with '!'"
+	// +kubebuilder:validation:items:XValidation:rule="!self.matches(r'\\x00')",message="patterns must not contain a NUL"
+	// +kubebuilder:validation:items:XValidation:rule="!self.matches(r'(^|/)\\.?/|(^|/)\\.$')",message="patterns must not have an empty or '.' segment"
+	// +kubebuilder:validation:items:XValidation:rule="self.matches(r'^(?:(?:\\*\\*|\\*?(?:(?:\\\\[^/]|\\[(?:[!^](?:\\]|\\\\[^/]|[^\\\\\\[\\]/])|\\]|\\\\[^/]|[^\\\\\\[\\]/!^])(?:\\\\[^/]|[^\\\\\\[\\]/])*\\]|[^\\\\\\[*/])\\*?)*)(?:/|$))+$')",message="patterns must close each '[' within its segment, must have no '[' or '/' in a class and no '\\' at the end or before a '/', and may have '**' only as a whole segment"
 	Include []string `json:"include,omitempty"`
 
-	// exclude lists the patterns of files to leave out, for example temporary
-	// and swap files.
+	// exclude lists the patterns of the files never to commit, for example build output.
+	// An exclude wins over an include.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.map(p, size(p)).sum() <= 16384",message="the patterns of a list must have at most 16384 characters in all"
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=512
 	// +kubebuilder:validation:items:XValidation:rule="!self.startsWith('/') && !('..' in self.split('/'))",message="patterns must be relative and must not contain '..'"
+	// +kubebuilder:validation:items:XValidation:rule="!self.startsWith('!')",message="patterns must not start with '!': there is no negation; write '\\!' for a name that starts with '!'"
+	// +kubebuilder:validation:items:XValidation:rule="!self.matches(r'\\x00')",message="patterns must not contain a NUL"
+	// +kubebuilder:validation:items:XValidation:rule="!self.matches(r'(^|/)\\.?/|(^|/)\\.$')",message="patterns must not have an empty or '.' segment"
+	// +kubebuilder:validation:items:XValidation:rule="self.matches(r'^(?:(?:\\*\\*|\\*?(?:(?:\\\\[^/]|\\[(?:[!^](?:\\]|\\\\[^/]|[^\\\\\\[\\]/])|\\]|\\\\[^/]|[^\\\\\\[\\]/!^])(?:\\\\[^/]|[^\\\\\\[\\]/])*\\]|[^\\\\\\[*/])\\*?)*)(?:/|$))+$')",message="patterns must close each '[' within its segment, must have no '[' or '/' in a class and no '\\' at the end or before a '/', and may have '**' only as a whole segment"
 	Exclude []string `json:"exclude,omitempty"`
 }
 

@@ -252,8 +252,8 @@ spec:
                 properties:
                   exclude:
                     description: |-
-                      exclude lists the patterns of files to leave out, for example temporary
-                      and swap files.
+                      exclude lists the patterns of the files never to commit, for example build output.
+                      An exclude wins over an include.
                     items:
                       maxLength: 512
                       minLength: 1
@@ -261,13 +261,28 @@ spec:
                       x-kubernetes-validations:
                       - message: patterns must be relative and must not contain '..'
                         rule: '!self.startsWith(''/'') && !(''..'' in self.split(''/''))'
+                      - message: 'patterns must not start with ''!'': there is no
+                          negation; write ''\!'' for a name that starts with ''!'''
+                        rule: '!self.startsWith(''!'')'
+                      - message: patterns must not contain a NUL
+                        rule: '!self.matches(r''\x00'')'
+                      - message: patterns must not have an empty or '.' segment
+                        rule: '!self.matches(r''(^|/)\.?/|(^|/)\.$'')'
+                      - message: patterns must close each '[' within its segment,
+                          must have no '[' or '/' in a class and no '\' at the end
+                          or before a '/', and may have '**' only as a whole segment
+                        rule: self.matches(r'^(?:(?:\*\*|\*?(?:(?:\\[^/]|\[(?:[!^](?:\]|\\[^/]|[^\\\[\]/])|\]|\\[^/]|[^\\\[\]/!^])(?:\\[^/]|[^\\\[\]/])*\]|[^\\\[*/])\*?)*)(?:/|$))+$')
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: the patterns of a list must have at most 16384 characters
+                        in all
+                      rule: self.map(p, size(p)).sum() <= 16384
                   include:
                     description: |-
-                      include lists the patterns of files to sync. Everything is included when
-                      the list is empty.
+                      include lists the patterns of the files to commit. Every file is included when the
+                      list is empty.
                     items:
                       maxLength: 512
                       minLength: 1
@@ -275,9 +290,24 @@ spec:
                       x-kubernetes-validations:
                       - message: patterns must be relative and must not contain '..'
                         rule: '!self.startsWith(''/'') && !(''..'' in self.split(''/''))'
+                      - message: 'patterns must not start with ''!'': there is no
+                          negation; write ''\!'' for a name that starts with ''!'''
+                        rule: '!self.startsWith(''!'')'
+                      - message: patterns must not contain a NUL
+                        rule: '!self.matches(r''\x00'')'
+                      - message: patterns must not have an empty or '.' segment
+                        rule: '!self.matches(r''(^|/)\.?/|(^|/)\.$'')'
+                      - message: patterns must close each '[' within its segment,
+                          must have no '[' or '/' in a class and no '\' at the end
+                          or before a '/', and may have '**' only as a whole segment
+                        rule: self.matches(r'^(?:(?:\*\*|\*?(?:(?:\\[^/]|\[(?:[!^](?:\]|\\[^/]|[^\\\[\]/])|\]|\\[^/]|[^\\\[\]/!^])(?:\\[^/]|[^\\\[\]/])*\]|[^\\\[*/])\*?)*)(?:/|$))+$')
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: the patterns of a list must have at most 16384 characters
+                        in all
+                      rule: self.map(p, size(p)).sum() <= 16384
                 type: object
               placement:
                 default:
