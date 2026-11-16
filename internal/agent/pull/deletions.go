@@ -28,8 +28,12 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 )
 
-// approve ends the message of every refusal of the cap: what a person does about it.
-const approve = "Nothing was written. If the update is meant, remove those files yourself, and the next pull goes on"
+// nothingWritten ends the message of every refusal of the cap.
+const nothingWritten = "Nothing was written. "
+
+// removeThem is what a person does about an update that is refused because it would leave the branch with no
+// file: no number lets it through.
+const removeThem = "If the update is meant, remove those files yourself, and the next pull goes on"
 
 // checkDeletions refuses an update that would remove more files from the directory than MaxDeletions,
 // and one that would remove any file and leave the branch with none (docs/adr/0026). It only reads.
@@ -45,8 +49,11 @@ func (p *Puller) checkDeletions(ctx context.Context, from, to string) error {
 	}
 	listed, err := p.names(ctx, "diff-tree", "-r", "-z", "--no-renames", "--diff-filter=D", "--name-only", from, to)
 	if errors.Is(err, git.ErrOutputLimit) {
-		return p.fail(ReasonTooManyDeletions, "the update would remove so many files that Treebind cannot list them, and more than "+
-			"the %d that it removes in one update. "+approve, p.o.MaxDeletions)
+		// No number: a cap that was raised may be more than the files that fit the limit, and a person who removes
+		// files does not shorten the list, which is of the commits.
+		return p.fail(ReasonTooManyDeletions, "the update would remove so many files that Treebind cannot list them. "+nothingWritten+
+			"It cannot be let through from here: put the files back in the repository with a commit, and push the removal again in "+
+			"steps that each remove fewer files")
 	}
 	if err != nil {
 		return p.fail(ReasonPullFailed, "the files that the update removes cannot be listed: %v", err)
@@ -60,20 +67,23 @@ func (p *Puller) checkDeletions(ctx context.Context, from, to string) error {
 			present = append(present, name)
 		}
 	}
-	if len(present) > p.o.MaxDeletions {
-		return p.fail(ReasonTooManyDeletions, "the update would remove %d file(s) from the directory, more than the %d that Treebind "+
-			"removes in one update, for example %s. "+approve, len(present), p.o.MaxDeletions, named(present))
-	}
 	if len(present) == 0 {
 		return nil
 	}
+	// The refusal that no number lifts comes first, so that a person who is told to raise the number is not
+	// refused again for the other.
 	left, err := p.names(ctx, "ls-tree", "-z", "--name-only", to)
 	if err != nil {
 		return p.fail(ReasonPullFailed, "the files of the branch cannot be listed: %v", err)
 	}
 	if len(left) == 0 {
 		return p.fail(ReasonTooManyDeletions, "the update would remove %d file(s) from the directory and leave the branch with no file "+
-			"at all, for example %s. "+approve, len(present), named(present))
+			"at all, for example %s. "+nothingWritten+removeThem, len(present), named(present))
+	}
+	if len(present) > p.o.MaxDeletions {
+		return p.fail(ReasonTooManyDeletions, "the update would remove %d file(s) from the directory, more than the %d that Treebind "+
+			"removes in one update, for example %s. "+nothingWritten+"If the update is meant, set spec.sync.maxDeletions to %d or more, "+
+			"or remove those files yourself, and the next pull goes on", len(present), p.o.MaxDeletions, named(present), len(present))
 	}
 	return nil
 }

@@ -461,6 +461,17 @@ spec:
                     x-kubernetes-validations:
                     - message: interval must be at least 1s
                       rule: duration(self) >= duration('1s')
+                  maxDeletions:
+                    description: |-
+                      maxDeletions is the most files that one update may remove from the directory. An update that
+                      would remove more is not applied: the agent says so, and asks again at every interval. The
+                      agent applies up to 100 when this is not set. Raise it to let through an update that removes
+                      more files, or remove the files yourself. An update that would leave the repository with no
+                      file at all is refused whatever this says.
+                    format: int32
+                    maximum: 2147483647
+                    minimum: 1
+                    type: integer
                   settleTime:
                     default: 5s
                     description: |-

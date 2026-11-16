@@ -214,6 +214,23 @@ func TestPullsIntoTheCheckoutThatWasMadeWithWhatTheSettingsSay(t *testing.T) {
 	}
 }
 
+func TestPullsWithTheCapOnDeletionsThatTheSettingsSayAndWithNoneWhenTheyDoNot(t *testing.T) {
+	f := newFakePuller()
+	change, made := withPuller(f, &loopClock{})
+	start(t, change)
+	if options := <-made; options.MaxDeletions != 0 {
+		t.Errorf("MaxDeletions = %d, want 0: with no setting the pull has the cap of its own", options.MaxDeletions)
+	}
+
+	f = newFakePuller()
+	change, made = withPuller(f, &loopClock{})
+	start(t, func(o *Options) { change(o); o.Config.MaxDeletions = 7 })
+
+	if options := <-made; options.MaxDeletions != 7 {
+		t.Errorf("MaxDeletions = %d, want 7, the cap that the setting says", options.MaxDeletions)
+	}
+}
+
 func TestSaysThePhaseUntilTheFirstPullAndThatItRunsWhileItDoes(t *testing.T) {
 	f := newFakePuller()
 	// The first wait never passes, so that the report is read before the first pull.

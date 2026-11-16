@@ -44,9 +44,10 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 	phase := syncloop.Phase(a.Config.Namespace, a.Config.Name, interval)
 	options := pull.Options{
 		Layout: done.options.Layout, URL: done.options.URL, Branch: done.made.Branch, Git: done.options.Git,
-		// The lock is checked immediately before an update is written. The cap on deletions and the
-		// recovery ref are the pull's own, with the numbers that it has (docs/adr/0026).
-		Fence: a.fence,
+		// The lock is checked immediately before an update is written. The cap on deletions is the
+		// Treebind's when it says, and the pull's own when it does not, and the recovery ref is the pull's
+		// own (docs/adr/0026, docs/adr/0027).
+		Fence: a.fence, MaxDeletions: a.Config.MaxDeletions,
 	}
 	l := &pulls{a: a, p: p, options: options}
 

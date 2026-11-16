@@ -46,12 +46,11 @@ counts as there, because an update that is refused for it is tried again at the 
 applied is not undone. A checkout with no commit has nothing for an update to remove.
 
 An update is refused when it removes **more than 100 files**, or when it removes **any file and leaves the branch
-with no file at all**, which is an emptied remote. Both are fixed numbers of the agent and not settings (see
-below). There is no share of the files as a second number: the second rule is the case that a share is for, and
+with no file at all**, which is an emptied remote. The 100 is the cap of an agent that is told nothing, and a Treebind can raise it (see below). There is no share of the files as a second number: the second rule is the case that a share is for, and
 a repository that was reorganised and lost most of its files to others is not a mistake to be refused.
 
-A list of names that does not fit the Runner's limit on the output of a command, 16 MiB, is far more than the
-cap, and is refused without a count.
+A list of names that does not fit the Runner's limit on the output of a command, 16 MiB, is refused without a
+count, whatever the cap is.
 
 ### What a refused update does
 
@@ -73,18 +72,14 @@ This adds a row to the table of ADR 0024, whose text stays as it is, and changes
 
 ### How a person lets it through
 
-There is no field in `spec` for it in this change. A field is an API decision, with a CRD marker, CEL, a setting
-for the pod and the replacement of every sync pod that sets it, and a Treebind that never meets the cap would
-carry it for nothing. Without it, the agent never removes more than the cap, and the person who means it does:
-because the count is of the files that are in the directory, files that were removed by hand are not counted,
-and the next pull goes on. Git applies a fast-forward whose deleted files are already gone, which the tests
-hold. [The page about it](../deletion-guard.md) gives the commands that list the files of the update and remove
-them, and the tests run those commands as they are written.
+There are two ways. The first is in the agent: because the count is of the files that are in the directory,
+files that a person removes by hand are not counted, and the next pull goes on. Git applies a fast-forward whose
+deleted files are already gone, which the tests hold. [The page about it](../deletion-guard.md) gives the
+commands that list the files of the update and remove them, and the tests run those commands as they are
+written. It is the only way for an update that leaves the branch with no file at all.
 
-A person can set the number the same way, by removing some of the files and leaving fewer than the cap.
-`spec.sync.maxDeletions`, passed to the agent in an environment variable that the operator sets only when the
-field is set, so that no pod of a Treebind without it is replaced, is the change to make if removing files by
-hand is not enough.
+The second is a field of the Treebind, `spec.sync.maxDeletions`, which raises the number. It has its own
+decision, ADR 0027, because it is an API change and replaces the sync pod of a Treebind that sets it.
 
 ### The recovery ref
 
@@ -135,14 +130,14 @@ and in an image that has one.
 ## Consequences
 
 - The sync pod template does not change, so no sync pod is replaced by this (#87).
-- An update that removes more than 100 files, or all of them, is not applied until a person removes the files,
-  and says so in the `Pull` check at every interval. For a repository where that is routine, a field is the
-  next change.
+- An update that removes more than 100 files, or all of them, is not applied until a person removes the files
+  or, for the number, raises it with the field of ADR 0027. The `Pull` check says so at every interval.
 - The cap stops a surprise and not a sequence: updates that each remove fewer than 100 files remove as many as
   they like. A person with write access to the repository can also remove the data of the application, as
   they could before. What the cap is for is a mistake.
-- A list of names over 16 MiB is refused without a count, and removing files cannot let it through, because
-  the list is of the commits and not of the directory. That is some hundred thousand files in one update.
+- A list of names over 16 MiB is refused without a count, and neither removing files nor a higher cap can let it
+  through, because the list is of the commits and not of the directory. That is some hundred thousand files in
+  one update, and the way out is to put the files back in the repository and push the removal again in steps.
 - A `Blocked` update leaves a ref behind that keeps the commit the checkout is still at. That is harmless, and
   the ref is reused when the update is applied.
 - A process that is killed while it writes a ref leaves the `.lock` file that Git makes, and Git does not

@@ -217,6 +217,11 @@ func (in *SyncSpec) DeepCopyInto(out *SyncSpec) {
 		*out = new(v1.Duration)
 		**out = **in
 	}
+	if in.MaxDeletions != nil {
+		in, out := &in.MaxDeletions, &out.MaxDeletions
+		*out = new(int32)
+		**out = **in
+	}
 	if in.SettleTime != nil {
 		in, out := &in.SettleTime, &out.SettleTime
 		*out = new(v1.Duration)

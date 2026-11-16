@@ -22,17 +22,31 @@ the next interval, as it does for `Blocked`:
 kubectl describe treebind <name>
 ```
 
-The two numbers are fixed. They are not a setting of the Treebind.
+The 100 is the cap of a Treebind that does not say otherwise. The rule about a branch with no file at all is
+not a number.
 
 ### Letting the update through
 
-The agent will not be the one to remove that many files. If the update is what you mean, you remove them,
-and the next pull goes on, because the update then has few files left to remove. These commands run in a pod
-that has `git` and a shell, and that mounts the **whole claim**, not only the `subPath`, because the Git
-directory is beside the directory that is synced (see [the Git directory](git-directory.md)).
-`MOUNT` is where the claim is mounted in that pod, `SUB` is `spec.target.subPath` (`.` when there is none) and
-`BRANCH` is `spec.repository.branch`. Run them as the user of the agent, `65532`, so that Git and the files
-keep their owner.
+There are two ways. If the update is what you mean, raise the number: set `spec.sync.maxDeletions` of the
+Treebind to the number of files that the message says, or more. The sync pod is replaced once, and the update
+goes on at its first pull.
+
+```yaml
+spec:
+  sync:
+    maxDeletions: 500
+```
+
+The number stays until you change it, so an update that removes as many files goes through next time as well.
+Take the field away to go back to 100.
+
+The other way is for an update that leaves the branch with no file at all, which no number lets through, and
+for anyone who would rather not change the spec: you remove the files, and the next pull goes on, because the
+update then has few files left to remove. These commands run in a pod that has `git` and a shell, and that mounts
+the **whole claim**, not only the `subPath`, because the Git directory is beside the directory that is synced
+(see [the Git directory](git-directory.md)). `MOUNT` is where the claim is mounted in that pod, `SUB` is
+`spec.target.subPath` (`.` when there is none) and `BRANCH` is `spec.repository.branch`. Run them as the user of
+the agent, `65532`, so that Git and the files keep their owner.
 
 The files the update would remove:
 
@@ -91,10 +105,12 @@ changes the same path is `Blocked` until you remove them or let them be committe
 
 - **Do not run `git gc` or `git pack-refs` in the Git directory.** They pack the refs into a `packed-refs`
   file, which the agent refuses in its Git directory (`GitDirUnsafe`).
-- **Removing files cannot let a very large update through.** When the names of the files that an update
-  removes do not fit in 16 MiB, some hundred thousand files, the agent refuses it without a count, because
-  it cannot list them. The list is of the commits and not of your directory, so removing files does not
-  shorten it.
+- **A very large update cannot be let through from here.** When the names of the files that an update removes
+  do not fit in 16 MiB, some hundred thousand files, the agent refuses it without a count, because it cannot
+  list them. The list is of the commits and not of your directory, so removing files does not shorten it, and
+  `spec.sync.maxDeletions` is not looked at. Put the files back in the repository with a commit, so that the
+  update has little to remove, and push the removal again in steps that each remove fewer files, with
+  `spec.sync.maxDeletions` raised to what a step needs.
 - **A crash in the middle of writing a ref leaves a `.lock` file next to it**, as it does for the index. Git
   does not remove it. The pull says `PullFailed`, with the path of the file, until you remove it. A lock next to
   an old ref does not stop the updates: the ref stays, and the check `Pull` says that it could not be removed.

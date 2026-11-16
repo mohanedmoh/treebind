@@ -416,6 +416,23 @@ func TestTemplateHashFollowsTheLists(t *testing.T) {
 	}
 }
 
+func TestTemplateHashFollowsTheCapOnDeletions(t *testing.T) {
+	limit := func(n int32) *int32 { return &n }
+	states := []*int32{nil, limit(100), limit(250), limit(1), nil}
+	hashes := make([]string, len(states))
+	for i, state := range states {
+		treebind := newTreebind(testTreebindName)
+		treebind.Spec.Sync.MaxDeletions = state
+		hashes[i] = mustDesiredStatefulSet(t, treebind, testImage).Annotations[templateHashAnnotation]
+		if i > 0 && hashes[i] == hashes[i-1] {
+			t.Errorf("going from %v to %v leaves the hash as it was, so the pod is not replaced and keeps the old cap", states[i-1], state)
+		}
+	}
+	if hashes[0] != hashes[len(hashes)-1] {
+		t.Errorf("a Treebind whose cap is taken away has the hash %s, and %s before it had one", hashes[len(hashes)-1], hashes[0])
+	}
+}
+
 // The pod template of a Treebind without lists is the one that the operator wrote before it passed
 // the lists on, byte for byte, so that upgrading the operator replaces none of those sync pods
 // (#87). The hashes are those of commit 2eb611c. A change that alters them replaces every such pod,

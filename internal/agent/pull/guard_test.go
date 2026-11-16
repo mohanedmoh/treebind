@@ -116,8 +116,9 @@ func TestPullRefusesAnUpdateThatRemovesMoreFilesThanTheCapAndWritesNothing(t *te
 
 		got := errorOf(t, err, ReasonTooManyDeletions)
 		if !strings.Contains(got.Message, "4 file(s)") || !strings.Contains(got.Message, "more than the 2 ") ||
-			strings.Count(got.Message, ".json") != maxNamed || !strings.Contains(got.Message, "Nothing was written") {
-			t.Errorf("message = %q, want the count, the cap, %d names and that nothing was written", got.Message, maxNamed)
+			strings.Count(got.Message, ".json") != maxNamed || !strings.Contains(got.Message, "Nothing was written") ||
+			!strings.Contains(got.Message, "set spec.sync.maxDeletions to 4 or more, or remove those files yourself") {
+			t.Errorf("message = %q, want the count, the cap, %d names, that nothing was written and what to do", got.Message, maxNamed)
 		}
 		w.wantAt(t, w.tip)
 		for name := range five {
@@ -173,7 +174,8 @@ func TestPullRefusesAnUpdateThatLeavesTheBranchWithNoFileWhateverTheCap(t *testi
 
 		got := errorOf(t, err, ReasonTooManyDeletions)
 		if !strings.Contains(got.Message, "2 file(s)") || !strings.Contains(got.Message, "no file at all") ||
-			!strings.Contains(got.Message, "Nothing was written") {
+			!strings.Contains(got.Message, "Nothing was written") || strings.Contains(got.Message, "maxDeletions") ||
+			!strings.Contains(got.Message, "remove those files yourself") {
 			t.Errorf("message = %q, want the count and that the branch would have no file at all", got.Message)
 		}
 		w.wantAt(t, w.tip)
@@ -181,6 +183,19 @@ func TestPullRefusesAnUpdateThatLeavesTheBranchWithNoFileWhateverTheCap(t *testi
 			t.Error("a file is gone although the update was refused")
 		}
 	})
+}
+
+func TestPullSaysThatNoNumberLetsItThroughWhenItEmptiesTheBranchAndAlsoRemovesMoreThanTheCap(t *testing.T) {
+	w := newWorldOf(t, subPath, five, capped(2))
+	w.f.Publish(branchMain, gone(fileA, fileB, fileC, fileD, fileE))
+
+	_, err := w.pull(t)
+
+	got := errorOf(t, err, ReasonTooManyDeletions)
+	if !strings.Contains(got.Message, "no file at all") || strings.Contains(got.Message, "maxDeletions") ||
+		!strings.Contains(got.Message, "5 file(s)") {
+		t.Errorf("message = %q, want the one that no number lifts, and not advice to raise a number that the next refusal would not accept", got.Message)
+	}
 }
 
 func TestPullAppliesAnUpdateThatReplacesEveryFileOfTheBranchWithOthers(t *testing.T) {
@@ -322,8 +337,11 @@ func TestPullSaysTooManyDeletionsWhenTheNamesDoNotFitTheOutputLimit(t *testing.T
 	_, err := w.pull(t)
 
 	got := errorOf(t, err, ReasonTooManyDeletions)
-	if !strings.Contains(got.Message, "so many files") || !strings.Contains(got.Message, "more than the 100 ") {
-		t.Errorf("message = %q, want that so many files go that Treebind cannot list them", got.Message)
+	if !strings.Contains(got.Message, "so many files") || !strings.Contains(got.Message, "Nothing was written") ||
+		strings.Contains(got.Message, "100") || strings.Contains(got.Message, "remove those files") ||
+		!strings.Contains(got.Message, "put the files back") {
+		t.Errorf("message = %q, want that so many files go that Treebind cannot list them, with no number, which a cap that was raised would make false, "+
+			"and no advice to remove files, which does not help", got.Message)
 	}
 	w.wantAt(t, w.tip)
 }
