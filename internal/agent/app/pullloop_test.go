@@ -206,9 +206,6 @@ func TestPullsIntoTheCheckoutThatWasMadeWithWhatTheSettingsSay(t *testing.T) {
 	if options.Fence == nil {
 		t.Error("the pull has no fence: it would write without looking at the lock")
 	}
-	if options.Guard != nil {
-		t.Error("the pull has a guard, and there is none until the recovery ref and the cap on deletions of #40")
-	}
 }
 
 func TestSaysThePhaseUntilTheFirstPullAndThatItRunsWhileItDoes(t *testing.T) {
