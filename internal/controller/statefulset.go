@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"maps"
 	"path"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -165,7 +166,10 @@ func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	if err := agent.validate(); err != nil {
 		return nil, err
 	}
-	template := desiredPodTemplate(treebind, agent)
+	template, err := desiredPodTemplate(treebind, agent)
+	if err != nil {
+		return nil, err
+	}
 	hash, err := templateHash(template)
 	if err != nil {
 		return nil, err
@@ -195,7 +199,7 @@ func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	}, nil
 }
 
-func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings) corev1.PodTemplateSpec {
+func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings) (corev1.PodTemplateSpec, error) {
 	mountPath := treebind.Spec.Target.MountPath
 	if mountPath == "" {
 		mountPath = defaultMountPath
@@ -283,6 +287,12 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 		}},
 	)
+	// What to sync, when spec.paths says (docs/adr/0022).
+	paths, err := pathsEnv(treebind.Spec.Paths)
+	if err != nil {
+		return corev1.PodTemplateSpec{}, err
+	}
+	env = append(env, paths...)
 	if auth := treebind.Spec.Repository.Auth; auth != nil {
 		if ref := auth.SSHKeySecretRef; ref != nil {
 			env = append(env, corev1.EnvVar{Name: agentconfig.EnvSSHKeyFile, Value: path.Join(sshMountPath, ref.Key)})
@@ -336,7 +346,7 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 			}},
 			Volumes: volumes,
 		},
-	}
+	}, nil
 }
 
 // statusProbe is an HTTP probe of one of the probe paths of the agent. They need
@@ -350,6 +360,39 @@ func statusProbe(probePath string) *corev1.Probe {
 		TimeoutSeconds:   probeTimeoutSeconds,
 		FailureThreshold: probeFailures,
 	}
+}
+
+// pathsEnv returns the variables of the lists of spec.paths that are not empty, each a JSON array of
+// strings (docs/adr/0022). A list that is empty is left out, so that a pod template that has none
+// does not change, and its pod is not replaced, when the operator learns to pass them on. JSON
+// escapes '<', '>', '&' and the control characters, and the agent reads them back as they were. A
+// string from the API server is UTF-8, so JSON replaces nothing in it. The CRD keeps the patterns of
+// a list to agentconfig.MaxPathPatternsLength characters in all, so that the JSON, six bytes a
+// character at most, fits in one environment variable.
+func pathsEnv(paths *treebindv1alpha1.PathsSpec) ([]corev1.EnvVar, error) {
+	if paths == nil {
+		return nil, nil
+	}
+	var env []corev1.EnvVar
+	for _, list := range []struct {
+		name     string
+		patterns []string
+	}{{agentconfig.EnvPathsInclude, paths.Include}, {agentconfig.EnvPathsExclude, paths.Exclude}} {
+		if len(list.patterns) == 0 {
+			continue
+		}
+		encoded, err := json.Marshal(list.patterns)
+		if err != nil {
+			return nil, fmt.Errorf("encode %s: %w", list.name, err)
+		}
+		// The kubelet expands $(NAME) and $$ in the value of a variable, and a pattern may hold a '$'.
+		// JSON may write it as \u0024, which the kubelet leaves as it is and the agent reads as '$'.
+		// No byte of a JSON escape or of a UTF-8 sequence is a '$', so each one is a character of a
+		// pattern, and six bytes are still the most that one takes.
+		value := strings.ReplaceAll(string(encoded), "$", `\u0024`)
+		env = append(env, corev1.EnvVar{Name: list.name, Value: value})
+	}
+	return env, nil
 }
 
 // templateHash returns the SHA-256 of the JSON encoding of the pod template.
