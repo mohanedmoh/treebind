@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"maps"
 	"path"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -280,6 +281,12 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	// agent uses the default of the CRD, which is what the API server fills in.
 	if interval := treebind.Spec.Sync.Interval; interval != nil {
 		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSyncInterval, Value: interval.Duration.String()})
+	}
+	// The cap on what one update removes, when the Treebind says (docs/adr/0027). The variable is left out
+	// otherwise, so that a pod template that never had it does not change, and its pod is not replaced, when
+	// the operator learns to pass it on. It is a number, which the kubelet does not rewrite.
+	if limit := treebind.Spec.Sync.MaxDeletions; limit != nil {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSyncMaxDeletions, Value: strconv.FormatInt(int64(*limit), 10)})
 	}
 	env = append(env,
 		corev1.EnvVar{Name: agentconfig.EnvSyncDirection, Value: string(treebind.Spec.Sync.Direction)},

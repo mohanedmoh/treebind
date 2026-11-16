@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"testing"
 	"time"
 
@@ -54,6 +55,46 @@ func TestTheAgentIsToldHowToSyncAndWhoThePodIs(t *testing.T) {
 	}
 	if env[agentconfig.EnvSyncInterval] != "1m30s" {
 		t.Errorf("%s = %q, want the interval as Go writes a duration", agentconfig.EnvSyncInterval, env[agentconfig.EnvSyncInterval])
+	}
+}
+
+func TestTheAgentIsToldTheCapOnDeletionsOnlyWhenTheSpecSaysOne(t *testing.T) {
+	treebind := newTreebind(testTreebindName)
+	config, env, err := agentConfigOf(t, treebind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, set := env[agentconfig.EnvSyncMaxDeletions]; set || config.MaxDeletions != 0 {
+		t.Errorf("%s is %q and the agent reads %d, want neither: a pod template that never had the variable is not changed, "+
+			"and the pull has a cap of its own", agentconfig.EnvSyncMaxDeletions, value, config.MaxDeletions)
+	}
+
+	limit := int32(250)
+	treebind.Spec.Sync.MaxDeletions = &limit
+	config, env, err = agentConfigOf(t, treebind)
+
+	if err != nil {
+		t.Fatalf("the agent refuses the environment of its own pod: %v", err)
+	}
+	// The name is written out, because it is what ADR 0027 and the page about the guard tell a person.
+	if env["TREEBIND_SYNC_MAX_DELETIONS"] != "250" || config.MaxDeletions != 250 {
+		t.Errorf("TREEBIND_SYNC_MAX_DELETIONS = %q and the agent reads %d, want 250 on both sides",
+			env["TREEBIND_SYNC_MAX_DELETIONS"], config.MaxDeletions)
+	}
+}
+
+func TestTheAgentAcceptsEveryCapOnDeletionsTheOperatorCanPutInThePod(t *testing.T) {
+	for _, limit := range []int32{agentconfig.MinMaxDeletions, 2, 100, 101, 1000000, agentconfig.MaxMaxDeletions} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			treebind := newTreebind(testTreebindName)
+			treebind.Spec.Sync.MaxDeletions = &limit
+
+			config, _, err := agentConfigOf(t, treebind)
+
+			if err != nil || config.MaxDeletions != int(limit) {
+				t.Errorf("the agent reads %d, %v, want %d and no refusal", config.MaxDeletions, err, limit)
+			}
+		})
 	}
 }
 
@@ -215,6 +256,68 @@ var _ = Describe("sync.interval", func() {
 		Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
 		_, err = created(ctx, &metav1.Duration{Duration: agentconfig.MinSyncInterval - 1})
 		Expect(err).To(MatchError(ContainSubstring("interval must be at least 1s")))
+	})
+})
+
+var _ = Describe("sync.maxDeletions", func() {
+	It("is accepted by the API server exactly when the agent accepts it", func() {
+		ctx := context.Background()
+		var accepted, refused int
+		for i, limit := range []int64{
+			math.MinInt64, -1 << 40, -2147483649, -2147483648, -1, 0, 1, 2, 99, 100, 101, 1 << 20, math.MaxInt32 - 1, math.MaxInt32,
+			math.MaxInt32 + 1, 1 << 32, 1 << 40, math.MaxInt64,
+		} {
+			object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind(fmt.Sprintf("max-deletions-%d", i)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedField(object, limit, "spec", "sync", "maxDeletions")).To(Succeed())
+			treebind := &unstructured.Unstructured{Object: object}
+			treebind.SetGroupVersionKind(treebindv1alpha1.GroupVersion.WithKind("Treebind"))
+
+			createErr := k8sClient.Create(ctx, treebind)
+
+			// The operator writes the number as Go does, which is what a value that the API server took reaches the agent as.
+			_, agentErr := agentconfig.CheckMaxDeletions(strconv.FormatInt(limit, 10))
+			if (createErr == nil) != (agentErr == nil) {
+				Fail(fmt.Sprintf("maxDeletions %d: the API server accepts it = %v (%v), the agent accepts it = %v (%v): "+
+					"a value that the API server takes and the agent refuses leaves a sync pod that exits at start for ever",
+					limit, createErr == nil, createErr, agentErr == nil, agentErr))
+			}
+			if createErr == nil {
+				accepted++
+				Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
+			} else {
+				refused++
+			}
+		}
+		// The list has to hold both, or the check above says nothing.
+		Expect(accepted).To(BeNumerically(">", 5))
+		Expect(refused).To(BeNumerically(">", 5))
+	})
+
+	// What is not a whole number is not for the agent to read, so the API server has to refuse it.
+	It("is refused by the API server when it is not a whole number", func() {
+		ctx := context.Background()
+		for i, value := range []any{"100", 1.5, true, []any{int64(1)}, map[string]any{"n": int64(1)}} {
+			object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind(fmt.Sprintf("max-deletions-type-%d", i)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedField(object, value, "spec", "sync", "maxDeletions")).To(Succeed())
+			treebind := &unstructured.Unstructured{Object: object}
+			treebind.SetGroupVersionKind(treebindv1alpha1.GroupVersion.WithKind("Treebind"))
+
+			Expect(k8sClient.Create(ctx, treebind)).NotTo(Succeed(), "%#v", value)
+		}
+	})
+
+	It("is not filled in by the API server, so that the pod of a Treebind that does not say is not changed", func() {
+		ctx := context.Background()
+		treebind := newTreebind("max-deletions-unset")
+		Expect(k8sClient.Create(ctx, treebind)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, treebind)).To(Succeed()) })
+
+		var got treebindv1alpha1.Treebind
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: treebind.Namespace, Name: treebind.Name}, &got)).To(Succeed())
+
+		Expect(got.Spec.Sync.MaxDeletions).To(BeNil())
 	})
 })
 

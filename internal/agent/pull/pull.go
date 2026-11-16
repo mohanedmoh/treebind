@@ -23,6 +23,12 @@ limitations under the License.
 // what FR-2 asks for: nothing the application has changed and not yet committed is overwritten.
 // Commits on both sides are not merged here: that is the conflict policy of the Treebind.
 //
+// Before it applies an update the pull looks at what the update would remove from the directory, and
+// does not apply one that removes more than a cap, or every file of the branch, so that a branch that
+// was emptied by mistake is not an emptied directory (FR-18, docs/adr/0026). When it does apply one it
+// has first kept the commit the checkout was at under a ref of its own, after the lock was checked
+// and before the first write.
+//
 // Everything goes through the Runner of internal/agent/git, so the protections of docs/adr/0013
 // and the look at the Git directory of docs/adr/0019 apply to every command.
 package pull
@@ -40,9 +46,17 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 )
 
-// DefaultFetchTimeout is how long a fetch may take. It is the one of the first checkout: a
-// repository that grew a lot since the last pull needs more than the Runner's own timeout.
-const DefaultFetchTimeout = checkout.DefaultFetchTimeout
+const (
+	// DefaultFetchTimeout is how long a fetch may take. It is the one of the first checkout: a
+	// repository that grew a lot since the last pull needs more than the Runner's own timeout.
+	DefaultFetchTimeout = checkout.DefaultFetchTimeout
+
+	// DefaultMaxDeletions is the most files that an update removes from the directory (docs/adr/0026).
+	DefaultMaxDeletions = 100
+
+	// DefaultRecoveryRefs is how many recovery refs are kept (docs/adr/0026).
+	DefaultRecoveryRefs = 20
+)
 
 // Outcome says what a pull that worked did. The outcomes and the reasons below are API in the
 // sense of docs/adr/0004: users and tooling will match on them.
@@ -78,8 +92,12 @@ const (
 	// ReasonGitDirUnsafe means the Git directory holds something the agent did not put there.
 	// It is the reason of the checkout and of the preflight check for the same cause.
 	ReasonGitDirUnsafe = checkout.ReasonGitDirUnsafe
-	// ReasonRefused means the fence or the guard of the caller stopped the update. The error of
-	// the caller is underneath: a lost lock is lock.ErrLost.
+	// ReasonTooManyDeletions means the update would remove more files from the directory than a
+	// pull removes at once, or every file of the branch. Nothing was written. A person who means it
+	// removes the files, and the next pull goes on (docs/adr/0026).
+	ReasonTooManyDeletions = "TooManyDeletions"
+	// ReasonRefused means the fence of the caller stopped the update. The error of the caller is
+	// underneath: a lost lock is lock.ErrLost.
 	ReasonRefused = "Refused"
 	// ReasonPullFailed means the agent could not pull for another reason: Git failed on the
 	// volume, or the checkout is not what a pull expects.
@@ -121,10 +139,13 @@ type Options struct {
 	// it returns an error. It is where the writer lock is checked (docs/adr/0012). It is not called
 	// when there is nothing to apply.
 	Fence func(ctx context.Context) error
-	// Guard is called with the commit the checkout is at, empty when it has none, and the commit it
-	// would move to, before the fence, and the update is not applied when it returns an error. It
-	// is where a cap on deletions and a recovery ref go.
-	Guard func(ctx context.Context, from, to string) error
+
+	// MaxDeletions is the most files that an update may remove from the directory. An update that
+	// removes more is refused with ReasonTooManyDeletions. DefaultMaxDeletions when it is zero.
+	MaxDeletions int
+	// RecoveryRefs is how many of the refs that keep the commit the checkout was at before an update
+	// are kept. DefaultRecoveryRefs when it is zero.
+	RecoveryRefs int
 }
 
 // Result is what a pull that worked did.
@@ -136,6 +157,12 @@ type Result struct {
 	// From and To are the commits the checkout moved between when it was advanced, and From is
 	// empty when the checkout had no commit. Otherwise both are the commit it is at.
 	From, To string
+	// Recovery is the ref that keeps the commit the checkout was at before it was advanced, and is
+	// empty when it was not advanced or had no commit.
+	Recovery string
+	// Warning says what the pull could not do that does not fail it: an old recovery ref that it could
+	// not remove. It is empty when there is nothing to say.
+	Warning string
 }
 
 // Puller pulls into one checkout. It is not safe for concurrent use: one pull runs at a time.
@@ -165,8 +192,17 @@ func New(o Options) (*Puller, error) {
 	if err := config.CheckBranch(o.Branch); err != nil {
 		return nil, fmt.Errorf("pull: the branch %q %w", o.Branch, err)
 	}
+	if o.MaxDeletions < 0 || o.RecoveryRefs < 0 {
+		return nil, errors.New("pull: MaxDeletions and RecoveryRefs must not be negative")
+	}
 	if o.FetchTimeout == 0 {
 		o.FetchTimeout = DefaultFetchTimeout
+	}
+	if o.MaxDeletions == 0 {
+		o.MaxDeletions = DefaultMaxDeletions
+	}
+	if o.RecoveryRefs == 0 {
+		o.RecoveryRefs = DefaultRecoveryRefs
 	}
 	runner, err := git.New(checkout.RunnerOptions(o.Layout, o.Git))
 	if err != nil {
@@ -283,15 +319,22 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 		// a pull's, and a refusal of the Git directory keeps its own through fail.
 		return Result{}, p.fail(ReasonPullFailed, "the files of the update cannot be listed: %v", refused.Err)
 	}
-	if p.o.Guard != nil {
-		if err := p.o.Guard(ctx, from, to); err != nil {
-			return Result{}, p.fail(ReasonRefused, "the update was not applied: %v", err)
-		}
+	if err := p.checkDeletions(ctx, from, to); err != nil {
+		return Result{}, err
 	}
-	// Immediately before the write, so that the lock is checked as late as it can be.
+	// Immediately before the first write, so that the lock is checked as late as it can be, and before
+	// the ref that keeps the commit the checkout is at, which is a write too.
 	if p.o.Fence != nil {
 		if err := p.o.Fence(ctx); err != nil {
 			return Result{}, p.fail(ReasonRefused, "the update was not applied: %v", err)
+		}
+	}
+	var recovery string
+	var refs []recoveryRef
+	if from != "" {
+		var err error
+		if recovery, refs, err = p.keepRecovery(ctx, from); err != nil {
+			return Result{}, err
 		}
 	}
 
@@ -300,11 +343,10 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 	// local edit as it is. --no-overwrite-ignore: Git writes over an untracked file that a .gitignore
 	// hides, unless it is told not to, and a file that the application keeps out of the repository,
 	// a .env or a local config, is the application's all the same.
-	_, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to)
-	if err != nil {
+	if _, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to); err != nil {
 		return Result{}, p.mergeFailed(ctx, from, to, err)
 	}
-	return Result{Outcome: Advanced, Branch: p.o.Branch, From: from, To: to}, nil
+	return Result{Outcome: Advanced, Branch: p.o.Branch, From: from, To: to, Recovery: recovery, Warning: p.tidyRecovery(ctx, refs)}, nil
 }
 
 // mergeFailed turns the failure of the fast-forward into its reason, and names the files that are

@@ -58,8 +58,14 @@ type world struct {
 // returns a Puller. The options can be changed first.
 func newWorld(t *testing.T, sub string, change ...func(*Options)) *world {
 	t.Helper()
+	return newWorldOf(t, sub, versionOne, change...)
+}
+
+// newWorldOf is newWorld for a repository that starts with the files.
+func newWorldOf(t *testing.T, sub string, files map[string]string, change ...func(*Options)) *world {
+	t.Helper()
 	f := gittest.New(t)
-	tip := f.Publish(branchMain, versionOne)
+	tip := f.Publish(branchMain, files)
 	l := f.Layout(sub)
 	made, err := checkout.Open(context.Background(), f.CheckoutOptions(l, branchMain))
 	if err != nil || made.Outcome != checkout.Cloned {
@@ -415,68 +421,38 @@ func TestPullRunsNoGitAgainstAGitDirectoryThatHoldsMoreThanTheAgentPutThere(t *t
 	}
 }
 
-func TestPullChecksTheFenceAndTheGuardBeforeItWritesAndNotWhenThereIsNothingToWrite(t *testing.T) {
-	var fenced, guarded int
-	var from, to string
+func TestPullChecksTheFenceBeforeItWritesAndNotWhenThereIsNothingToWrite(t *testing.T) {
+	var fenced int
 	w := newWorld(t, subPath, func(o *Options) {
 		o.Fence = func(context.Context) error { fenced++; return nil }
-		o.Guard = func(_ context.Context, f, t string) error { guarded++; from, to = f, t; return nil }
 	})
-	if _, err := w.pull(t); err != nil || fenced != 0 || guarded != 0 {
-		t.Fatalf("a pull with nothing to write called the fence %d and the guard %d times, err = %v", fenced, guarded, err)
+	if _, err := w.pull(t); err != nil || fenced != 0 {
+		t.Fatalf("a pull with nothing to write called the fence %d times, err = %v", fenced, err)
 	}
-	tip := w.f.Publish(branchMain, map[string]string{fileC: contentC})
-
-	if _, err := w.pull(t); err != nil {
-		t.Fatal(err)
-	}
-
-	if fenced != 1 || guarded != 1 || from != w.tip || to != tip {
-		t.Errorf("fence called %d, guard called %d times with %q and %q, want once each, and the commits it moved between", fenced, guarded, from, to)
-	}
-}
-
-func TestPullDoesNotWriteWhenTheFenceOrTheGuardRefuses(t *testing.T) {
-	lost := errors.New("the lock is lost")
-	tests := []struct {
-		name   string
-		change func(*Options)
-	}{
-		{"the fence", func(o *Options) { o.Fence = func(context.Context) error { return lost } }},
-		{"the guard", func(o *Options) { o.Guard = func(context.Context, string, string) error { return lost } }},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := newWorld(t, subPath, tt.change)
-			w.f.Publish(branchMain, map[string]string{fileC: contentC})
-
-			_, err := w.pull(t)
-
-			got := errorOf(t, err, ReasonRefused)
-			if !errors.Is(err, lost) || !strings.Contains(got.Message, "the lock is lost") {
-				t.Errorf("error = %v, want the refusal of the caller underneath and in the message", err)
-			}
-			if w.head() != w.tip || gittest.Exists(filepath.Join(w.l.WorkTree, fileC)) {
-				t.Error("the checkout was written to although the pull was refused")
-			}
-		})
-	}
-}
-
-func TestPullChecksTheGuardBeforeTheFence(t *testing.T) {
-	var order []string
-	w := newWorld(t, subPath, func(o *Options) {
-		o.Guard = func(context.Context, string, string) error { order = append(order, "guard"); return nil }
-		o.Fence = func(context.Context) error { order = append(order, "fence"); return nil }
-	})
 	w.f.Publish(branchMain, map[string]string{fileC: contentC})
 
 	if _, err := w.pull(t); err != nil {
 		t.Fatal(err)
 	}
 
-	if strings.Join(order, ",") != "guard,fence" {
-		t.Errorf("order = %v, want the fence last, as close to the write as it can be", order)
+	if fenced != 1 {
+		t.Errorf("fence called %d times, want once", fenced)
+	}
+}
+
+func TestPullDoesNotWriteWhenTheFenceRefuses(t *testing.T) {
+	lost := errors.New("the lock is lost")
+	w := newWorld(t, subPath, func(o *Options) { o.Fence = func(context.Context) error { return lost } })
+	w.f.Publish(branchMain, map[string]string{fileC: contentC})
+
+	_, err := w.pull(t)
+
+	got := errorOf(t, err, ReasonRefused)
+	if !errors.Is(err, lost) || !strings.Contains(got.Message, "the lock is lost") {
+		t.Errorf("error = %v, want the refusal of the caller underneath and in the message", err)
+	}
+	if w.head() != w.tip || gittest.Exists(filepath.Join(w.l.WorkTree, fileC)) {
+		t.Error("the checkout was written to although the pull was refused")
 	}
 }
 
@@ -543,6 +519,8 @@ func TestNewRefusesWhatCannotWork(t *testing.T) {
 		{"no branch", func(o *Options) { o.Branch = "" }, "branch is not set"},
 		{"a branch that is refused", func(o *Options) { o.Branch = "-x" }, "must not start with '-'"},
 		{"a Runner that cannot be set up", func(o *Options) { o.Git.SSH.Program = "relative/ssh" }, "SSH.Program"},
+		{"a cap that is negative", func(o *Options) { o.MaxDeletions = -1 }, "must not be negative"},
+		{"a number of refs that is negative", func(o *Options) { o.RecoveryRefs = -1 }, "must not be negative"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

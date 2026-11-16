@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"path"
@@ -56,6 +57,10 @@ const (
 	// the one of the CRD when it is not set. EnvSyncDirection is pull or bidirectional.
 	EnvSyncInterval  = "TREEBIND_SYNC_INTERVAL"
 	EnvSyncDirection = "TREEBIND_SYNC_DIRECTION"
+	// EnvSyncMaxDeletions is the most files that one update may remove from the directory, as a whole
+	// number. It is not set when the Treebind does not say, and the pull has a cap of its own then
+	// (docs/adr/0027).
+	EnvSyncMaxDeletions = "TREEBIND_SYNC_MAX_DELETIONS"
 	// EnvPodName is the name of the sync pod. The writer lock names its holder with it.
 	EnvPodName = "TREEBIND_POD_NAME"
 	// EnvPathsInclude and EnvPathsExclude are the patterns of spec.paths, each list as a JSON
@@ -81,6 +86,10 @@ const (
 	DefaultSyncInterval = 30 * time.Second
 	// MinSyncInterval is the shortest interval the CRD admits.
 	MinSyncInterval = time.Second
+	// MinMaxDeletions and MaxMaxDeletions are the least and the most that the CRD admits for
+	// spec.sync.maxDeletions, which a test holds to what the API server does.
+	MinMaxDeletions = 1
+	MaxMaxDeletions = math.MaxInt32
 )
 
 // The directions of a sync, as the CRD names them.
@@ -110,6 +119,9 @@ type Config struct {
 	// and pushes the application's edits: pull, or bidirectional.
 	SyncInterval  time.Duration
 	SyncDirection string
+	// MaxDeletions is the most files that one update may remove from the directory, or zero when the
+	// Treebind does not say.
+	MaxDeletions int
 	// PodName is the name of the sync pod.
 	PodName string
 	// PathsInclude and PathsExclude are the include and exclude patterns of spec.paths, which
@@ -133,6 +145,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	// or space, which would never match a claim.
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
 	interval, intervalErr := CheckSyncInterval(get(EnvSyncInterval))
+	maxDeletions, maxDeletionsErr := CheckMaxDeletions(get(EnvSyncMaxDeletions))
 	include, includeErr := readPatterns(EnvPathsInclude, get(EnvPathsInclude))
 	exclude, excludeErr := readPatterns(EnvPathsExclude, get(EnvPathsExclude))
 	config := Config{
@@ -148,6 +161,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		KnownHostsFile: get(EnvKnownHostsFile),
 		SyncInterval:   interval,
 		SyncDirection:  get(EnvSyncDirection),
+		MaxDeletions:   maxDeletions,
 		PodName:        get(EnvPodName),
 		PathsInclude:   include,
 		PathsExclude:   exclude,
@@ -160,6 +174,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	err := config.validate()
 	if intervalErr != nil {
 		err = errors.Join(fmt.Errorf("%s %w", EnvSyncInterval, intervalErr), err)
+	}
+	if maxDeletionsErr != nil {
+		err = errors.Join(fmt.Errorf("%s %w", EnvSyncMaxDeletions, maxDeletionsErr), err)
 	}
 	return config, errors.Join(err, includeErr, excludeErr)
 }
@@ -276,6 +293,28 @@ func CheckSyncInterval(raw string) (time.Duration, error) {
 		return 0, fmt.Errorf("must be at least %s", MinSyncInterval)
 	}
 	return interval, nil
+}
+
+// CheckMaxDeletions returns the cap that a value stands for, zero when it is empty, or the reason it
+// cannot be one. The rules are the ones that the CRD puts on sync.maxDeletions: a whole number from
+// MinMaxDeletions to MaxMaxDeletions. A test holds the two together, because a value that the API server
+// accepts and the agent refuses would leave a sync pod that exits at start for ever.
+func CheckMaxDeletions(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	// Digits and nothing else, in 31 bits, which is MaxMaxDeletions: the operator writes the number as Go
+	// does, and a sign, an exponent, a prefix or a separator is a value that it never makes.
+	value, err := strconv.ParseUint(raw, 10, 31)
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		return 0, fmt.Errorf("must be at most %d", MaxMaxDeletions)
+	case err != nil:
+		return 0, errors.New("must be a whole number")
+	case value < MinMaxDeletions:
+		return 0, fmt.Errorf("must be at least %d", MinMaxDeletions)
+	}
+	return int(value), nil
 }
 
 // CheckSyncDirection returns the reason a value cannot be the direction of a sync. They are the

@@ -42,6 +42,10 @@ const (
 	problemControl  = "whitespace or control"
 	problemLeast    = "must be at least 1s"
 	problemDuration = "must be a duration"
+
+	problemMaxDeletionsLeast   = "must be at least 1"
+	problemMaxDeletionsMost    = "must be at most 2147483647"
+	problemMaxDeletionsInteger = "must be a whole number"
 )
 
 func complete() map[string]string {
@@ -591,5 +595,76 @@ func TestPortsFrom0To65535AreValid(t *testing.T) {
 		if _, err := fromMap(env); err != nil {
 			t.Errorf("%s was refused: %v", address, err)
 		}
+	}
+}
+
+func TestFromEnvReadsTheCapOnDeletionsAndLeavesItUnsetWhenThereIsNone(t *testing.T) {
+	config, err := fromMap(complete())
+	if err != nil || config.MaxDeletions != 0 {
+		t.Fatalf("MaxDeletions = %d, %v, want 0: the pull has a cap of its own when the setting is not there", config.MaxDeletions, err)
+	}
+
+	env := complete()
+	env[EnvSyncMaxDeletions] = " 250 "
+	config, err = fromMap(env)
+
+	if err != nil || config.MaxDeletions != 250 {
+		t.Errorf("MaxDeletions = %d, %v, want 250", config.MaxDeletions, err)
+	}
+}
+
+func TestFromEnvSaysABadCapOnDeletionsWithTheOtherProblems(t *testing.T) {
+	env := complete()
+	env[EnvSyncMaxDeletions] = "many"
+	env[EnvNamespace] = ""
+
+	_, err := fromMap(env)
+
+	if err == nil || !strings.Contains(err.Error(), EnvSyncMaxDeletions) || !strings.Contains(err.Error(), EnvNamespace+" is not set") {
+		t.Errorf("error = %v, want both problems at once", err)
+	}
+}
+
+func TestCheckMaxDeletions(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want int
+		err  string
+	}{
+		{"", 0, ""},
+		{"1", 1, ""},
+		{"100", 100, ""},
+		{"0100", 100, ""},
+		{"2147483647", MaxMaxDeletions, ""},
+		{"0", 0, problemMaxDeletionsLeast},
+		{"00", 0, problemMaxDeletionsLeast},
+		{"-1", 0, problemMaxDeletionsInteger},
+		{"+5", 0, problemMaxDeletionsInteger},
+		{"2147483648", 0, problemMaxDeletionsMost},
+		{"99999999999999999999", 0, problemMaxDeletionsMost},
+		{"1.5", 0, problemMaxDeletionsInteger},
+		{"1e3", 0, problemMaxDeletionsInteger},
+		{"0x10", 0, problemMaxDeletionsInteger},
+		{"1_000", 0, problemMaxDeletionsInteger},
+		{"many", 0, problemMaxDeletionsInteger},
+		{"5 0", 0, problemMaxDeletionsInteger},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := CheckMaxDeletions(tt.raw)
+
+			switch {
+			case tt.err == "" && (err != nil || got != tt.want):
+				t.Errorf("CheckMaxDeletions(%q) = %v, %v, want %v", tt.raw, got, err, tt.want)
+			case tt.err != "" && (err == nil || !strings.Contains(err.Error(), tt.err)):
+				t.Errorf("CheckMaxDeletions(%q) = %v, %v, want a problem that says %q", tt.raw, got, err, tt.err)
+			}
+		})
+	}
+}
+
+func TestTheLeastAndTheMostOfTheCapOnDeletionsAreTheOnesOfTheAPI(t *testing.T) {
+	if MinMaxDeletions != 1 || MaxMaxDeletions != 1<<31-1 {
+		t.Errorf("least = %d, most = %d, want 1 and 2147483647, which the CRD puts on spec.sync.maxDeletions", MinMaxDeletions, MaxMaxDeletions)
 	}
 }

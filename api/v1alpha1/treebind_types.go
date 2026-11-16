@@ -185,6 +185,16 @@ type SyncSpec struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="interval must be at least 1s"
 	Interval *metav1.Duration `json:"interval,omitempty"`
 
+	// maxDeletions is the most files that one update may remove from the directory. An update that
+	// would remove more is not applied: the agent says so, and asks again at every interval. The
+	// agent applies up to 100 when this is not set. Raise it to let through an update that removes
+	// more files, or remove the files yourself. An update that would leave the repository with no
+	// file at all is refused whatever this says.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2147483647
+	MaxDeletions *int32 `json:"maxDeletions,omitempty"`
+
 	// settleTime is the quiet period after the last local edit before the agent
 	// commits, so a file that is still being written is not committed half done.
 	// +optional
