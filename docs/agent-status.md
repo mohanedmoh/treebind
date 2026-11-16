@@ -89,6 +89,7 @@ The report lists the agent's checks, in the order the agent runs them, each with
 | `Lock` | The agent holds the writer lock of the volume, so that no other agent writes to it. It waits while another holds it | [ADR 0023](adr/0023-the-agent-holds-the-writer-lock-from-before-the-checkout.md) |
 | `Checkout` | The checkout of the repository is made, or the one that is there is opened | [The checkout](checkout.md) |
 | `Pull` | The last pull of the commits that the repository gained: at the tip, advanced, or why it did not work, for example `TooManyDeletions`. It is skipped until the first pull | [Pulling](pull.md), [the deletion guard](deletion-guard.md) |
+| `Changes` | The last scan of your directory for what the application changed: how many files, how many have settled, what is left out, and what the events of the file system cannot do. Only for a Treebind that syncs in both directions. It is skipped until the first scan | [Local changes](local-changes.md) |
 
 A check that cannot be tried because one before it failed, or that waits, is `Skipped`, with the reason
 `NotChecked` and the check that failed in the message. The operator does not show the checks as

@@ -33,7 +33,7 @@ kubectl describe treebind <name>
   ask it together. After a failure of the repository the wait grows, up to ten minutes, and goes back to the
   interval at the first pull that works.
 - **Both directions only pull for now.** `bidirectional` will also commit and push, and until it does it pulls
-  like `pull`.
+  like `pull`, and looks for what the application changed, which is [its own page](local-changes.md).
 
 ## What the check says
 

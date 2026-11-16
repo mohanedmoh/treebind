@@ -32,17 +32,30 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/paths"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
+	"github.com/mohanedmoh/treebind/internal/agent/scan"
+	"github.com/mohanedmoh/treebind/internal/agent/watch"
 )
 
-// pullerOfThePackage is the function that the agent starts with, before init gives the tests another.
-var pullerOfThePackage = newPuller
+// The functions that the agent starts with, before init gives the tests others.
+var (
+	pullerOfThePackage  = newPuller
+	scannerOfThePackage = newScanner
+	watcherOfThePackage = newWatcher
+)
 
 // No test of the agent's main starts Git: the checkout and the pulls are the ones of the packages,
 // which have their own tests, and here they do nothing.
 func init() {
 	newPuller = func(pull.Options) (app.Puller, error) {
 		return nil, errors.New("the tests of the main pull nothing")
+	}
+	newScanner = func(scan.Options) (app.Scanner, error) {
+		return nil, errors.New("the tests of the main scan nothing")
+	}
+	newWatcher = func(watch.Options) (app.Watcher, error) {
+		return nil, errors.New("the tests of the main watch nothing")
 	}
 	openCheckout = func(context.Context, checkout.Options) (checkout.Result, error) {
 		return checkout.Result{Outcome: checkout.Cloned, Branch: "main"}, nil
@@ -241,5 +254,68 @@ func TestThePullerOfThePackageRefusesWhatCannotWorkAndIsOneThatPullsOtherwise(t 
 	puller, err := pullerOfThePackage(pull.Options{Layout: where, URL: repoURL, Branch: "main"})
 	if err != nil || puller == nil {
 		t.Errorf("the puller = %v, %v, want one that can pull", puller, err)
+	}
+}
+
+func TestTheAgentScansWithTheFunctionOfTheMain(t *testing.T) {
+	previous := newScanner
+	t.Cleanup(func() { newScanner = previous })
+	var asked scan.Options
+	newScanner = func(o scan.Options) (app.Scanner, error) {
+		asked = o
+		return nil, errors.New("no scanner in a test")
+	}
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
+
+	_, err := options.NewScanner(scan.Options{Layout: layout.Layout{WorkTree: "/w"}})
+
+	if err == nil || asked.Layout.WorkTree != "/w" {
+		t.Errorf("NewScanner asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestTheAgentWatchesWithTheFunctionOfTheMain(t *testing.T) {
+	previous := newWatcher
+	t.Cleanup(func() { newWatcher = previous })
+	var asked watch.Options
+	newWatcher = func(o watch.Options) (app.Watcher, error) {
+		asked = o
+		return nil, errors.New("no watcher in a test")
+	}
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
+
+	_, err := options.NewWatcher(watch.Options{Root: "/w"})
+
+	if err == nil || asked.Root != "/w" {
+		t.Errorf("NewWatcher asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestTheScannerAndTheWatcherOfThePackagesRefuseWhatCannotWorkAndAreOnesThatWorkOtherwise(t *testing.T) {
+	if _, err := scannerOfThePackage(scan.Options{}); err == nil {
+		t.Error("a scanner was made with no filter")
+	}
+	where, err := layout.New(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter, err := paths.NewFilter(nil, nil, where.NeverSynced(), paths.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := scannerOfThePackage(scan.Options{Layout: where, Filter: filter})
+	if err != nil || scanner == nil {
+		t.Errorf("the scanner = %v, %v, want one that can scan", scanner, err)
+	}
+
+	if _, err := watcherOfThePackage(watch.Options{Root: "relative"}); err == nil {
+		t.Error("a watcher was made for a root that is not absolute")
+	}
+	watcher, err := watcherOfThePackage(watch.Options{Root: t.TempDir()})
+	if err != nil || watcher == nil {
+		t.Fatalf("the watcher = %v, %v, want one that watches", watcher, err)
+	}
+	if err := watcher.Close(); err != nil {
+		t.Error(err)
 	}
 }

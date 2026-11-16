@@ -17,8 +17,9 @@ limitations under the License.
 // Command agent is the Treebind sync agent.
 //
 // It checks the volume it works on, makes the checkout of the repository or opens
-// the one that is there, and serves its status to the operator. The sync loop is not
-// implemented yet, so the agent never reports itself ready.
+// the one that is there, pulls into it, and, for a Treebind that syncs in both directions, looks for what
+// the application changed, and serves its status to the operator. It does not commit yet, so the agent never
+// reports itself ready.
 package main
 
 import (
@@ -37,8 +38,10 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
+	"github.com/mohanedmoh/treebind/internal/agent/scan"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/agent/umask"
+	"github.com/mohanedmoh/treebind/internal/agent/watch"
 )
 
 // The exit codes.
@@ -70,6 +73,26 @@ var newPuller = func(options pull.Options) (app.Puller, error) {
 	return puller, nil
 }
 
+// newScanner makes what scans the directory for local changes. A test replaces it, so that no test starts
+// Git against a repository.
+var newScanner = func(options scan.Options) (app.Scanner, error) {
+	scanner, err := scan.New(options)
+	if err != nil {
+		return nil, err
+	}
+	return scanner, nil
+}
+
+// newWatcher makes what tells the agent that the directory may have changed. A test replaces it, so that no
+// test puts watches on a directory.
+var newWatcher = func(options watch.Options) (app.Watcher, error) {
+	watcher, err := watch.New(options)
+	if err != nil {
+		return nil, err
+	}
+	return watcher, nil
+}
+
 func main() {
 	umask.Set()
 
@@ -83,11 +106,12 @@ func main() {
 }
 
 // agentOptions is what the agent runs with: its settings, the check of the operator's token,
-// the checkout that it makes once the volume is in order, and the pulls that follow it.
+// the checkout that it makes once the volume is in order, the pulls that follow it, and the scans for
+// local changes that go on beside them for a Treebind that syncs in both directions.
 func agentOptions(settings config.Config, verifier status.Verifier, logger *slog.Logger) app.Options {
 	return app.Options{
 		Config: settings, Verifier: verifier, Logger: logger, AcquireLock: acquireLock, Checkout: openCheckout,
-		NewPuller: newPuller,
+		NewPuller: newPuller, NewScanner: newScanner, NewWatcher: newWatcher,
 	}
 }
 

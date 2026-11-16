@@ -31,6 +31,7 @@ const stateDir = ".treebind"
 const (
 	patternBak   = "*.bak"
 	pathUpperBak = "a.BAK"
+	envExample   = ".env.example"
 )
 
 // filterTest is a path and the reason a filter gives for it.
@@ -95,7 +96,7 @@ func TestFilterLeavesOutWhatTheSpecCannotBringBack(t *testing.T) {
 			{".netrc", Secret},
 			{"_netrc", Secret},
 			{".pgpass", Secret},
-			{".env.example", Synced},
+			{envExample, Synced},
 			{".ENV.Sample", Synced},
 			{".env.template", Synced},
 			{"id_rsa.pub", Synced},
@@ -201,4 +202,65 @@ func FuzzFilter(f *testing.F) {
 			t.Fatalf("Reason(%q) = %q, which is not a reason", path, reason)
 		}
 	})
+}
+
+// SkipsDir says that nothing below a directory is synced, by its own name and whatever the lists say: the
+// watcher does not watch it. It is not an answer for the patterns, which can leave out only some of the
+// files of a directory, and it is not asked about a directory that holds files that a pattern takes.
+func TestSkipsDirIsTrueOnlyWhenNothingBelowTheDirectoryCanBeSynced(t *testing.T) {
+	f := newTestFilter(t, []string{"keep/only.txt"}, []string{"gone/*", "dir/x", "dir/?", "*.log"}, Options{})
+	for dir, want := range map[string]bool{
+		".git":              true,
+		"a/.git":            true,
+		"a/.GIT/b":          true,
+		".treebind":         true,
+		".treebind/git":     true,
+		".Treebind":         true,
+		".env":              true,
+		"a/id_rsa":          true,
+		"a/b/.netrc":        true,
+		"a":                 false,
+		pathAB:              false,
+		"treebind":          false,
+		"a/.treebind":       false,
+		envExample:          false,
+		"keep":              false, // an include names a file in it, and 'x' is not that file
+		"gone":              false, // an exclude takes every file in it, which is for the scan: it is not by the name
+		"dir":               false, // excludes of the files x and ? in it: the name x is not every name
+		"a.log":             false,
+		"a/.gitignore.d":    false,
+		"a/.github":         false,
+		"sub/.git.backup":   false,
+		"sub/git~1x":        false,
+		"sub/.gitmodules.d": false,
+	} {
+		if got := f.SkipsDir(dir); got != want {
+			t.Errorf("SkipsDir(%q) = %v, want %v", dir, got, want)
+		}
+	}
+}
+
+func TestSkipsDirDoesNotTakeAStateDirectoryThatIsNotInTheWorkTree(t *testing.T) {
+	f, err := NewFilter(nil, nil, "", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.SkipsDir(".treebind") {
+		t.Error("SkipsDir(.treebind) = true with the state directory outside the work tree: it is a directory like another")
+	}
+	if f.SkipsDir("") || newTestFilter(t, nil, nil, Options{}).SkipsDir("") {
+		t.Error("SkipsDir of the synced directory itself is true: it is never skipped")
+	}
+}
+
+func TestSkipsDirAgreesWithReasonForEveryNameOfAFileInTheDirectory(t *testing.T) {
+	f := newTestFilter(t, nil, []string{"*.tmp"}, Options{})
+	for _, dir := range []string{".git", "a/.git", ".treebind", ".treebind/lock", ".env", "a/id_rsa", "a", "a/b"} {
+		for _, name := range []string{"x", "y.txt", "a/b/c", ".hidden"} {
+			synced := f.Reason(dir+"/"+name) == Synced
+			if f.SkipsDir(dir) && synced {
+				t.Errorf("SkipsDir(%q) is true, and %q below it is synced", dir, name)
+			}
+		}
+	}
 }
