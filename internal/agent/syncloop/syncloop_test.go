@@ -404,3 +404,401 @@ func TestRunRefusesOptionsThatCannotWork(t *testing.T) {
 		}
 	}
 }
+
+// tickClock is a clock that moves only when a wait passes, by the length of the wait, so that no test waits
+// and the loop sees time go by as it would. hook is called with each wait before it passes, and says whether
+// it does: a test that sends a signal from it can keep the wait from passing, so that the signal is what the
+// loop sees first.
+type tickClock struct {
+	now   time.Time
+	waits []time.Duration
+	hook  func(d time.Duration) (passes bool)
+}
+
+var epoch = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+func newTickClock() *tickClock { return &tickClock{now: epoch} }
+
+func (c *tickClock) Now() time.Time { return c.now }
+
+func (c *tickClock) After(d time.Duration) <-chan time.Time {
+	c.waits = append(c.waits, d)
+	ch := make(chan time.Time, 1)
+	if c.hook == nil || c.hook(d) {
+		c.now = c.now.Add(d)
+		ch <- c.now
+	}
+	return ch
+}
+
+// elapsed is the time since the clock began, in whole seconds, which is how a turn is told.
+func (c *tickClock) elapsed() int { return int(c.now.Sub(epoch) / time.Second) }
+
+// turns records the pulls and the scans of a test in the order they happen, each with when, and ends the
+// loop after the given number of them.
+type turns struct {
+	clock *tickClock
+	log   []string
+	stop  func()
+	count int
+}
+
+func (r *turns) record(what string) {
+	r.log = append(r.log, fmt.Sprintf("%s@%d", what, r.clock.elapsed()))
+	if len(r.log) == r.count {
+		r.stop()
+	}
+}
+
+// options are the options of a loop with scans that records its turns. Each test changes what it needs.
+func (r *turns) options(scans ...time.Duration) Options {
+	i := 0
+	return Options{
+		Interval: time.Hour, Phase: time.Hour, ScanInterval: 30 * time.Second, ScanGap: 2 * time.Second, Clock: r.clock,
+		Random: func() float64 { return 0.5 },
+		Pull:   func(context.Context) bool { r.record("pull"); return false },
+		Scan: func(context.Context, time.Time) time.Duration {
+			var next time.Duration
+			if i < len(scans) {
+				next = scans[i]
+			}
+			i++
+			r.record("scan")
+			return next
+		},
+	}
+}
+
+func newTurns(count int) (*turns, context.Context) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &turns{clock: newTickClock(), stop: cancel, count: count}, ctx
+}
+
+func wantTurns(t *testing.T, got *turns, want ...string) {
+	t.Helper()
+	if !slices.Equal(got.log, want) {
+		t.Errorf("turns = %v, want %v", got.log, want)
+	}
+}
+
+func TestWithScansTheLoopPullsAndScansEachOnItsOwnSchedule(t *testing.T) {
+	r, ctx := newTurns(8)
+	o := r.options()
+	o.Interval, o.Phase, o.ScanInterval = interval, 7*time.Second, 10*time.Second
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// The first scan is at once, the first pull after the phase, a pull again after the interval, and a scan
+	// every ten seconds in between.
+	wantTurns(t, r, "scan@0", "pull@7", "scan@10", "scan@20", "scan@30", "pull@37", "scan@40", "scan@50")
+}
+
+func TestAScanThatSaysAFileSettlesSoonIsFollowedByAnotherAtThatTime(t *testing.T) {
+	r, ctx := newTurns(4)
+	// The first scan says that a file settles in 4s, the second that nothing waits, and the third that a
+	// file settles in 100s, which is later than the interval, which then is the wait.
+	o := r.options(4*time.Second, 0, 100*time.Second)
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	wantTurns(t, r, "scan@0", "scan@4", "scan@34", "scan@64")
+}
+
+func TestAScanThatTakesTimeIsFollowedByAnotherWhereTheFileSettlesAndNotLater(t *testing.T) {
+	r, ctx := newTurns(2)
+	o := r.options(10 * time.Second)
+	inner := o.Scan
+	o.Scan = func(c context.Context, now time.Time) time.Duration {
+		next := inner(c, now)
+		// The scan took four seconds, and the file settles ten seconds after the scan began.
+		r.clock.now = r.clock.now.Add(4 * time.Second)
+		return next
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// 10s after the first scan began, which is 6s after it ended. The wait before it is the first scan's.
+	if got := r.clock.waits[1]; got != 6*time.Second {
+		t.Errorf("the wait after the first scan = %v, want 6s", got)
+	}
+}
+
+func TestAScanThatOutlastsTheSettleTimeIsFollowedByAnotherAfterTheGapAndNotAtOnce(t *testing.T) {
+	r, ctx := newTurns(2)
+	o := r.options(2 * time.Second)
+	inner := o.Scan
+	o.Scan = func(c context.Context, now time.Time) time.Duration {
+		next := inner(c, now)
+		r.clock.now = r.clock.now.Add(4 * time.Second) // the scan took 4s, and the file settled 2s after it began
+		return next
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// The gap is 2s: scans of a large tree do not follow one another with nothing between them.
+	wantTurns(t, r, "scan@0", "scan@6")
+	if got := r.clock.waits[1]; got != 2*time.Second {
+		t.Errorf("the wait after the first scan = %v, want the gap, 2s", got)
+	}
+}
+
+func TestAnEventCallsForAScanAfterTheGapAndNoSoonerThanThat(t *testing.T) {
+	r, ctx := newTurns(2)
+	o := r.options()
+	wake := make(chan struct{}, 1)
+	o.Wake = wake
+	r.clock.hook = func(d time.Duration) bool {
+		if len(r.clock.waits) == 2 { // the wait after the first scan
+			wake <- struct{}{}
+			return false
+		}
+		return true
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	wantTurns(t, r, "scan@0", "scan@2")
+	if want := []time.Duration{0, 30 * time.Second, 2 * time.Second}; !slices.Equal(r.clock.waits, want) {
+		t.Errorf("waits = %v, want %v: none before the first scan, the scan interval, which an event cut short to the gap", r.clock.waits, want)
+	}
+}
+
+func TestAnEventAfterALongQuietCallsForAScanAtOnce(t *testing.T) {
+	r, ctx := newTurns(2)
+	o := r.options()
+	wake := make(chan struct{}, 1)
+	o.Wake = wake
+	r.clock.hook = func(d time.Duration) bool {
+		if len(r.clock.waits) == 2 {
+			r.clock.now = r.clock.now.Add(20 * time.Second) // 20s have passed since the last scan, more than the gap
+			wake <- struct{}{}
+			return false
+		}
+		return true
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	wantTurns(t, r, "scan@0", "scan@20")
+	if got := r.clock.waits[2]; got != 0 {
+		t.Errorf("wait after the event = %v, want none", got)
+	}
+}
+
+func TestEventsThatComeWhileAScanRunsAreOneScanAfterIt(t *testing.T) {
+	r, ctx := newTurns(3)
+	o := r.options()
+	wake := make(chan struct{}, 1)
+	o.Wake = wake
+	// A wait does not pass while a signal is waiting, so that the loop sees the signal first, as it does
+	// when the signal came before the wait ended.
+	r.clock.hook = func(time.Duration) bool { return len(wake) == 0 }
+	inner := o.Scan
+	first := true
+	o.Scan = func(c context.Context, now time.Time) time.Duration {
+		if first {
+			first = false
+			for range 5 {
+				select { // as the watcher gives a signal: one is kept, and the rest are not
+				case wake <- struct{}{}:
+				default:
+				}
+			}
+		}
+		return inner(c, now)
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// One more scan after the gap for all the events, and then the interval.
+	wantTurns(t, r, "scan@0", "scan@2", "scan@32")
+}
+
+func TestAClosedWakeChannelEndsTheEventsAndNotTheScans(t *testing.T) {
+	// A loop that took the closed channel for an event at each turn would, with a clock whose waits pass at
+	// once, sometimes take the wait and sometimes the event, so it is run many times, and what it asks of
+	// the clock is what tells it: one wait for each turn.
+	for range 30 {
+		r, ctx := newTurns(3)
+		o := r.options()
+		wake := make(chan struct{})
+		close(wake)
+		o.Wake = wake
+
+		done := make(chan error, 1)
+		go func() { done <- Run(ctx, o) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the loop spins on a closed channel of events")
+		}
+		wantTurns(t, r, "scan@0", "scan@30", "scan@60")
+		// A wait for each turn, and one more at the most: the turn that finds the channel closed.
+		if n := len(r.clock.waits); n < 3 || n > 4 {
+			t.Fatalf("waits = %v, want three or four: a wait for each turn, and none for the closed channel after it is seen", r.clock.waits)
+		}
+	}
+}
+
+func TestWhenBothTurnsAreOverdueTheOneThatWasDueFirstIsTaken(t *testing.T) {
+	r, ctx := newTurns(3)
+	// The first scan says that a file settles in 8s, and the first pull is due at 10s. The wait for the scan
+	// overshoots by 5s, as a wait of a real clock can, so that at 13s both are due: the scan was due first.
+	o := r.options(8 * time.Second)
+	o.Phase = 10 * time.Second
+	r.clock.hook = func(time.Duration) bool {
+		if len(r.clock.waits) == 2 {
+			r.clock.now = r.clock.now.Add(5 * time.Second)
+		}
+		return true
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	wantTurns(t, r, "scan@0", "scan@13", "pull@13")
+}
+
+func TestAPullAndAScanThatAreDueTogetherAreTakenPullFirst(t *testing.T) {
+	r, ctx := newTurns(3)
+	o := r.options()
+	o.Phase = 0
+	o.Interval = 45 * time.Second
+	o.ScanInterval = time.Hour
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	wantTurns(t, r, "pull@0", "scan@0", "pull@45")
+}
+
+func TestPullsThatFailStillGrowTheirWaitBesideTheScans(t *testing.T) {
+	r, ctx := newTurns(6)
+	o := r.options()
+	o.Phase = 0
+	o.Interval = interval
+	o.MaxWait = ten
+	o.ScanInterval = time.Hour
+	o.Pull = func(context.Context) bool { r.record("pull"); return true }
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// With a random of 0.5: after the first failure 45s, after the second 75s, after the third 135s, and after
+	// the fourth 255s.
+	wantTurns(t, r, "pull@0", "scan@0", "pull@45", "pull@120", "pull@255", "pull@510")
+}
+
+func TestAStopDuringAScanEndsTheLoopWithoutAnotherTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	clock := newTickClock()
+	var scans, pulls int
+	err := Run(ctx, Options{
+		Interval: interval, Clock: clock, ScanInterval: time.Second,
+		Pull: func(context.Context) bool { pulls++; return false },
+		Scan: func(context.Context, time.Time) time.Duration { scans++; cancel(); return 0 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scans != 1 || pulls != 1 {
+		t.Errorf("scans = %d, pulls = %d, want 1 and 1: the pull that was due with it came first, and nothing came after the stop", scans, pulls)
+	}
+}
+
+func TestScansNeedAClockThatSaysWhatTimeItIs(t *testing.T) {
+	err := Run(context.Background(), Options{
+		Interval: interval, Clock: &recordingClock{},
+		Pull: func(context.Context) bool { return false },
+		Scan: func(context.Context, time.Time) time.Duration { return 0 },
+	})
+	if err == nil || !strings.Contains(err.Error(), "Now") {
+		t.Errorf("error = %v, want one that says that the clock needs Now", err)
+	}
+}
+
+func TestTheScanIntervalAndTheGapHaveDefaults(t *testing.T) {
+	r, ctx := newTurns(3)
+	o := r.options()
+	o.ScanInterval, o.ScanGap = 0, 0
+	wake := make(chan struct{}, 1)
+	o.Wake = wake
+	r.clock.hook = func(time.Duration) bool {
+		if len(r.clock.waits) == 3 { // the wait after the second scan
+			wake <- struct{}{}
+			return false
+		}
+		return true
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// scan@0, then the default interval twice, and an event just after the second scan gives the default gap.
+	if want := []time.Duration{0, DefaultScanInterval, DefaultScanInterval, DefaultScanGap}; !slices.Equal(r.clock.waits, want) {
+		t.Errorf("waits = %v, want %v", r.clock.waits, want)
+	}
+	if DefaultScanInterval != 30*time.Second || DefaultScanGap != time.Second {
+		t.Errorf("defaults = %v and %v, want 30s and 1s", DefaultScanInterval, DefaultScanGap)
+	}
+}
+
+func TestScansRunOnTheSystemClockWhenNoneIsGiven(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var starts []time.Time
+	err := Run(ctx, Options{
+		Interval: time.Hour, Phase: time.Hour, ScanInterval: 20 * time.Millisecond,
+		Pull: func(context.Context) bool { return false },
+		Scan: func(_ context.Context, now time.Time) time.Duration {
+			starts = append(starts, now)
+			if len(starts) == 3 {
+				cancel()
+			}
+			return 0
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starts) != 3 || starts[2].Sub(starts[0]) < 40*time.Millisecond {
+		t.Errorf("scans began at %v, want three of them 20ms apart on the system clock", starts)
+	}
+	if now := (systemClock{}).Now(); time.Since(now) > time.Second || time.Since(now) < 0 {
+		t.Errorf("Now of the system clock = %v, want the time", now)
+	}
+}
+
+func TestTheScanIntervalIsFromTheEndOfAScanAndAPullIsFromTheEndOfAPull(t *testing.T) {
+	r, ctx := newTurns(4)
+	o := r.options()
+	o.Phase, o.Interval, o.ScanInterval = 0, 100*time.Second, time.Minute
+	scan, pull := o.Scan, o.Pull
+	o.Scan = func(c context.Context, now time.Time) time.Duration {
+		next := scan(c, now)
+		r.clock.now = r.clock.now.Add(4 * time.Second) // a scan takes 4s
+		return next
+	}
+	o.Pull = func(c context.Context) bool {
+		failed := pull(c)
+		r.clock.now = r.clock.now.Add(10 * time.Second) // a pull takes 10s
+		return failed
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// pull@0 ends at 10, scan@10 ends at 14, and the next scan is the interval after that: 74. The next pull is
+	// the interval after the end of the first, 110.
+	wantTurns(t, r, "pull@0", "scan@10", "scan@74", "pull@110")
+}
