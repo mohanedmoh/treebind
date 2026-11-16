@@ -57,6 +57,9 @@ const (
 	// the one of the CRD when it is not set. EnvSyncDirection is pull or bidirectional.
 	EnvSyncInterval  = "TREEBIND_SYNC_INTERVAL"
 	EnvSyncDirection = "TREEBIND_SYNC_DIRECTION"
+	// EnvSyncSettleTime is how long a file has to be quiet before the agent commits it, as a Go
+	// duration such as 5s. The default is the one of the CRD when it is not set.
+	EnvSyncSettleTime = "TREEBIND_SYNC_SETTLE_TIME"
 	// EnvSyncMaxDeletions is the most files that one update may remove from the directory, as a whole
 	// number. It is not set when the Treebind does not say, and the pull has a cap of its own then
 	// (docs/adr/0027).
@@ -86,6 +89,10 @@ const (
 	DefaultSyncInterval = 30 * time.Second
 	// MinSyncInterval is the shortest interval the CRD admits.
 	MinSyncInterval = time.Second
+	// DefaultSettleTime and MinSettleTime are the default and the least of spec.sync.settleTime, which a
+	// test holds to what the API server does.
+	DefaultSettleTime = 5 * time.Second
+	MinSettleTime     = time.Second
 	// MinMaxDeletions and MaxMaxDeletions are the least and the most that the CRD admits for
 	// spec.sync.maxDeletions, which a test holds to what the API server does.
 	MinMaxDeletions = 1
@@ -119,6 +126,8 @@ type Config struct {
 	// and pushes the application's edits: pull, or bidirectional.
 	SyncInterval  time.Duration
 	SyncDirection string
+	// SettleTime is how long a file has to be quiet before the agent commits it.
+	SettleTime time.Duration
 	// MaxDeletions is the most files that one update may remove from the directory, or zero when the
 	// Treebind does not say.
 	MaxDeletions int
@@ -145,6 +154,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	// or space, which would never match a claim.
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
 	interval, intervalErr := CheckSyncInterval(get(EnvSyncInterval))
+	settleTime, settleTimeErr := CheckSettleTime(get(EnvSyncSettleTime))
 	maxDeletions, maxDeletionsErr := CheckMaxDeletions(get(EnvSyncMaxDeletions))
 	include, includeErr := readPatterns(EnvPathsInclude, get(EnvPathsInclude))
 	exclude, excludeErr := readPatterns(EnvPathsExclude, get(EnvPathsExclude))
@@ -160,6 +170,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		SSHKeyFile:     get(EnvSSHKeyFile),
 		KnownHostsFile: get(EnvKnownHostsFile),
 		SyncInterval:   interval,
+		SettleTime:     settleTime,
 		SyncDirection:  get(EnvSyncDirection),
 		MaxDeletions:   maxDeletions,
 		PodName:        get(EnvPodName),
@@ -174,6 +185,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	err := config.validate()
 	if intervalErr != nil {
 		err = errors.Join(fmt.Errorf("%s %w", EnvSyncInterval, intervalErr), err)
+	}
+	if settleTimeErr != nil {
+		err = errors.Join(fmt.Errorf("%s %w", EnvSyncSettleTime, settleTimeErr), err)
 	}
 	if maxDeletionsErr != nil {
 		err = errors.Join(fmt.Errorf("%s %w", EnvSyncMaxDeletions, maxDeletionsErr), err)
@@ -282,17 +296,30 @@ func CheckSubPath(subPath string) error {
 // test holds the two together: an interval that the API server accepts and the agent refuses would
 // leave a sync pod that exits at start for ever.
 func CheckSyncInterval(raw string) (time.Duration, error) {
+	return checkDuration(raw, DefaultSyncInterval, MinSyncInterval, "30s or 5m")
+}
+
+// CheckSettleTime returns the settle time a value stands for, DefaultSettleTime when it is empty, or the
+// reason it cannot be one. The rules are the ones that the CRD puts on sync.settleTime, and a test holds
+// the two together, for the reason given at CheckSyncInterval.
+func CheckSettleTime(raw string) (time.Duration, error) {
+	return checkDuration(raw, DefaultSettleTime, MinSettleTime, "5s or 1m")
+}
+
+// checkDuration returns the duration of a value, the default when it is empty, or the reason it cannot be
+// one: it is not a Go duration, with examples of one, or it is shorter than the least.
+func checkDuration(raw string, def, least time.Duration, examples string) (time.Duration, error) {
 	if raw == "" {
-		return DefaultSyncInterval, nil
+		return def, nil
 	}
-	interval, err := time.ParseDuration(raw)
+	value, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, errors.New("must be a duration such as 30s or 5m")
+		return 0, fmt.Errorf("must be a duration such as %s", examples)
 	}
-	if interval < MinSyncInterval {
-		return 0, fmt.Errorf("must be at least %s", MinSyncInterval)
+	if value < least {
+		return 0, fmt.Errorf("must be at least %s", least)
 	}
-	return interval, nil
+	return value, nil
 }
 
 // CheckMaxDeletions returns the cap that a value stands for, zero when it is empty, or the reason it
