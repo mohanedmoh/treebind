@@ -91,7 +91,8 @@ and a call can override, for a fetch of a large repository. When it ends, or the
 caller's context does, the whole process group is killed, so an ssh that Git
 started does not outlive the call. A child that left the group cannot hold the
 call either: Wait gives up on its pipes after two seconds, and a Git that ended
-with status 0 is a success then. The standard output is bounded (16 MiB by
+with status 0 is a success then. (ADR 0028 changes how: the group is told to end
+first, and killed after three seconds, and Wait gives up after five.) The standard output is bounded (16 MiB by
 default) and a command that writes more is stopped and fails, because a short
 answer would be taken for a whole one. Of the standard error the last 64 KiB are
 kept.

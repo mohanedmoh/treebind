@@ -27,6 +27,10 @@ kubectl describe treebind <name>
   applied, and the check says `TooManyDeletions`. See [the deletion guard](deletion-guard.md).
 - **It keeps where your directory was before an update.** The commit it was at is kept under
   `refs/treebind/recovery/<n>`, so that removed files can be got back. The same page says how.
+- **It does not cut off an update that is writing files.** When the agent is told to stop, the update that is
+  being applied has up to 10 seconds to finish. Git that is stopped is told to end first, so that it removes its
+  own lock files, and the agent removes the ones that a Git that was killed left before each pull and says so in
+  the check. See [the Git directory](git-directory.md).
 - **It asks cheaply.** Most pulls are one question to the repository, "what is the tip?", and fetch nothing.
 - **It spreads its questions.** Each wait is the interval give or take a fifth, and the first pull of a Treebind
   comes after a point in the interval that comes from its name, so that many Treebinds on one Git host do not
@@ -58,8 +62,8 @@ with no restart.
 | `GitDirUnsafe` | The Git directory holds something the agent did not put there | See [the Git directory](git-directory.md) | At the interval |
 | `TooManyDeletions` | The update would remove more than 100 files from your directory, or every file of the branch. The message says how many and names some. Nothing was written | Check the branch. If the update is meant, raise `spec.sync.maxDeletions` or remove the files yourself, as [the deletion guard](deletion-guard.md) says, and the next pull goes on | At the interval |
 | `FetchFailed` | The repository cannot be reached, the key is refused, or the host key is not in the known hosts. The message has what Git said | Check the address, the deploy key and the known hosts. The agent recovers by itself | Longer, up to ten minutes |
-| `PullFailed` | The agent could not read or write the volume, or the checkout is not what a pull expects, or it could not set up what pulls | The message says which | Longer, up to ten minutes |
-| `Refused` | The update was not applied because the agent could not check that it still holds the writer lock | The agent stops with the exit code 3 if the lock is lost, and its pod's restart waits for the lock again | Longer, up to ten minutes |
+| `PullFailed` | The agent could not read or write the volume, or the checkout is not what a pull expects, or it could not set up what pulls, or it could not remove a lock file that a killed Git left | The message says which | Longer, up to ten minutes |
+| `Refused` | The update was not applied, or lock files were not removed, because the agent could not check that it still holds the writer lock | The agent stops with the exit code 3 if the lock is lost, and its pod's restart waits for the lock again | Longer, up to ten minutes |
 
 ## Things to know
 

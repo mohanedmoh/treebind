@@ -77,8 +77,10 @@ that by minutes to save one question.
   whether a refusal of its guard, which a person has to put right and which `Refused` also names, keeps the
   interval and does not make the wait longer: today every `Refused` makes it longer, because only the fence
   can refuse.
-- A stop cancels the pull that is running, which kills the Git command that runs, and the wait. A pull that
-  was cut short by a stop says nothing about the repository, so it is not reported.
+- A stop cancels the pull that is running, which stops the Git command that runs, and the wait. A pull that
+  was cut short by a stop says nothing about the repository, so it is not reported. The merge that applies an
+  update is the exception: it has up to 10 seconds to finish, and the Git commands are told to end before they
+  are killed (ADR 0028).
 - Both directions only pull. `bidirectional` also commits and pushes, which are #36 and #37, and until then it
   pulls like `pull`, and looks for local changes in the same loop, as a second kind of turn (ADR 0029).
 
