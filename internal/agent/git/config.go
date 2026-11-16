@@ -135,6 +135,11 @@ func (r *Runner) environment() []string {
 		// A replace ref makes Git see another object where a commit, a tree or a blob is, and
 		// the application can make one, in the refs or in packed-refs.
 		"GIT_NO_REPLACE_OBJECTS=1",
+		// A command that only reads, status above all, does not refresh the index and write it back
+		// under index.lock. Left on, the scan for local changes would write the repository outside the
+		// check of the writer lock, and a kill in the middle of it would leave a lock behind. The
+		// commands that write take the locks they need whatever this says.
+		"GIT_OPTIONAL_LOCKS=0",
 	}
 	if r.caBundle != "" {
 		// Read after http.sslCAInfo, so it beats a repository config, which an
