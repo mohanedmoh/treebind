@@ -40,6 +40,8 @@ starts, so that a holder that was frozen and wakes up is not taken for the one t
 - The direction is always set, so every sync pod template changes, and each sync pod is replaced once when the
   operator is upgraded (#87). The replacement is the agent restarting on the same claim, which it is built to do.
 - A change of the interval or the direction of a Treebind replaces its sync pod, because the agent reads them at
-  start. The new pod reopens the checkout (ADR 0017). `settleTime` and `conflictPolicy` are not read by the pod
-  yet, and a change of them does not replace it.
+  start. The new pod reopens the checkout (ADR 0017). `conflictPolicy` is not read by the pod yet, and a change of
+  it does not replace it. `settleTime` is read, as the interval is (#34): it is passed as `TREEBIND_SYNC_SETTLE_TIME`
+  when the spec has one, which the API server always fills in, so each sync pod is replaced once when the operator
+  that passes it is installed, and again when the Treebind changes it.
 - Nothing in the agent uses the settings yet. The lock and the loop that do come in the next changes.

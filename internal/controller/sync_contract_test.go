@@ -53,7 +53,7 @@ func TestTheAgentIsToldHowToSyncAndWhoThePodIs(t *testing.T) {
 	if config.SyncInterval != 90*time.Second || config.SyncDirection != agentconfig.DirectionPull || config.PodName != testPodName {
 		t.Errorf("the agent reads %v, %q and %q, want the spec's interval and direction and the name of the pod", config.SyncInterval, config.SyncDirection, config.PodName)
 	}
-	if env[agentconfig.EnvSyncInterval] != "1m30s" {
+	if env[agentconfig.EnvSyncInterval] != ninetySeconds {
 		t.Errorf("%s = %q, want the interval as Go writes a duration", agentconfig.EnvSyncInterval, env[agentconfig.EnvSyncInterval])
 	}
 }
@@ -164,6 +164,17 @@ func intervalCandidates() []time.Duration {
 	}
 }
 
+// ninetySeconds is 90 seconds as Go writes a duration.
+const ninetySeconds = "1m30s"
+
+// durationTexts are strings that a client can send as a duration, on both sides of every rule of the API
+// server and of the agent.
+var durationTexts = []string{
+	"30s", "1s", "999ms", ninetySeconds, "1h", "1.5s", ".5s", "1.s", "1.0s", "+1s", "-1s", "0", "0s", "30", "1d", "1w", "30S", "1 s", " 1s",
+	"1s ", "1\u00b5s", "1us", "1ns", "100000h", "1e3s", "1m1", "m1s", "1h2m3s4ms", "1s1s", "01s", "1_000s", "NaN", "infinite",
+	"9223372036s", "9223372037s", "2562047h47m16.854775807s", "2562047h47m16.854775808s",
+}
+
 var _ = Describe("sync.interval", func() {
 	var counter int
 
@@ -218,11 +229,7 @@ var _ = Describe("sync.interval", func() {
 	It("is accepted by the API server exactly when the agent accepts it, whatever string it is written as", func() {
 		ctx := context.Background()
 		var accepted, refused int
-		for i, text := range []string{
-			"30s", "1s", "999ms", "1m30s", "1h", "1.5s", ".5s", "1.s", "1.0s", "+1s", "-1s", "0", "0s", "30", "1d", "1w", "30S", "1 s", " 1s",
-			"1s ", "1\u00b5s", "1us", "1ns", "100000h", "1e3s", "1m1", "m1s", "1h2m3s4ms", "1s1s", "01s", "1_000s", "NaN", "infinite",
-			"9223372036s", "9223372037s", "2562047h47m16.854775807s", "2562047h47m16.854775808s",
-		} {
+		for i, text := range durationTexts {
 			object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind(fmt.Sprintf("text-%d", i)))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(unstructured.SetNestedField(object, text, "spec", "sync", "interval")).To(Succeed())
@@ -348,5 +355,138 @@ var _ = Describe("sync.direction", func() {
 		}
 		Expect(accepted).To(Equal(2))
 		Expect(refused).To(BeNumerically(">", 5))
+	})
+})
+
+// The agent commits a file once it has been quiet for spec.sync.settleTime (#34). As for the
+// interval, the operator puts it in the pod, the agent accepts what the operator puts there, and the API
+// server and the agent agree on which settle times exist.
+
+func TestTheAgentIsToldTheSettleTimeOnlyWhenTheSpecSaysOne(t *testing.T) {
+	treebind := newTreebind(testTreebindName)
+	treebind.Spec.Sync.SettleTime = nil
+	config, env, err := agentConfigOf(t, treebind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, set := env[agentconfig.EnvSyncSettleTime]; set {
+		t.Errorf("%s is %q: the CRD fills in the settle time, and the agent has the same default for one that was not", agentconfig.EnvSyncSettleTime, value)
+	}
+	if config.SettleTime != agentconfig.DefaultSettleTime {
+		t.Errorf("the agent settles after %v, want the default %v", config.SettleTime, agentconfig.DefaultSettleTime)
+	}
+
+	treebind.Spec.Sync.SettleTime = &metav1.Duration{Duration: 90 * time.Second}
+	config, env, err = agentConfigOf(t, treebind)
+	if err != nil {
+		t.Fatalf("the agent refuses the environment of its own pod: %v", err)
+	}
+	if config.SettleTime != 90*time.Second || env[agentconfig.EnvSyncSettleTime] != ninetySeconds {
+		t.Errorf("the agent reads %v from %q, want the settle time of the spec as Go writes a duration", config.SettleTime, env[agentconfig.EnvSyncSettleTime])
+	}
+}
+
+func TestTheAgentAcceptsEverySettleTimeTheOperatorCanPutInThePod(t *testing.T) {
+	for _, settle := range []time.Duration{time.Second, 5 * time.Second, 90 * time.Second, 5 * time.Minute, 36 * time.Hour} {
+		t.Run(settle.String(), func(t *testing.T) {
+			treebind := newTreebind(testTreebindName)
+			treebind.Spec.Sync.SettleTime = &metav1.Duration{Duration: settle}
+
+			config, _, err := agentConfigOf(t, treebind)
+
+			if err != nil {
+				t.Fatalf("the agent refuses the environment of its own pod: %v", err)
+			}
+			if config.SettleTime != settle {
+				t.Errorf("the agent reads %v, want %v", config.SettleTime, settle)
+			}
+		})
+	}
+}
+
+var _ = Describe("sync.settleTime", func() {
+	var counter int
+
+	created := func(ctx context.Context, settle *metav1.Duration) (*treebindv1alpha1.Treebind, error) {
+		GinkgoHelper()
+		counter++
+		treebind := newTreebind(fmt.Sprintf("settle-%d", counter))
+		treebind.Spec.Sync.SettleTime = settle
+		err := k8sClient.Create(ctx, treebind)
+		return treebind, err
+	}
+
+	It("is filled in by the API server with the default that the agent has", func() {
+		ctx := context.Background()
+		treebind, err := created(ctx, nil)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, treebind)).To(Succeed()) })
+
+		var got treebindv1alpha1.Treebind
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: treebind.Namespace, Name: treebind.Name}, &got)).To(Succeed())
+
+		Expect(got.Spec.Sync.SettleTime).NotTo(BeNil())
+		Expect(got.Spec.Sync.SettleTime.Duration).To(Equal(agentconfig.DefaultSettleTime))
+	})
+
+	It("is accepted by the API server exactly when the agent accepts it", func() {
+		ctx := context.Background()
+		var accepted, refused int
+		for _, settle := range intervalCandidates() {
+			treebind, err := created(ctx, &metav1.Duration{Duration: settle})
+			_, agentErr := agentconfig.CheckSettleTime(settle.String())
+			if (err == nil) != (agentErr == nil) {
+				Fail(fmt.Sprintf("settle time %v (%q): the API server accepts it = %v (%v), the agent accepts it = %v (%v): "+
+					"a value that the API server takes and the agent refuses leaves a sync pod that exits at start for ever",
+					settle, settle.String(), err == nil, err, agentErr == nil, agentErr))
+			}
+			if err == nil {
+				accepted++
+				Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
+			} else {
+				refused++
+			}
+		}
+		Expect(accepted).To(BeNumerically(">", 5))
+		Expect(refused).To(BeNumerically(">", 5))
+	})
+
+	It("is accepted by the API server exactly when the agent accepts it, whatever string it is written as", func() {
+		ctx := context.Background()
+		var accepted, refused int
+		for i, text := range durationTexts {
+			object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind(fmt.Sprintf("settle-text-%d", i)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedField(object, text, "spec", "sync", "settleTime")).To(Succeed())
+			treebind := &unstructured.Unstructured{Object: object}
+			treebind.SetGroupVersionKind(treebindv1alpha1.GroupVersion.WithKind("Treebind"))
+
+			createErr := k8sClient.Create(ctx, treebind)
+
+			_, agentErr := agentconfig.CheckSettleTime(text)
+			if (createErr == nil) != (agentErr == nil) {
+				Fail(fmt.Sprintf("settle time %q: the API server accepts it = %v (%v), the agent accepts it = %v (%v): "+
+					"a value that the API server takes and the agent refuses leaves a sync pod that exits at start for ever",
+					text, createErr == nil, createErr, agentErr == nil, agentErr))
+			}
+			if createErr == nil {
+				accepted++
+				Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
+			} else {
+				refused++
+			}
+		}
+		Expect(accepted).To(BeNumerically(">", 5))
+		Expect(refused).To(BeNumerically(">", 5))
+	})
+
+	It("has the least that the agent has", func() {
+		Expect(agentconfig.MinSettleTime).To(Equal(time.Second))
+		ctx := context.Background()
+		treebind, err := created(ctx, &metav1.Duration{Duration: agentconfig.MinSettleTime})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
+		_, err = created(ctx, &metav1.Duration{Duration: agentconfig.MinSettleTime - 1})
+		Expect(err).To(MatchError(ContainSubstring("settleTime must be at least 1s")))
 	})
 })
