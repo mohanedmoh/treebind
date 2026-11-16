@@ -16,7 +16,8 @@ kubectl logs <name>-sync-0
 kubectl describe treebind <name>
 ```
 
-The agent does not report itself ready after the checkout. It is ready after the first sync.
+After the checkout the agent pulls what the repository gains, every interval, as [pulling](pull.md) says. It
+does not report itself ready after the checkout, or after a pull. It is ready after the first sync.
 
 ## What it does
 

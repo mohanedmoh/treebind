@@ -15,8 +15,9 @@ limitations under the License.
 */
 
 // Package app runs the agent: it serves the status endpoint and the probes, it
-// checks the volume until the checks pass, takes the writer lock of the volume, and
-// then makes the checkout of the repository or opens the one that is there.
+// checks the volume until the checks pass, takes the writer lock of the volume,
+// makes the checkout of the repository or opens the one that is there, and then
+// pulls the commits that the repository gains, every interval, for as long as it runs.
 //
 // A failed check does not end the agent. It stays up, says what failed in its
 // report, and checks again, so the operator can read the failure and the failure
@@ -24,7 +25,8 @@ limitations under the License.
 // the same: a repository that cannot be reached, or a directory that is not empty,
 // is reported and tried again, and the agent carries on once it is put right
 // (docs/adr/0017). The writer lock is taken before anything writes, and an agent that
-// loses it stops with ErrLockLost (docs/adr/0023).
+// loses it stops with ErrLockLost (docs/adr/0023). A pull that fails is reported and
+// the loop goes on (docs/adr/0024).
 package app
 
 import (
@@ -45,7 +47,9 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
+	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
+	"github.com/mohanedmoh/treebind/internal/agent/syncloop"
 )
 
 const (
@@ -99,6 +103,14 @@ type Options struct {
 	// is run once the volume checks pass, and again with a growing wait while it fails.
 	// It defaults to none, so that nothing is fetched: the agent starts with checkout.Open.
 	Checkout func(ctx context.Context, options checkout.Options) (checkout.Result, error)
+	// NewPuller makes what pulls into the checkout, once the checkout is made, and the pulls go on
+	// every Config.SyncInterval until the agent stops. It defaults to none, so that nothing is pulled:
+	// the agent starts with pull.New. Both sync directions only pull for now.
+	NewPuller func(options pull.Options) (Puller, error)
+	// SyncClock and SyncRandom are where the loop gets its waits and its jitter, and are the system's
+	// when nil.
+	SyncClock  syncloop.Clock
+	SyncRandom func() float64
 	// Ready says whether the agent has synced. It defaults to never: there is no
 	// sync yet, and a Treebind must not turn ready before anything syncs.
 	Ready func() bool
@@ -122,9 +134,16 @@ type agent struct {
 	// holder names this start of the agent in the writer lock: the name of its pod, and a token
 	// that differs between two starts of it.
 	holder string
-	// lost is where the keeper of the lock says it was lost, and background waits for it to end.
+	// held is the writer lock once it is taken, which the fence of a pull checks.
+	held atomic.Pointer[lock.Lock]
+	// lost is where the keeper of the lock, or a pull that found it gone, says it was lost, and
+	// background waits for the keeper to end.
 	lost       chan error
 	background sync.WaitGroup
+	// idle is closed once what the agent writes with, the checkout and the pulls, has stopped. The
+	// writer lock is given up after that and not before: a lock that is given up while Git is still
+	// being stopped lets the next agent write beside it (NFR-1).
+	idle chan struct{}
 }
 
 // checked is the results of one run of the volume checks and when it finished.
@@ -137,7 +156,7 @@ type checked struct {
 // stops cleanly: requests that are being answered finish and the checks stop.
 // It returns an error only when the endpoint cannot be served.
 func Run(ctx context.Context, options Options) error {
-	a := &agent{Options: options, lost: make(chan error, 1)}
+	a := &agent{Options: options, lost: make(chan error, 1), idle: make(chan struct{})}
 	a.fillDefaults()
 	a.startedAt = a.Now()
 	a.refuse = &rateLimit{every: refusedLogEvery, now: a.Now}
@@ -184,6 +203,7 @@ func Run(ctx context.Context, options Options) error {
 	finished := make(chan struct{})
 	go func() {
 		checking.Wait()
+		close(a.idle)
 		a.background.Wait()
 		close(finished)
 	}()
@@ -243,24 +263,38 @@ func (a *agent) report() status.Report {
 }
 
 // progress is what the report holds of the steps that the agent takes one after another: the
-// volume checks, the writer lock if there is one to take, and the checkout if there is one to make.
+// volume checks, the writer lock if there is one to take, the checkout if there is one to make, and
+// the pulls if there are any to run.
 type progress struct {
-	volume         []preflight.Result
-	lock, checkout *preflight.Result
+	volume                  []preflight.Result
+	lock, checkout, pulling *preflight.Result
 }
 
 // prepare checks the volume, and once it is in order takes the writer lock, which is held
-// until the agent stops, and makes the checkout.
+// until the agent stops, makes the checkout, and then pulls until the agent stops.
 func (a *agent) prepare(ctx context.Context) {
 	volume, ok := a.checkVolume(ctx)
 	if !ok {
 		return
 	}
 	p := &progress{volume: volume}
-	if a.AcquireLock != nil && !a.takeLock(ctx, p) {
-		return
+	if a.pullsFollow() {
+		p.pulling = notTried(CheckPull, "not tried, because the checkout is not made yet")
 	}
-	a.openCheckout(ctx, p)
+	if a.AcquireLock != nil {
+		if !a.takeLock(ctx, p) {
+			return
+		}
+		if a.Checkout != nil {
+			// The checkout runs for as long as the repository takes, and its row says so until its result is there.
+			p.checkout = notTried(CheckCheckout, "running: its result is here when it ends")
+			a.publish(p)
+		}
+	}
+	made, ok := a.openCheckout(ctx, p)
+	if ok && a.pullsFollow() {
+		a.pullLoop(ctx, p, made)
+	}
 }
 
 // checkVolume runs the volume checks, and runs them again with a growing wait while
@@ -310,19 +344,29 @@ func (a *agent) waitingForTheVolume(volume []preflight.Result, failed bool) *pro
 	if a.Checkout != nil {
 		p.checkout = notTried(CheckCheckout, later)
 	}
+	if a.pullsFollow() {
+		p.pulling = notTried(CheckPull, "not tried, because the checkout is not made yet")
+		if failed {
+			p.pulling = notTried(CheckPull, later)
+		}
+	}
 	return p
 }
+
+// pullsFollow says whether the checkout is followed by pulls: there is a checkout to make and
+// something to pull with.
+func (a *agent) pullsFollow() bool { return a.Checkout != nil && a.NewPuller != nil }
 
 // notTried is the result of a check that has not been tried, with the reason that says so.
 func notTried(check, message string) *preflight.Result {
 	return &preflight.Result{Check: check, Outcome: preflight.Skipped, Reason: preflight.ReasonNotChecked, Message: message}
 }
 
-// publish stores the report's checks: the volume checks, then the lock and the checkout, for the steps
-// that there are.
+// publish stores the report's checks: the volume checks, then the lock, the checkout and the pulls, for
+// the steps that there are.
 func (a *agent) publish(p *progress) {
 	results := append([]preflight.Result(nil), p.volume...)
-	for _, step := range []*preflight.Result{p.lock, p.checkout} {
+	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling} {
 		if step != nil {
 			results = append(results, *step)
 		}
@@ -330,36 +374,45 @@ func (a *agent) publish(p *progress) {
 	a.checks.Store(&checked{at: a.Now().UTC(), checks: status.ChecksFrom(results)})
 }
 
+// checkedOut is what the checkout was asked for and what it made, which the pulls that follow need.
+type checkedOut struct {
+	options checkout.Options
+	made    checkout.Result
+}
+
 // openCheckout makes the checkout of the repository, or opens the one that is there, and
 // does it again with a growing wait while it fails: the repository may not be reachable
-// yet, or the directory may be emptied. Once it succeeds the loop ends.
-func (a *agent) openCheckout(ctx context.Context, p *progress) {
+// yet, or the directory may be emptied. Once it succeeds the loop ends, and it returns what
+// it made and true. It returns false when there is no checkout to make, or when the agent is
+// told to stop first.
+func (a *agent) openCheckout(ctx context.Context, p *progress) (checkedOut, bool) {
 	if a.Checkout == nil {
-		return
+		return checkedOut{}, false
 	}
 	options, err := a.checkoutOptions()
 	wait := a.RetryMin
 	var logged []string
 	for {
 		var result preflight.Result
+		var made checkout.Result
 		if err != nil {
 			result = failedCheckout(err)
 		} else {
-			result = a.runCheckout(ctx, options)
+			result, made = a.runCheckout(ctx, options)
 		}
 		if ctx.Err() != nil {
-			return
+			return checkedOut{}, false
 		}
 		p.checkout = &result
 		a.publish(p)
 		logged = a.logChanges("checkout", []preflight.Result{result}, logged)
 
 		if result.Outcome == preflight.Passed {
-			return
+			return checkedOut{options: options, made: made}, true
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return checkedOut{}, false
 		case <-time.After(wait):
 		}
 		wait = min(wait*2, a.RetryMax)
@@ -384,16 +437,14 @@ func (a *agent) checkoutOptions() (checkout.Options, error) {
 	}, nil
 }
 
-// runCheckout runs the checkout once and turns what came of it into a result of the check.
-func (a *agent) runCheckout(ctx context.Context, options checkout.Options) preflight.Result {
+// runCheckout runs the checkout once and turns what came of it into a result of the check, and
+// returns what it made.
+func (a *agent) runCheckout(ctx context.Context, options checkout.Options) (preflight.Result, checkout.Result) {
 	made, err := a.Checkout(ctx, options)
 	if err != nil {
-		return failedCheckout(err)
+		return failedCheckout(err), checkout.Result{}
 	}
-	commit := "no commit yet"
-	if made.Commit != "" {
-		commit = made.Commit[:min(len(made.Commit), shortCommit)]
-	}
+	commit := shortOf(made.Commit)
 	var message string
 	switch made.Outcome {
 	case checkout.Cloned:
@@ -404,7 +455,15 @@ func (a *agent) runCheckout(ctx context.Context, options checkout.Options) prefl
 	default:
 		message = fmt.Sprintf("reopened the checkout of the branch %s (%s) in %s", made.Branch, commit, options.Layout.WorkTree)
 	}
-	return preflight.Result{Check: CheckCheckout, Outcome: preflight.Passed, Message: message}
+	return preflight.Result{Check: CheckCheckout, Outcome: preflight.Passed, Message: message}, made
+}
+
+// shortOf is how much of a commit a message shows, or says that there is none.
+func shortOf(commit string) string {
+	if commit == "" {
+		return "no commit yet"
+	}
+	return commit[:min(len(commit), shortCommit)]
 }
 
 // failedCheckout is the failed result for an error of the checkout: its own reason when

@@ -253,13 +253,20 @@ func TestRefusesStrangers(t *testing.T) {
 }
 
 func TestKeepsCheckingWhileACheckFailsAndStopsOnceTheyPass(t *testing.T) {
-	var calls atomic.Int64
+	var calls, passes atomic.Int64
+	// The volume is put right when the test says so, and not after some number of checks: the test reads the
+	// report while it is not, and the agent must not have gone on by then.
+	putRight := make(chan struct{})
 	r := start(t, func(o *Options) {
 		o.Preflight = func(context.Context, string, string) []preflight.Result {
-			if calls.Add(1) <= 4 {
+			calls.Add(1)
+			select {
+			case <-putRight:
+				passes.Add(1)
+				return passed
+			default:
 				return failed
 			}
-			return passed
 		}
 	})
 
@@ -270,7 +277,9 @@ func TestKeepsCheckingWhileACheckFailsAndStopsOnceTheyPass(t *testing.T) {
 	if checks := r.report(t).Checks; checks[1].Reason != "NotWritable" || !strings.Contains(checks[1].Message, "cannot write") {
 		t.Errorf("the failure is %+v", checks[1])
 	}
+	eventually(t, "the checks to run again", func() bool { return calls.Load() >= 3 })
 
+	close(putRight)
 	eventually(t, "the checks to pass", func() bool {
 		checks := r.report(t).Checks
 		return len(checks) == 2 && checks[1].Outcome == outcomePassed
@@ -280,8 +289,8 @@ func TestKeepsCheckingWhileACheckFailsAndStopsOnceTheyPass(t *testing.T) {
 	if calls.Load() != settled {
 		t.Errorf("the checks ran again after they passed: %d then %d", settled, calls.Load())
 	}
-	if settled != 5 {
-		t.Errorf("the checks ran %d times, want 5: four failures and a pass", settled)
+	if passes.Load() != 1 {
+		t.Errorf("the checks passed %d times, want once: they stop when they pass", passes.Load())
 	}
 }
 

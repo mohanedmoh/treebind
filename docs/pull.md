@@ -1,0 +1,67 @@
+# What the agent does after the checkout: pulling
+
+Once the checkout is made (see [the checkout](checkout.md)), the agent pulls: every `spec.sync.interval`, 30
+seconds when it is not set, it asks the repository for the tip of the branch, and if there is a newer
+commit it brings it into your directory. The decisions behind it are in
+[ADR 0020](adr/0020-the-agent-pulls-by-fast-forward-and-never-writes-over-a-local-edit.md) and
+[ADR 0024](adr/0024-the-agent-pulls-on-a-schedule-that-spreads-the-load-and-waits-longer-while-the-repository-fails.md).
+
+The result is the check `Pull` in the agent's report, and a line in its log when what it says changes:
+
+```
+kubectl logs <name>-sync-0
+kubectl describe treebind <name>
+```
+
+## What it does
+
+- **It never writes over your application's edits.** An update that would change a file that has a local edit,
+  or that would put a file where the application made one of its own, is not applied at all. A file that a
+  `.gitignore` hides is the application's too. Every other local edit stays as it is.
+- **It applies only a fast-forward.** When the repository and your directory each have commits that the other
+  lacks, nothing is written, and the check says so. What wins is the conflict policy of the Treebind, which
+  comes later.
+- **It applies the deletions of the branch.** A file that the branch removed is removed from your directory.
+- **It asks cheaply.** Most pulls are one question to the repository, "what is the tip?", and fetch nothing.
+- **It spreads its questions.** Each wait is the interval give or take a fifth, and the first pull of a Treebind
+  comes after a point in the interval that comes from its name, so that many Treebinds on one Git host do not
+  ask it together. After a failure of the repository the wait grows, up to ten minutes, and goes back to the
+  interval at the first pull that works.
+- **Both directions only pull for now.** `bidirectional` will also commit and push, and until it does it pulls
+  like `pull`.
+
+## What the check says
+
+| Result | What it means | What to do |
+| :-- | :-- | :-- |
+| `Passed`, at the tip | Your directory has what the branch has | Nothing |
+| `Passed`, advanced | The agent brought in new commits | Nothing |
+| `Passed`, ahead | Your directory has commits that the repository does not have yet | Nothing: they are pushed when push is there |
+| `Skipped` `NotChecked` | The volume, the lock or the checkout has not passed, or the first pull is not due yet | Read the check that failed |
+
+## When it does not work
+
+The agent stays up, says why in the `Pull` check, and tries again. It carries on once the cause is put right,
+with no restart.
+
+| Reason | What it means | What to do | The next pull |
+| :-- | :-- | :-- | :-- |
+| `Blocked` | A file that the update changes has a local edit, or an untracked file is in its way. The message names some of them. Nothing was written | Commit, revert or remove the files. The next pull goes on | At the interval |
+| `Diverged` | Your directory and the branch each have commits that the other lacks. The message says how many. Nothing was written. A branch that was force-pushed looks like this | Nothing is lost. Decide which side is right | At the interval |
+| `BranchGone` | The repository has no such branch any more | Put the branch back, or set `spec.repository.branch` to one it has | At the interval |
+| `ReservedPath` | The update brings a file named `.treebind` into a directory that holds the agent's state | Use a `subPath`, or rename the file | At the interval |
+| `GitDirUnsafe` | The Git directory holds something the agent did not put there | See [the Git directory](git-directory.md) | At the interval |
+| `FetchFailed` | The repository cannot be reached, the key is refused, or the host key is not in the known hosts. The message has what Git said | Check the address, the deploy key and the known hosts. The agent recovers by itself | Longer, up to ten minutes |
+| `PullFailed` | The agent could not read or write the volume, or the checkout is not what a pull expects, or it could not set up what pulls | The message says which | Longer, up to ten minutes |
+| `Refused` | The update was not applied because the agent could not check that it still holds the writer lock | The agent stops with the exit code 3 if the lock is lost, and its pod's restart waits for the lock again | Longer, up to ten minutes |
+
+## Things to know
+
+- **The first pull is up to one interval after the checkout.** It is not a delay of the checkout: the checkout
+  has just fetched the branch.
+- **Commits on the branch that remove files remove them from your directory.** There is no cap on deletions and
+  no recovery ref yet (#40), so keep that in mind for a repository that is rewritten.
+- **A pull that is `Blocked` or `Diverged` is tried again at every interval**, and is logged once. It costs one
+  question to the repository while the tip does not change.
+- **Changing `spec.sync.interval` replaces the sync pod.** The new pod uses the new interval.
+- **The agent is not ready after a pull.** Readiness after the first sync is a later change.

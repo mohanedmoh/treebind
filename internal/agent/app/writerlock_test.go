@@ -33,6 +33,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
+	"github.com/mohanedmoh/treebind/internal/agent/pull"
 )
 
 const (
@@ -161,6 +162,29 @@ func holderOf(t *testing.T, lockDir string) string {
 	return record.Holder
 }
 
+// lastSlotReleased says whether the last slot of the lock is a release.
+func lastSlotReleased(t *testing.T, lockDir string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(lockDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("the lock directory holds no slot: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	data, err := os.ReadFile(filepath.Join(lockDir, names[len(names)-1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct{ Released bool }
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("the last slot is not a record: %v: %q", err, data)
+	}
+	return record.Released
+}
+
 func TestTakesTheLockBeforeTheCheckoutAndReportsIt(t *testing.T) {
 	root, lockDir := claimWithState(t)
 	var slotsAtCheckout atomic.Int64
@@ -255,18 +279,25 @@ func TestWaitsForAnotherAgentThatHoldsTheLockAndTakesItWhenItIsGivenUp(t *testin
 
 func TestKeepsTryingToTakeTheLockWhileTheVolumeRefuses(t *testing.T) {
 	root, _ := claimWithState(t)
-	var tries atomic.Int64
+	var tries, refusals atomic.Int64
 	var opened atomic.Int64
+	// The volume lets the lock be made when the test says so, and not after some number of tries: the test reads
+	// the report while it does not, and the agent must not have gone on by then.
+	volumeBack := make(chan struct{})
 	r := start(t, func(o *Options) {
 		takesTheLock(root, func(ctx context.Context, options checkout.Options) (checkout.Result, error) {
 			opened.Add(1)
 			return cloned(ctx, options)
 		})(o)
 		o.AcquireLock = func(ctx context.Context, cfg lock.Config) (*lock.Lock, error) {
-			if tries.Add(1) <= 3 {
+			tries.Add(1)
+			select {
+			case <-volumeBack:
+				return lock.Acquire(ctx, cfg)
+			default:
+				refusals.Add(1)
 				return nil, errors.New("lock: create the lock directory: read-only file system")
 			}
-			return lock.Acquire(ctx, cfg)
 		}
 	})
 
@@ -280,6 +311,9 @@ func TestKeepsTryingToTakeTheLockWhileTheVolumeRefuses(t *testing.T) {
 	if opened.Load() != 0 {
 		t.Error("the checkout ran while the lock could not be taken")
 	}
+	eventually(t, "the lock to be asked for again", func() bool { return tries.Load() >= 3 })
+
+	close(volumeBack)
 	eventually(t, "the lock to be taken", func() bool {
 		got, _ := lockCheck(t, r)
 		return got.Outcome == outcomePassed
@@ -288,8 +322,8 @@ func TestKeepsTryingToTakeTheLockWhileTheVolumeRefuses(t *testing.T) {
 		got, _ := checkoutCheck(t, r)
 		return got.Outcome == outcomePassed
 	})
-	if tries.Load() != 4 {
-		t.Errorf("the lock was asked for %d times, want 4: three refusals and a lock", tries.Load())
+	if tries.Load() != refusals.Load()+1 {
+		t.Errorf("the lock was asked for %d times after %d refusals, want the refusals and one that works", tries.Load(), refusals.Load())
 	}
 }
 
@@ -501,5 +535,59 @@ func TestGivesUpALockThatWasMadeInTheInstantOfTheStop(t *testing.T) {
 	defer cancel()
 	if _, err := lock.Acquire(ctx, lock.Config{Dir: lockDir, Holder: lockOther, TTL: time.Hour}); err != nil {
 		t.Fatalf("the next agent could not take the lock: %v: the agent that stopped did not give it up", err)
+	}
+}
+
+// slowToStop is a puller that takes its time to stop once the agent is told to, as Git does while it is
+// killed in the middle of an update. It returns when the test says.
+type slowToStop struct {
+	began, stopping, finish chan struct{}
+	once                    sync.Once
+}
+
+func (s *slowToStop) Pull(ctx context.Context) (pull.Result, error) {
+	s.once.Do(func() { close(s.began) })
+	<-ctx.Done()
+	close(s.stopping)
+	<-s.finish
+	return pull.Result{}, ctx.Err()
+}
+
+func TestGivesTheLockUpOnlyOnceAPullThatIsStoppingHasEnded(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	s := &slowToStop{began: make(chan struct{}), stopping: make(chan struct{}), finish: make(chan struct{})}
+	change, _ := withPuller(newFakePuller(), &loopClock{})
+	r := start(t, func(o *Options) {
+		takesTheLock(root, cloned)(o)
+		change(o)
+		o.NewPuller = func(pull.Options) (Puller, error) { return s, nil }
+	})
+	<-s.began
+
+	r.cancel()
+	<-s.stopping
+
+	// The keeper has been told to stop as well, and the pull is not over: the lock is still held. Nothing
+	// says when a thing that must not happen would have, so the look is for as long as a release takes by far.
+	deadline := time.After(250 * time.Millisecond)
+	for tick := time.NewTicker(time.Millisecond); ; {
+		if lastSlotReleased(t, lockDir) {
+			t.Fatal("the lock was given up while the pull was still stopping: the next agent could write beside it")
+		}
+		select {
+		case <-tick.C:
+			continue
+		case <-deadline:
+			tick.Stop()
+		}
+		break
+	}
+
+	close(s.finish)
+	if err := r.waitStopped(t); err != nil {
+		t.Fatal(err)
+	}
+	if !lastSlotReleased(t, lockDir) {
+		t.Error("the lock was not given up once the pull had ended")
 	}
 }

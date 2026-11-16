@@ -118,6 +118,7 @@ func (a *agent) takeLock(ctx context.Context, p *progress) bool {
 
 		if err == nil {
 			if held != nil {
+				a.held.Store(held)
 				a.background.Go(func() { a.keepLock(ctx, held) })
 			}
 			return true
@@ -150,10 +151,38 @@ func lockFailed(err error) *preflight.Result {
 // agent: nothing is written without it (NFR-1).
 func (a *agent) keepLock(ctx context.Context, held *lock.Lock) {
 	if err := held.Keep(ctx); err != nil {
-		a.lost <- err
+		a.lose(err)
 		return
 	}
+	// The agent was told to stop. What it writes with may still be stopping, so the lock is given up
+	// once that has ended. If it does not end in the grace period, the lock is left to run out.
+	<-a.idle
 	if err := held.Release(); err != nil {
 		a.Logger.Warn("the writer lock could not be given up, and is taken over after its TTL", "error", err)
 	}
+}
+
+// lose says to Run that the writer lock was lost. It does not wait: the keeper and a pull may both find
+// that it is gone, and one saying is enough.
+func (a *agent) lose(err error) {
+	select {
+	case a.lost <- err:
+	default:
+	}
+}
+
+// fence checks that the agent still holds the writer lock. A pull calls it immediately before it writes
+// (docs/adr/0020), and does not write when it returns an error. A lock that is gone is said to Run as well,
+// so that the agent stops without waiting for the next beat of the keeper. With no lock to hold there is
+// nothing to check.
+func (a *agent) fence(context.Context) error {
+	held := a.held.Load()
+	if held == nil {
+		return nil
+	}
+	err := held.Check()
+	if errors.Is(err, lock.ErrLost) {
+		a.lose(err)
+	}
+	return err
 }

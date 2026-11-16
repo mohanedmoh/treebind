@@ -34,6 +34,11 @@ const (
 	testCommit = "0123456789abcdef0123456789abcdef01234567"
 	testBranch = "main"
 
+	// The settings that withRepository gives the agent.
+	testURL        = "ssh://git@example.com/acme/dashboards.git"
+	testKeyFile    = "/etc/treebind/ssh/id_ed25519"
+	testKnownHosts = "/etc/treebind/known-hosts/known_hosts"
+
 	// The outcomes of a check, as the report says them.
 	outcomePassed  = "Passed"
 	outcomeFailed  = "Failed"
@@ -44,11 +49,11 @@ const (
 // replaces.
 func withRepository(open func(context.Context, checkout.Options) (checkout.Result, error)) func(*Options) {
 	return func(o *Options) {
-		o.Config.RepoURL = "ssh://git@example.com/acme/dashboards.git"
+		o.Config.RepoURL = testURL
 		o.Config.RepoBranch = "release"
 		o.Config.SubPath = "dashboards"
-		o.Config.SSHKeyFile = "/etc/treebind/ssh/id_ed25519"
-		o.Config.KnownHostsFile = "/etc/treebind/known-hosts/known_hosts"
+		o.Config.SSHKeyFile = testKeyFile
+		o.Config.KnownHostsFile = testKnownHosts
 		o.Checkout = open
 	}
 }
@@ -91,10 +96,10 @@ func TestMakesTheCheckoutOnceTheVolumeIsInOrderAndReportsIt(t *testing.T) {
 		t.Errorf("checks = %v, want the volume checks and then the checkout", names)
 	}
 	options := <-asked
-	if options.URL != "ssh://git@example.com/acme/dashboards.git" || options.Branch != "release" ||
+	if options.URL != testURL || options.Branch != "release" ||
 		options.Layout.WorkTree != "/work/dashboards" || options.Layout.GitDir != "/work/.treebind/git" ||
-		options.Git.SSH.IdentityFile != "/etc/treebind/ssh/id_ed25519" ||
-		options.Git.SSH.KnownHostsFile != "/etc/treebind/known-hosts/known_hosts" {
+		options.Git.SSH.IdentityFile != testKeyFile ||
+		options.Git.SSH.KnownHostsFile != testKnownHosts {
 		t.Errorf("options = %+v, want what the settings of the pod say", options)
 	}
 	if code, _ := r.get(t, "/readyz"); code == 200 {
@@ -112,17 +117,22 @@ func TestMakesNoCheckoutWhenNoneIsGiven(t *testing.T) {
 }
 
 func TestDoesNotTryTheCheckoutWhileAVolumeCheckFails(t *testing.T) {
-	var volume, opened atomic.Int64
+	var opened atomic.Int64
+	// The volume is in order once the test says so, and not after some number of checks: the test reads the
+	// report while the volume is not, and the agent must not have gone on by then.
+	inOrder := make(chan struct{})
 	r := start(t, func(o *Options) {
 		withRepository(func(ctx context.Context, options checkout.Options) (checkout.Result, error) {
 			opened.Add(1)
 			return cloned(ctx, options)
 		})(o)
 		o.Preflight = func(context.Context, string, string) []preflight.Result {
-			if volume.Add(1) <= 3 {
+			select {
+			case <-inOrder:
+				return passed
+			default:
 				return failed
 			}
-			return passed
 		}
 	})
 
@@ -137,6 +147,7 @@ func TestDoesNotTryTheCheckoutWhileAVolumeCheckFails(t *testing.T) {
 	if opened.Load() != 0 {
 		t.Errorf("the checkout was tried %d times while a volume check failed", opened.Load())
 	}
+	close(inOrder)
 	eventually(t, "the checkout to be made once the volume is in order", func() bool {
 		got, _ := checkoutCheck(t, r)
 		return got.Outcome == outcomePassed
@@ -144,21 +155,31 @@ func TestDoesNotTryTheCheckoutWhileAVolumeCheckFails(t *testing.T) {
 }
 
 func TestKeepsTryingTheCheckoutWhileItFailsAndStopsOnceItWorks(t *testing.T) {
-	var calls atomic.Int64
+	var calls, failures atomic.Int64
+	// The repository answers when the test says so, and not after some number of tries: the test reads the report
+	// while it does not, and the agent must not have gone on by then.
+	answers := make(chan struct{})
 	r := start(t, withRepository(func(ctx context.Context, o checkout.Options) (checkout.Result, error) {
-		if calls.Add(1) <= 3 {
+		calls.Add(1)
+		select {
+		case <-answers:
+			return cloned(ctx, o)
+		default:
+			failures.Add(1)
 			return checkout.Result{}, &checkout.Error{Reason: checkout.ReasonFetchFailed, Message: "the repository cannot be asked for its branches"}
 		}
-		return cloned(ctx, o)
 	}))
 
 	eventually(t, "the failure in the report", func() bool {
 		got, found := checkoutCheck(t, r)
 		return found && got.Outcome == outcomeFailed
 	})
-	if got, _ := checkoutCheck(t, r); got.Reason != "FetchFailed" || !strings.Contains(got.Message, "cannot be asked") {
+	if got, _ := checkoutCheck(t, r); got.Reason != checkout.ReasonFetchFailed || !strings.Contains(got.Message, "cannot be asked") {
 		t.Errorf("checkout = %+v, want the reason and the message of the failure", got)
 	}
+	eventually(t, "the checkout to be tried again", func() bool { return calls.Load() >= 3 })
+
+	close(answers)
 	eventually(t, "the checkout to be made", func() bool {
 		got, _ := checkoutCheck(t, r)
 		return got.Outcome == outcomePassed
@@ -166,8 +187,8 @@ func TestKeepsTryingTheCheckoutWhileItFailsAndStopsOnceItWorks(t *testing.T) {
 	settled := calls.Load()
 	// Nothing else is going to happen, so a short wait is all there is to see.
 	eventually(t, "the loop to have ended", func() bool { return calls.Load() == settled })
-	if settled != 4 {
-		t.Errorf("the checkout ran %d times, want 4: three failures and a success", settled)
+	if settled != failures.Load()+1 {
+		t.Errorf("the checkout ran %d times after %d failures, want the failures and one success", settled, failures.Load())
 	}
 }
 
