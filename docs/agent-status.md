@@ -88,6 +88,7 @@ The report lists the agent's checks, in the order the agent runs them, each with
 | `GitDir` | The directories where the agent keeps its Git directory are its own and private | [The Git directory](git-directory.md) |
 | `Lock` | The agent holds the writer lock of the volume, so that no other agent writes to it. It waits while another holds it | [ADR 0023](adr/0023-the-agent-holds-the-writer-lock-from-before-the-checkout.md) |
 | `Checkout` | The checkout of the repository is made, or the one that is there is opened | [The checkout](checkout.md) |
+| `Pull` | The last pull of the commits that the repository gained: at the tip, advanced, or why it did not work. It is skipped until the first pull | [Pulling](pull.md) |
 
 A check that cannot be tried because one before it failed, or that waits, is `Skipped`, with the reason
 `NotChecked` and the check that failed in the message. The operator does not show the checks as

@@ -36,6 +36,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/agent/umask"
 )
@@ -59,6 +60,16 @@ var acquireLock = lock.Acquire
 // that no test starts Git against a repository.
 var openCheckout = checkout.Open
 
+// newPuller makes what pulls into the checkout. A test replaces it, so that no test starts Git against a
+// repository.
+var newPuller = func(options pull.Options) (app.Puller, error) {
+	puller, err := pull.New(options)
+	if err != nil {
+		return nil, err
+	}
+	return puller, nil
+}
+
 func main() {
 	umask.Set()
 
@@ -72,10 +83,11 @@ func main() {
 }
 
 // agentOptions is what the agent runs with: its settings, the check of the operator's token,
-// and the checkout that it makes once the volume is in order.
+// the checkout that it makes once the volume is in order, and the pulls that follow it.
 func agentOptions(settings config.Config, verifier status.Verifier, logger *slog.Logger) app.Options {
 	return app.Options{
 		Config: settings, Verifier: verifier, Logger: logger, AcquireLock: acquireLock, Checkout: openCheckout,
+		NewPuller: newPuller,
 	}
 }
 

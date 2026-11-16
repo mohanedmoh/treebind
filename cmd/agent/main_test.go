@@ -30,12 +30,20 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/app"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/pull"
 )
 
-// No test of the agent's main starts Git: the checkout is the one of the package, which has
-// its own tests, and here it does nothing.
+// pullerOfThePackage is the function that the agent starts with, before init gives the tests another.
+var pullerOfThePackage = newPuller
+
+// No test of the agent's main starts Git: the checkout and the pulls are the ones of the packages,
+// which have their own tests, and here they do nothing.
 func init() {
+	newPuller = func(pull.Options) (app.Puller, error) {
+		return nil, errors.New("the tests of the main pull nothing")
+	}
 	openCheckout = func(context.Context, checkout.Options) (checkout.Result, error) {
 		return checkout.Result{Outcome: checkout.Cloned, Branch: "main"}, nil
 	}
@@ -45,7 +53,10 @@ func init() {
 }
 
 // repoURL is an address that the tests of the main give the agent. Nothing asks it.
-const repoURL = "https://example.com/a.git"
+const (
+	repoURL  = "https://example.com/a.git"
+	otherURL = "https://example.com/b.git"
+)
 
 func environment(extra map[string]string) func(string) string {
 	env := map[string]string{
@@ -163,9 +174,9 @@ func TestTheAgentRunsTheCheckoutOfThePackage(t *testing.T) {
 	t.Cleanup(func() { openCheckout = previous })
 	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
 
-	made, err := options.Checkout(context.Background(), checkout.Options{URL: "https://example.com/b.git"})
+	made, err := options.Checkout(context.Background(), checkout.Options{URL: otherURL})
 
-	if err != nil || made.Outcome != checkout.Reopened || asked.URL != "https://example.com/b.git" {
+	if err != nil || made.Outcome != checkout.Reopened || asked.URL != otherURL {
 		t.Errorf("Checkout = %+v, %v with %+v, want the function of the package, called with what it is given",
 			made, err, asked)
 	}
@@ -199,5 +210,36 @@ func TestTheAgentTakesTheLockOfThePackage(t *testing.T) {
 
 	if err == nil || asked.Holder != "holder" {
 		t.Errorf("AcquireLock asked for %+v, %v, want the function of the package, called with what it is given", asked, err)
+	}
+}
+
+func TestTheAgentPullsWithTheFunctionOfTheMain(t *testing.T) {
+	previous := newPuller
+	t.Cleanup(func() { newPuller = previous })
+	var asked pull.Options
+	newPuller = func(o pull.Options) (app.Puller, error) {
+		asked = o
+		return nil, errors.New("no puller in a test")
+	}
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
+
+	_, err := options.NewPuller(pull.Options{URL: otherURL})
+
+	if err == nil || asked.URL != otherURL {
+		t.Errorf("NewPuller asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestThePullerOfThePackageRefusesWhatCannotWorkAndIsOneThatPullsOtherwise(t *testing.T) {
+	if _, err := pullerOfThePackage(pull.Options{}); err == nil {
+		t.Error("a puller was made for a repository with no address")
+	}
+	where, err := layout.New(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	puller, err := pullerOfThePackage(pull.Options{Layout: where, URL: repoURL, Branch: "main"})
+	if err != nil || puller == nil {
+		t.Errorf("the puller = %v, %v, want one that can pull", puller, err)
 	}
 }
