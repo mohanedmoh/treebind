@@ -343,6 +343,34 @@ func TestTemplateHash(t *testing.T) {
 			wantChange: true,
 		},
 		{
+			name:   "a spec.paths without lists leaves it alone",
+			mutate: func(tb *treebindv1alpha1.Treebind) { tb.Spec.Paths = &treebindv1alpha1.PathsSpec{} },
+			image:  testImage,
+		},
+		{
+			name: "empty lists leave it alone",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Include: []string{}, Exclude: []string{}}
+			},
+			image: testImage,
+		},
+		{
+			name: "an include list changes it",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Include: []string{pathsJSON}}
+			},
+			image:      testImage,
+			wantChange: true,
+		},
+		{
+			name: "an exclude list changes it",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Exclude: []string{pathsTmp}}
+			},
+			image:      testImage,
+			wantChange: true,
+		},
+		{
 			name: "settings the pod does not read leave it alone",
 			mutate: func(tb *treebindv1alpha1.Treebind) {
 				tb.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowLocal
@@ -358,6 +386,72 @@ func TestTemplateHash(t *testing.T) {
 				t.Errorf("hash changed = %v, want %v", changed, tt.wantChange)
 			}
 		})
+	}
+}
+
+// A change of a list replaces the sync pod, and so does taking a list away.
+func TestTemplateHashFollowsTheLists(t *testing.T) {
+	states := []*treebindv1alpha1.PathsSpec{
+		nil,
+		{Include: []string{pathsJSON}},
+		{Include: []string{pathsJSON, "*.yaml"}},
+		{Include: []string{pathsJSON, "*.yaml"}, Exclude: []string{pathsTmp}},
+		{Exclude: []string{pathsTmp}},
+		{Exclude: []string{"*.bak"}},
+		{Include: []string{pathsTmp}},
+		nil,
+	}
+	hashes := make([]string, len(states))
+	for i, paths := range states {
+		treebind := newTreebind(testTreebindName)
+		treebind.Spec.Paths = paths
+		hashes[i] = mustDesiredStatefulSet(t, treebind, testImage).Annotations[templateHashAnnotation]
+		if i > 0 && hashes[i] == hashes[i-1] {
+			t.Errorf("going from %+v to %+v leaves the hash as it was, so the pod is not replaced", states[i-1], paths)
+		}
+	}
+	if hashes[0] != hashes[len(hashes)-1] {
+		t.Errorf("a Treebind whose lists are taken away has the hash %s, and %s before it had any",
+			hashes[len(hashes)-1], hashes[0])
+	}
+}
+
+// The pod template of a Treebind without lists is the one that the operator wrote before it passed
+// the lists on, byte for byte, so that upgrading the operator replaces none of those sync pods
+// (#87). The hashes are those of commit 2eb611c. A change that alters them replaces every such pod,
+// and has to say so.
+func TestATemplateWithoutListsIsTheOneOfTheOperatorBefore(t *testing.T) {
+	full := func() *treebindv1alpha1.Treebind {
+		treebind := newTreebind(testTreebindName)
+		treebind.Namespace = testNamespace
+		treebind.Spec.Target.MountPath = testCustomPath
+		treebind.Spec.Target.SubPath = subPathNested
+		treebind.Spec.Repository.URL = "ssh://git@example.com/acme/dashboards.git"
+		treebind.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{
+			SSHKeySecretRef: sshKeyRef(), KnownHostsConfigMapRef: knownHostsRef(),
+		}
+		treebind.Spec.Sync.Interval = &metav1.Duration{Duration: 90 * time.Second}
+		return treebind
+	}
+	for name, tt := range map[string]struct {
+		treebind func() *treebindv1alpha1.Treebind
+		want     string
+	}{
+		"a Treebind with the defaults": {
+			func() *treebindv1alpha1.Treebind { return newTreebind(testTreebindName) },
+			"8530124d950b17a4134515946055610afff6dea2dd08c84b58550abb27b8e656",
+		},
+		"a Treebind with every other field": {full, "7c7ba5bbc2ed57165528bb8803abda0ee01aecc379c79f2bf3ba7399e0a3a410"},
+	} {
+		for _, paths := range withoutLists() {
+			treebind := tt.treebind()
+			treebind.Spec.Paths = paths
+			if got := mustDesiredStatefulSet(t, treebind, testImage).Annotations[templateHashAnnotation]; got != tt.want {
+				t.Errorf("%s and spec.paths %+v: hash %s, want %s, which the operator wrote before. If the change "+
+					"of the template is meant, upgrading the operator replaces every sync pod: say so, and pin the new hash",
+					name, paths, got, tt.want)
+			}
+		}
 	}
 }
 
@@ -434,6 +528,45 @@ func TestAgentEnvironment(t *testing.T) {
 	}
 	if !reflect.DeepEqual(container.Env, want) {
 		t.Errorf("env = %+v\nwant %+v", container.Env, want)
+	}
+}
+
+// With every setting the variables come in the order of the file, and the lists of spec.paths come
+// as JSON after the name of the pod.
+func TestAgentEnvironmentWithEverySetting(t *testing.T) {
+	treebind := newTreebind(testTreebindName)
+	treebind.Spec.Target.SubPath = subPathNested
+	treebind.Spec.Repository.URL = sshRepositoryURL
+	treebind.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{
+		SSHKeySecretRef: sshKeyRef(), KnownHostsConfigMapRef: knownHostsRef(),
+	}
+	treebind.Spec.Sync.Interval = &metav1.Duration{Duration: time.Minute}
+	treebind.Spec.Paths = &treebindv1alpha1.PathsSpec{
+		Include: []string{pathsJSON, "a<b>&c"}, Exclude: []string{pathsTmp, "$$x"},
+	}
+
+	container, _ := agentContainer(t, treebind)
+
+	names := make([]string, 0, len(container.Env))
+	for _, variable := range container.Env {
+		names = append(names, variable.Name)
+	}
+	want := []string{
+		agentconfig.EnvName, agentconfig.EnvNamespace, agentconfig.EnvMountPath, agentconfig.EnvSubPath,
+		agentconfig.EnvRepoURL, agentconfig.EnvRepoBranch, agentconfig.EnvSyncInterval, agentconfig.EnvSyncDirection,
+		agentconfig.EnvPodName, agentconfig.EnvPathsInclude, agentconfig.EnvPathsExclude, agentconfig.EnvSSHKeyFile,
+		agentconfig.EnvKnownHostsFile, agentconfig.EnvStatusAddr, agentconfig.EnvStatusIssuer,
+		agentconfig.EnvStatusAudience, agentconfig.EnvStatusSubject, agentconfig.EnvStatusKeysFile,
+	}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("variables = %v\nwant        %v", names, want)
+	}
+	env := agentEnvironmentOf(container)
+	if got, want := env[agentconfig.EnvPathsInclude], `["*.json","a\u003cb\u003e\u0026c"]`; got != want {
+		t.Errorf("%s = %s, want %s", agentconfig.EnvPathsInclude, got, want)
+	}
+	if got, want := env[agentconfig.EnvPathsExclude], `["*.tmp","\u0024\u0024x"]`; got != want {
+		t.Errorf("%s = %s, want %s", agentconfig.EnvPathsExclude, got, want)
 	}
 }
 
