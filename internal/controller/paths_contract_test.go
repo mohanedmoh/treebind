@@ -20,7 +20,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
+	"testing"
 	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -40,6 +42,7 @@ import (
 // The patterns and the message that the tests of spec.paths repeat.
 const (
 	pathsTmp          = "*.tmp"
+	pathsJSON         = "*.json"
 	pathsUp           = "a/.."
 	pathsSpace        = "a b"
 	pathsNewline      = "a\nb"
@@ -94,6 +97,108 @@ func pathPatternCandidates() []string {
 		candidates = append(candidates, pattern.String())
 	}
 	return candidates
+}
+
+// pathListsOfTheCorpus returns the lists that the test gives to the operator: the candidates that the
+// agent takes, packed into lists as long as the CRD lets them be; the longest list that is made of
+// the characters that JSON writes in the most bytes, and the same made of '$'; and a list of the
+// characters that JSON escapes or that the kubelet would expand, with a quote, a backslash and a
+// space at the end.
+func pathListsOfTheCorpus(t *testing.T) [][]string {
+	t.Helper()
+	var lists [][]string
+	var list []string
+	length := 0
+	for _, pattern := range pathPatternCandidates() {
+		if agentconfig.CheckPathPatterns([]string{pattern}) != nil {
+			continue
+		}
+		full := len(list) == agentconfig.MaxPathPatterns
+		if len(list) > 0 && (full || length+utf8.RuneCountInString(pattern) > agentconfig.MaxPathPatternsLength) {
+			lists, list, length = append(lists, list), nil, 0
+		}
+		list = append(list, pattern)
+		length += utf8.RuneCountInString(pattern)
+	}
+	// JSON writes \x01, and the operator writes '$', in six bytes, the most a character takes.
+	longest := slices.Repeat([]string{strings.Repeat("\x01", 512)}, agentconfig.MaxPathPatternsLength/512)
+	dollars := slices.Repeat([]string{strings.Repeat("$", 512)}, agentconfig.MaxPathPatternsLength/512)
+	escaped := []string{
+		"a<b>&c", `"quoted"`, `\"`, `q\\w`, "sp ", "é/**", "日本/*.md", "\u2028", "\t*",
+		// The kubelet would expand these.
+		"cost$$.txt", "$(TREEBIND_NAME)*", "$$(TREEBIND_POD_NAME)", "a$b", "$",
+	}
+	lists = append(lists, list, longest, dollars, escaped)
+	for _, checked := range lists {
+		if err := agentconfig.CheckPathPatterns(checked); err != nil {
+			t.Fatalf("%q is not a list the CRD takes: %v", checked, err)
+		}
+	}
+	return lists
+}
+
+// The agent reads the lists of the spec as they are, from the variables the operator puts in the pod.
+func TestTheAgentReadsTheListsOfTheSpec(t *testing.T) {
+	lists := pathListsOfTheCorpus(t)
+	for i, list := range lists {
+		// Each list goes in as an include list once and as an exclude list once, beside another list.
+		other := lists[(i+1)%len(lists)]
+		for _, paths := range []treebindv1alpha1.PathsSpec{{Include: list, Exclude: other}, {Include: other, Exclude: list}} {
+			treebind := newTreebind(testTreebindName)
+			treebind.Spec.Paths = &paths
+
+			config, env, err := agentConfigOf(t, treebind)
+
+			if err != nil {
+				t.Fatalf("the agent refuses the environment of its own pod with %q and %q: %v", paths.Include, paths.Exclude, err)
+			}
+			// The kubelet expands $(NAME) and $$ in the value of a variable before the agent reads it. Linux
+			// takes a variable of at most 128 KiB, name and all, and the lists keep the agent's 16 KiB to spare.
+			const limit, spare = 128 << 10, 16 << 10
+			for _, name := range []string{agentconfig.EnvPathsInclude, agentconfig.EnvPathsExclude} {
+				if strings.Contains(env[name], "$") {
+					t.Errorf("%s = %s, which has a '$' that the kubelet would expand", name, env[name])
+				}
+				if size := len(name) + len("=") + len(env[name]) + 1; size > limit-spare {
+					t.Errorf("%s is %d bytes, which leaves less than %d of the %d that it may have", name, size, spare, limit)
+				}
+			}
+			if !slices.Equal(config.PathsInclude, paths.Include) || !slices.Equal(config.PathsExclude, paths.Exclude) {
+				t.Errorf("the agent reads %q and %q, want %q and %q",
+					config.PathsInclude, config.PathsExclude, paths.Include, paths.Exclude)
+			}
+		}
+	}
+	if len(lists) < 10 {
+		t.Errorf("the corpus makes only %d lists", len(lists))
+	}
+}
+
+// withoutLists are the ways to write a spec.paths that has no lists.
+func withoutLists() []*treebindv1alpha1.PathsSpec {
+	return []*treebindv1alpha1.PathsSpec{nil, {}, {Include: []string{}, Exclude: []string{}}}
+}
+
+// Without lists there are no variables, and the agent reads no patterns.
+func TestNoPathsVariablesWithoutLists(t *testing.T) {
+	for _, paths := range withoutLists() {
+		treebind := newTreebind(testTreebindName)
+		treebind.Spec.Paths = paths
+
+		config, env, err := agentConfigOf(t, treebind)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{agentconfig.EnvPathsInclude, agentconfig.EnvPathsExclude} {
+			if value, set := env[name]; set {
+				t.Errorf("%s is %q for spec.paths %+v", name, value, paths)
+			}
+		}
+		if len(config.PathsInclude)+len(config.PathsExclude) != 0 {
+			t.Errorf("the agent reads %q and %q for spec.paths %+v", config.PathsInclude, config.PathsExclude, paths)
+		}
+	}
 }
 
 var _ = Describe("spec.paths", func() {
