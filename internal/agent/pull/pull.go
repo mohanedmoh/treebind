@@ -56,6 +56,10 @@ const (
 
 	// DefaultRecoveryRefs is how many recovery refs are kept (docs/adr/0026).
 	DefaultRecoveryRefs = 20
+
+	// DefaultDrain is how long an update that is writing the files has to finish once the agent is told to stop
+	// (docs/adr/0028). The sync pod has 30 seconds to stop in, and the lock is given up after the pull has.
+	DefaultDrain = 10 * time.Second
 )
 
 // Outcome says what a pull that worked did. The outcomes and the reasons below are API in the
@@ -146,6 +150,12 @@ type Options struct {
 	// RecoveryRefs is how many of the refs that keep the commit the checkout was at before an update
 	// are kept. DefaultRecoveryRefs when it is zero.
 	RecoveryRefs int
+
+	// Drain is how long the merge that applies an update has to finish once the pull is told to stop. A
+	// merge that is stopped while it writes the files leaves them half written, with the index and the
+	// branch at the commit it came from, and the next update is refused for them (docs/adr/0028).
+	// DefaultDrain when it is zero.
+	Drain time.Duration
 }
 
 // Result is what a pull that worked did.
@@ -192,8 +202,8 @@ func New(o Options) (*Puller, error) {
 	if err := config.CheckBranch(o.Branch); err != nil {
 		return nil, fmt.Errorf("pull: the branch %q %w", o.Branch, err)
 	}
-	if o.MaxDeletions < 0 || o.RecoveryRefs < 0 {
-		return nil, errors.New("pull: MaxDeletions and RecoveryRefs must not be negative")
+	if o.MaxDeletions < 0 || o.RecoveryRefs < 0 || o.Drain < 0 {
+		return nil, errors.New("pull: MaxDeletions, RecoveryRefs and Drain must not be negative")
 	}
 	if o.FetchTimeout == 0 {
 		o.FetchTimeout = DefaultFetchTimeout
@@ -203,6 +213,9 @@ func New(o Options) (*Puller, error) {
 	}
 	if o.RecoveryRefs == 0 {
 		o.RecoveryRefs = DefaultRecoveryRefs
+	}
+	if o.Drain == 0 {
+		o.Drain = DefaultDrain
 	}
 	runner, err := git.New(checkout.RunnerOptions(o.Layout, o.Git))
 	if err != nil {
@@ -338,15 +351,50 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 		}
 	}
 
+	// An update does not begin once the agent was told to stop, and one that has begun is not cut off by
+	// the stop, but given Drain to finish (docs/adr/0028): a merge that is stopped while it writes the
+	// files leaves them half written.
+	if err := ctx.Err(); err != nil {
+		return Result{}, p.fail(ReasonPullFailed, "the update was not applied, because the agent was told to stop: %v", err)
+	}
+	applying, applied := drained(ctx, p.o.Drain)
+	defer applied()
+
 	// --ff-only: Git applies the update, or writes nothing. It refuses when a file the update
 	// changes has a local edit, and when an untracked file is in the way, and leaves every other
 	// local edit as it is. --no-overwrite-ignore: Git writes over an untracked file that a .gitignore
 	// hides, unless it is told not to, and a file that the application keeps out of the repository,
 	// a .env or a local config, is the application's all the same.
-	if _, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to); err != nil {
+	if _, err := p.git.RunTimeout(applying, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to); err != nil {
 		return Result{}, p.mergeFailed(ctx, from, to, err)
 	}
 	return Result{Outcome: Advanced, Branch: p.o.Branch, From: from, To: to, Recovery: recovery, Warning: p.tidyRecovery(ctx, refs)}, nil
+}
+
+// drained returns the context of a command that a stop of ctx does not cut off, and the function that
+// says that the command is over. The command goes on after ctx is done, and is stopped drain after that,
+// when it has not ended.
+func drained(ctx context.Context, drain time.Duration) (context.Context, func()) {
+	running, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	over := make(chan struct{})
+	go func() {
+		select {
+		case <-over:
+			return
+		case <-ctx.Done():
+		}
+		timer := time.NewTimer(drain)
+		defer timer.Stop()
+		select {
+		case <-over:
+		case <-timer.C:
+			cancel(context.Cause(ctx))
+		}
+	}()
+	return running, func() {
+		close(over)
+		cancel(nil)
+	}
 }
 
 // mergeFailed turns the failure of the fast-forward into its reason, and names the files that are

@@ -467,6 +467,12 @@ func (a *agent) checkoutOptions() (checkout.Options, error) {
 // runCheckout runs the checkout once and turns what came of it into a result of the check, and
 // returns what it made.
 func (a *agent) runCheckout(ctx context.Context, options checkout.Options) (preflight.Result, checkout.Result) {
+	// A Git command that was stopped in the middle of a write leaves a lock file that fails every command after
+	// it. The writer lock is held and no command runs, so what is there is stale (docs/adr/0028).
+	cleared, err := clearLocks(ctx, options.Layout.GitDir, a.fence)
+	if err != nil {
+		return failedCheckout(err), checkout.Result{}
+	}
 	made, err := a.Checkout(ctx, options)
 	if err != nil {
 		return failedCheckout(err), checkout.Result{}
@@ -481,6 +487,9 @@ func (a *agent) runCheckout(ctx context.Context, options checkout.Options) (pref
 			options.Layout.WorkTree, made.Branch, commit)
 	default:
 		message = fmt.Sprintf("reopened the checkout of the branch %s (%s) in %s", made.Branch, commit, options.Layout.WorkTree)
+	}
+	if note := clearedNote(cleared); note != "" {
+		message += "; " + note
 	}
 	return preflight.Result{Check: CheckCheckout, Outcome: preflight.Passed, Message: message}, made
 }

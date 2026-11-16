@@ -94,21 +94,31 @@ func (l *pulls) once(ctx context.Context) bool {
 	if l.puller == nil {
 		made, err := l.a.NewPuller(l.options)
 		if err != nil {
-			return l.report(ctx, pull.Result{}, fmt.Errorf("the pull cannot be set up: %w", err))
+			return l.report(ctx, pull.Result{}, fmt.Errorf("the pull cannot be set up: %w", err), nil)
 		}
 		l.puller = made
 	}
+	// A Git command that was stopped in the middle of a write leaves a lock file that fails every command after
+	// it. The writer lock is held and no command runs, so what is there is stale (docs/adr/0028).
+	cleared, err := clearLocks(ctx, l.options.Layout.GitDir, l.a.fence)
+	if err != nil {
+		return l.report(ctx, pull.Result{}, clearFailed(err), cleared)
+	}
 	result, err := l.puller.Pull(ctx)
-	return l.report(ctx, result, err)
+	return l.report(ctx, result, err, cleared)
 }
 
 // report publishes and logs the result of a pull, unless the agent was told to stop in the middle of it:
-// a pull that was cut short says nothing about the repository.
-func (l *pulls) report(ctx context.Context, result pull.Result, err error) bool {
+// a pull that was cut short says nothing about the repository. It says too which lock files were removed
+// before the pull.
+func (l *pulls) report(ctx context.Context, result pull.Result, err error, cleared []string) bool {
 	if ctx.Err() != nil {
 		return false
 	}
 	checked, failed := pullResult(result, err)
+	if note := clearedNote(cleared); note != "" {
+		checked.Message += "; " + note
+	}
 	l.p.pulling = &checked
 	l.a.publish(l.p)
 	l.logged = l.a.logChanges("pull", []preflight.Result{checked}, l.logged)

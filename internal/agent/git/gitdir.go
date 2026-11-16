@@ -73,8 +73,9 @@ var gitDirEntries = map[string]kind{
 }
 
 // lockSuffix ends the name of the lock file that Git makes next to a file it is changing. Only
-// a lock of a file that the agent makes is accepted: a name of another kind that ends in it is
-// not a lock, and is refused like any other name.
+// a lock of a file that the agent makes, and of packed-refs, which a command that removes a ref
+// locks, is accepted: a name of another kind that ends in it is not a lock, and is refused like
+// any other name.
 const lockSuffix = ".lock"
 
 // notThere are files inside the object directory that make Git read objects from another
@@ -124,10 +125,8 @@ func VerifyGitDir(gitDir, workTree string) error {
 func checkEntry(root *os.Root, gitDir, name string) error {
 	path := filepath.Join(gitDir, name)
 	want, known := gitDirEntries[name]
-	if base, isLock := strings.CutSuffix(name, lockSuffix); isLock {
-		if baseKind, makes := gitDirEntries[base]; makes && baseKind == kindFile {
-			want, known = kindFile, true
-		}
+	if topLockName(name) {
+		want, known = kindFile, true
 	}
 	if !known {
 		return &GitDirError{Path: path, Problem: "is not a file that the agent makes in a Git directory"}
