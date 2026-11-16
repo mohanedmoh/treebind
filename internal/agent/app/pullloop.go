@@ -44,8 +44,8 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 	phase := syncloop.Phase(a.Config.Namespace, a.Config.Name, interval)
 	options := pull.Options{
 		Layout: done.options.Layout, URL: done.options.URL, Branch: done.made.Branch, Git: done.options.Git,
-		// The lock is checked immediately before an update is written. There is no guard until the
-		// recovery ref and the cap on deletions of #40 are.
+		// The lock is checked immediately before an update is written. The cap on deletions and the
+		// recovery ref are the pull's own, with the numbers that it has (docs/adr/0026).
 		Fence: a.fence,
 	}
 	l := &pulls{a: a, p: p, options: options}
@@ -124,6 +124,12 @@ func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 	switch result.Outcome {
 	case pull.Advanced:
 		message = fmt.Sprintf("advanced the checkout on the branch %s from %s to %s", result.Branch, shortOf(result.From), shortOf(result.To))
+		if result.Recovery != "" {
+			message += "; the commit it was at is kept as " + result.Recovery
+		}
+		if result.Warning != "" {
+			message += "; " + result.Warning
+		}
 	case pull.Ahead:
 		message = fmt.Sprintf("the checkout is ahead of the branch %s (%s): it has commits that the repository does not have yet, "+
 			"and there is nothing to pull", result.Branch, shortOf(result.To))
@@ -136,8 +142,10 @@ func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 // backsOff says whether a pull that failed for the reason is followed by a longer wait (docs/adr/0024). It
 // is the case when the repository did not answer, or the agent could not use its volume: asking again
 // sooner is of no use, and asking a host that fails again and again is what R-19 is about. It is not the
-// case when the repository answered and what is wrong is a file, a commit, a branch or the Git directory,
-// which a person puts right: the next pull should find it at once when they have, and costs one question.
+// case when the repository answered and what is wrong is a file, a commit, a branch, the Git directory or an
+// update that removes too many files, which a person puts right: the next pull should find it at once when
+// they have, and costs one question. Refused is only the fence now, a lock that could not be checked, which is
+// a volume that does not answer (docs/adr/0026).
 func backsOff(reason string) bool {
 	switch reason {
 	case pull.ReasonFetchFailed, pull.ReasonPullFailed, pull.ReasonRefused:

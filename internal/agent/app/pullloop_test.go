@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -40,6 +41,11 @@ import (
 const (
 	testInterval = 20 * time.Second
 	otherCommit  = "fedcba9876543210fedcba9876543210fedcba98"
+
+	// The files and the directory of the tests that pull from a real repository.
+	jsonA, jsonB, jsonC, jsonD = "a.json", "b.json", "c.json", "d.json"
+	subDir                     = "dashboards"
+	reasonTooMany              = "TooManyDeletions"
 )
 
 // loopClock says how long every wait of the loop is, and lets it pass at once, so that no test waits.
@@ -324,6 +330,30 @@ func TestAPullThatNeedsAPersonKeepsTheIntervalAndIsReportedUntilTheyAct(t *testi
 	}
 	if got, _ := pullCheck(t, r); got.Reason != "Diverged" || got.Outcome != outcomeFailed {
 		t.Errorf("pull = %+v, want the last of them, Diverged, in the report", got)
+	}
+}
+
+func TestAPullThatTheCapRefusedKeepsTheIntervalAndIsLoggedOnce(t *testing.T) {
+	f := newFakePuller()
+	clock := &loopClock{}
+	change, _ := withPuller(f, clock)
+	r := start(t, change)
+	f.awaitBegun(t)
+
+	refused := failedPull(pull.ReasonTooManyDeletions, "the update would remove 101 file(s) from the directory, more than the 100 that Treebind removes in one update")
+	for range 4 {
+		f.answer(t, refused)
+	}
+
+	waits := clock.waits()
+	if want := []time.Duration{testInterval, testInterval, testInterval, testInterval}; !slices.Equal(waits[1:5], want) {
+		t.Errorf("waits = %v, want the interval after each: it needs a person, and a slower poll does not remove files", waits)
+	}
+	if got, _ := pullCheck(t, r); got.Reason != reasonTooMany || got.Outcome != outcomeFailed {
+		t.Errorf("pull = %+v, want TooManyDeletions in the report", got)
+	}
+	if n := r.logs.count("reason=TooManyDeletions"); n != 1 {
+		t.Errorf("a refusal that repeated 4 times was logged %d times, want once\n%s", n, r.logs.String())
 	}
 }
 
@@ -737,15 +767,16 @@ func TestTheFenceOfAnAgentWithNoLockLetsTheUpdateThrough(t *testing.T) {
 
 func TestOnlyAPullThatTheRepositoryOrTheVolumeCouldNotAnswerMakesTheNextWaitGrow(t *testing.T) {
 	cases := map[string]bool{
-		pull.ReasonFetchFailed:   true,
-		pull.ReasonPullFailed:    true,
-		pull.ReasonRefused:       true,
-		pull.ReasonBlocked:       false,
-		pull.ReasonDiverged:      false,
-		pull.ReasonBranchGone:    false,
-		pull.ReasonReservedPath:  false,
-		pull.ReasonGitDirUnsafe:  false,
-		"AReasonOfALaterRelease": false,
+		pull.ReasonFetchFailed:      true,
+		pull.ReasonPullFailed:       true,
+		pull.ReasonRefused:          true,
+		pull.ReasonBlocked:          false,
+		pull.ReasonTooManyDeletions: false,
+		pull.ReasonDiverged:         false,
+		pull.ReasonBranchGone:       false,
+		pull.ReasonReservedPath:     false,
+		pull.ReasonGitDirUnsafe:     false,
+		"AReasonOfALaterRelease":    false,
 	}
 	for reason, want := range cases {
 		if got := backsOff(reason); got != want {
@@ -772,6 +803,20 @@ func TestTurnsWhatAPullDidIntoAResultAndWhetherToWaitLonger(t *testing.T) {
 			wantMessage: "advanced the checkout on the branch main from no commit yet to fedcba987654",
 		},
 		{
+			name:        "advanced a checkout that had a commit, which is kept",
+			result:      pull.Result{Outcome: pull.Advanced, Branch: testBranch, From: testCommit, To: otherCommit, Recovery: "refs/treebind/recovery/00000007"},
+			wantOutcome: preflight.Passed,
+			wantMessage: "advanced the checkout on the branch main from 0123456789ab to fedcba987654; the commit it was at is kept as refs/treebind/recovery/00000007",
+		},
+		{
+			name: "advanced, with an old recovery ref that could not be removed",
+			result: pull.Result{Outcome: pull.Advanced, Branch: testBranch, From: testCommit, To: otherCommit,
+				Recovery: "refs/treebind/recovery/00000007", Warning: "the old recovery ref refs/treebind/recovery/00000002 cannot be removed: locked"},
+			wantOutcome: preflight.Passed,
+			wantMessage: "advanced the checkout on the branch main from 0123456789ab to fedcba987654; the commit it was at is kept as " +
+				"refs/treebind/recovery/00000007; the old recovery ref refs/treebind/recovery/00000002 cannot be removed: locked",
+		},
+		{
 			name:        "at the tip with no commit, as an empty repository is",
 			result:      pull.Result{Outcome: pull.UpToDate, Branch: "main"},
 			wantOutcome: preflight.Passed,
@@ -791,6 +836,13 @@ func TestTurnsWhatAPullDidIntoAResultAndWhetherToWaitLonger(t *testing.T) {
 			wantOutcome: preflight.Failed,
 			wantReason:  "Blocked",
 			wantMessage: "a file has a local edit",
+		},
+		{
+			name:        "an update that removes too many files, which needs a person",
+			err:         &pull.Error{Reason: pull.ReasonTooManyDeletions, Message: "the update would remove 101 file(s)"},
+			wantOutcome: preflight.Failed,
+			wantReason:  reasonTooMany,
+			wantMessage: "the update would remove 101 file(s)",
 		},
 		{
 			name:         "an error that wraps one of a pull",
@@ -857,12 +909,12 @@ func (g gate) pass() { g.ch <- time.Time{} }
 
 func TestAnUpdateOfTheRepositoryReachesTheCheckoutWhileAnEditOfTheApplicationIsKept(t *testing.T) {
 	f := gittest.New(t)
-	f.Publish("main", map[string]string{"a.json": "a\n", "b.json": "b\n"})
-	where := f.Layout("dashboards")
+	f.Publish(testBranch, map[string]string{jsonA: "a\n", jsonB: "b\n"})
+	where := f.Layout(subDir)
 	clock := newGatedClock()
 	r := start(t, func(o *Options) {
-		o.Config.MountPath, o.Config.SubPath = f.Claim, "dashboards"
-		o.Config.RepoURL, o.Config.RepoBranch = f.URL, "main"
+		o.Config.MountPath, o.Config.SubPath = f.Claim, subDir
+		o.Config.RepoURL, o.Config.RepoBranch = f.URL, testBranch
 		o.Config.SyncInterval = testInterval
 		o.SyncClock, o.SyncRandom = clock, func() float64 { return 0.5 }
 		// The checkout and the pulls are the ones of the packages, with the stand-in for ssh of the fixture.
@@ -892,26 +944,26 @@ func TestAnUpdateOfTheRepositoryReachesTheCheckoutWhileAnEditOfTheApplicationIsK
 	}
 
 	// A commit in the repository reaches the work tree at the next pull.
-	f.Publish("main", map[string]string{"a.json": "a, changed\n", "c.json": "c\n"})
+	f.Publish(testBranch, map[string]string{jsonA: "a, changed\n", jsonC: "c\n"})
 	second.pass()
 	third := clock.wait(t)
 	if got := check(); got.Outcome != outcomePassed || !strings.Contains(got.Message, "advanced the checkout on the branch main") {
 		t.Errorf("pull = %+v, want it passed, advanced", got)
 	}
-	if gittest.Read(t, where, "a.json") != "a, changed\n" || gittest.Read(t, where, "c.json") != "c\n" {
+	if gittest.Read(t, where, jsonA) != "a, changed\n" || gittest.Read(t, where, jsonC) != "c\n" {
 		t.Error("the update of the repository is not in the work tree")
 	}
 
 	// An edit of the application that the next update would write over is kept, and said.
-	gittest.Write(t, where, "b.json", "the application's own\n")
-	f.Publish("main", map[string]string{"b.json": "b, changed\n"})
+	gittest.Write(t, where, jsonB, "the application's own\n")
+	f.Publish(testBranch, map[string]string{jsonB: "b, changed\n"})
 	third.pass()
 	fourth := clock.wait(t)
 	got := check()
-	if got.Outcome != outcomeFailed || got.Reason != "Blocked" || !strings.Contains(got.Message, "b.json") {
+	if got.Outcome != outcomeFailed || got.Reason != "Blocked" || !strings.Contains(got.Message, jsonB) {
 		t.Errorf("pull = %+v, want it blocked, with the file that is in the way", got)
 	}
-	if gittest.Read(t, where, "b.json") != "the application's own\n" {
+	if gittest.Read(t, where, jsonB) != "the application's own\n" {
 		t.Error("the edit of the application was written over")
 	}
 	if fourth.d != testInterval {
@@ -919,16 +971,83 @@ func TestAnUpdateOfTheRepositoryReachesTheCheckoutWhileAnEditOfTheApplicationIsK
 	}
 
 	// Once the file is as the repository has it, the pull goes on by itself.
-	f.InCheckout(where, "checkout", "--", "b.json")
+	f.InCheckout(where, "checkout", "--", jsonB)
 	fourth.pass()
 	fifth := clock.wait(t)
 	if got := check(); got.Outcome != outcomePassed || !strings.Contains(got.Message, "advanced") ||
-		gittest.Read(t, where, "b.json") != "b, changed\n" {
-		t.Errorf("pull = %+v, b.json = %q, want it advanced, with the file as the repository has it", got, gittest.Read(t, where, "b.json"))
+		gittest.Read(t, where, jsonB) != "b, changed\n" {
+		t.Errorf("pull = %+v, b.json = %q, want it advanced, with the file as the repository has it", got, gittest.Read(t, where, jsonB))
 	}
 	fifth.pass()
 	clock.wait(t)
 	if n := strings.Count(r.logs.String(), "msg=pull "); n != 5 {
 		t.Errorf("the pulls were logged %d times, want 5: the tip, an advance, a block, an advance and the tip\n%s", n, r.logs.String())
+	}
+}
+
+func TestAnUpdateThatRemovesTooManyFilesIsNotAppliedUntilThePersonHasRemovedThem(t *testing.T) {
+	f := gittest.New(t)
+	f.Publish(testBranch, map[string]string{jsonA: "a\n", jsonB: "b\n", jsonC: "c\n", jsonD: "d\n"})
+	where := f.Layout(subDir)
+	clock := newGatedClock()
+	r := start(t, func(o *Options) {
+		o.Config.MountPath, o.Config.SubPath = f.Claim, subDir
+		o.Config.RepoURL, o.Config.RepoBranch = f.URL, testBranch
+		o.Config.SyncInterval = testInterval
+		o.SyncClock, o.SyncRandom = clock, func() float64 { return 0.5 }
+		o.Checkout = func(ctx context.Context, options checkout.Options) (checkout.Result, error) {
+			options.Git, options.FetchTimeout = f.GitOptions(), time.Minute
+			return checkout.Open(ctx, options)
+		}
+		o.NewPuller = func(options pull.Options) (Puller, error) {
+			options.Git = f.GitOptions()
+			// A cap that a test can reach with a few files. The agent leaves it to the pull, which has its own.
+			options.MaxDeletions = 2
+			return pull.New(options)
+		}
+	})
+	check := func() status.Check {
+		got, _ := pullCheck(t, r)
+		return got
+	}
+	// The first pull, after the phase: nothing is new.
+	clock.wait(t).pass()
+	waiting := clock.wait(t)
+
+	// An update that removes three files, with the cap at two, is refused, and the files stay.
+	f.Publish(testBranch, map[string]string{jsonA: "", jsonB: "", jsonC: ""})
+	waiting.pass()
+	waiting = clock.wait(t)
+	got := check()
+	if got.Outcome != outcomeFailed || got.Reason != reasonTooMany || !strings.Contains(got.Message, "3 file(s)") {
+		t.Fatalf("pull = %+v, want it refused for 3 files", got)
+	}
+	if waiting.d != testInterval {
+		t.Errorf("the wait after TooManyDeletions is %v, want the interval: it needs a person, and not a slower poll", waiting.d)
+	}
+	if !gittest.Exists(filepath.Join(where.WorkTree, jsonA)) {
+		t.Error("a file is gone although the update was refused")
+	}
+
+	// It is tried again and says the same, and is logged once.
+	waiting.pass()
+	waiting = clock.wait(t)
+	if n := r.logs.count("reason=TooManyDeletions"); n != 1 {
+		t.Errorf("a refusal that was found twice was logged %d times, want once\n%s", n, r.logs.String())
+	}
+
+	// A person removes one of the files, so that the update removes two, which the cap allows.
+	if err := os.Remove(filepath.Join(where.WorkTree, jsonA)); err != nil {
+		t.Fatal(err)
+	}
+	waiting.pass()
+	clock.wait(t)
+	got = check()
+	if got.Outcome != outcomePassed || !strings.Contains(got.Message, "advanced the checkout") ||
+		!strings.Contains(got.Message, "the commit it was at is kept as refs/treebind/recovery/00000001") {
+		t.Errorf("pull = %+v, want it advanced, with the recovery ref in the message", got)
+	}
+	if gittest.Exists(filepath.Join(where.WorkTree, jsonB)) || !gittest.Exists(filepath.Join(where.WorkTree, jsonD)) {
+		t.Error("the files of the update are not as the update has them")
 	}
 }

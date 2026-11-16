@@ -4,7 +4,8 @@ Once the checkout is made (see [the checkout](checkout.md)), the agent pulls: ev
 seconds when it is not set, it asks the repository for the tip of the branch, and if there is a newer
 commit it brings it into your directory. The decisions behind it are in
 [ADR 0020](adr/0020-the-agent-pulls-by-fast-forward-and-never-writes-over-a-local-edit.md) and
-[ADR 0024](adr/0024-the-agent-pulls-on-a-schedule-that-spreads-the-load-and-waits-longer-while-the-repository-fails.md).
+[ADR 0024](adr/0024-the-agent-pulls-on-a-schedule-that-spreads-the-load-and-waits-longer-while-the-repository-fails.md),
+and what it does before it removes files is in [ADR 0026](adr/0026-the-agent-refuses-an-update-that-removes-many-files-and-keeps-the-commit-it-came-from.md).
 
 The result is the check `Pull` in the agent's report, and a line in its log when what it says changes:
 
@@ -21,7 +22,11 @@ kubectl describe treebind <name>
 - **It applies only a fast-forward.** When the repository and your directory each have commits that the other
   lacks, nothing is written, and the check says so. What wins is the conflict policy of the Treebind, which
   comes later.
-- **It applies the deletions of the branch.** A file that the branch removed is removed from your directory.
+- **It applies the deletions of the branch, up to a cap.** A file that the branch removed is removed from your
+  directory. An update that would remove more than 100 files from it, or every file of the branch, is not
+  applied, and the check says `TooManyDeletions`. See [the deletion guard](deletion-guard.md).
+- **It keeps where your directory was before an update.** The commit it was at is kept under
+  `refs/treebind/recovery/<n>`, so that removed files can be got back. The same page says how.
 - **It asks cheaply.** Most pulls are one question to the repository, "what is the tip?", and fetch nothing.
 - **It spreads its questions.** Each wait is the interval give or take a fifth, and the first pull of a Treebind
   comes after a point in the interval that comes from its name, so that many Treebinds on one Git host do not
@@ -35,7 +40,7 @@ kubectl describe treebind <name>
 | Result | What it means | What to do |
 | :-- | :-- | :-- |
 | `Passed`, at the tip | Your directory has what the branch has | Nothing |
-| `Passed`, advanced | The agent brought in new commits | Nothing |
+| `Passed`, advanced | The agent brought in new commits. The message names the recovery ref that keeps the commit your directory was at | Nothing |
 | `Passed`, ahead | Your directory has commits that the repository does not have yet | Nothing: they are pushed when push is there |
 | `Skipped` `NotChecked` | The volume, the lock or the checkout has not passed, or the first pull is not due yet | Read the check that failed |
 
@@ -51,6 +56,7 @@ with no restart.
 | `BranchGone` | The repository has no such branch any more | Put the branch back, or set `spec.repository.branch` to one it has | At the interval |
 | `ReservedPath` | The update brings a file named `.treebind` into a directory that holds the agent's state | Use a `subPath`, or rename the file | At the interval |
 | `GitDirUnsafe` | The Git directory holds something the agent did not put there | See [the Git directory](git-directory.md) | At the interval |
+| `TooManyDeletions` | The update would remove more than 100 files from your directory, or every file of the branch. The message says how many and names some. Nothing was written | Check the branch. If the update is meant, remove the files yourself, as [the deletion guard](deletion-guard.md) says, and the next pull goes on | At the interval |
 | `FetchFailed` | The repository cannot be reached, the key is refused, or the host key is not in the known hosts. The message has what Git said | Check the address, the deploy key and the known hosts. The agent recovers by itself | Longer, up to ten minutes |
 | `PullFailed` | The agent could not read or write the volume, or the checkout is not what a pull expects, or it could not set up what pulls | The message says which | Longer, up to ten minutes |
 | `Refused` | The update was not applied because the agent could not check that it still holds the writer lock | The agent stops with the exit code 3 if the lock is lost, and its pod's restart waits for the lock again | Longer, up to ten minutes |
@@ -59,9 +65,10 @@ with no restart.
 
 - **The first pull is up to one interval after the checkout.** It is not a delay of the checkout: the checkout
   has just fetched the branch.
-- **Commits on the branch that remove files remove them from your directory.** There is no cap on deletions and
-  no recovery ref yet (#40), so keep that in mind for a repository that is rewritten.
-- **A pull that is `Blocked` or `Diverged` is tried again at every interval**, and is logged once. It costs one
-  question to the repository while the tip does not change.
+- **Commits on the branch that remove files remove them from your directory**, up to 100 files in one update.
+  The commit your directory was at is kept, and [the deletion guard](deletion-guard.md) says how to get files
+  back from it.
+- **A pull that is `Blocked`, `Diverged` or `TooManyDeletions` is tried again at every interval**, and is logged
+  once. It costs one question to the repository while the tip does not change.
 - **Changing `spec.sync.interval` replaces the sync pod.** The new pod uses the new interval.
 - **The agent is not ready after a pull.** Readiness after the first sync is a later change.
