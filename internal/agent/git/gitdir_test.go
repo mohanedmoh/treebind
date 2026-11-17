@@ -114,7 +114,7 @@ func TestVerifyGitDirAcceptsWhatGitWritesWhileItWorks(t *testing.T) {
 	r.plain(cmdAdd, "b.txt")
 	r.plain("-c", "user.name=T", "-c", "user.email=t@example.com", cmdCommit, "-q", "-m", "second")
 	r.plain("checkout", "-q", "-b", "other", "HEAD~1")
-	for _, name := range []string{indexLock, "HEAD.lock", "config.lock"} {
+	for _, name := range []string{indexLock, lockHead, lockConfig} {
 		writeInGitDir(t, r, name, "")
 	}
 
@@ -419,13 +419,17 @@ func TestReplaceRefsAreNotUsed(t *testing.T) {
 	}
 }
 
-func TestVerifyGitDirAcceptsTheLockOfAFileTheAgentMakesAndNoOtherName(t *testing.T) {
+func TestVerifyGitDirAcceptsTheLockOfAFileTheAgentWritesAndNoOtherName(t *testing.T) {
+	// packed-refs.lock is the lock of a file that the agent does not make, and is accepted: a command that
+	// removes a ref locks it whether or not there are packed refs, and a command that is killed leaves it
+	// (docs/adr/0028). The file itself is refused, as the tests above say.
 	tests := []struct {
 		name   string
 		accept bool
 	}{
 		{indexLock, true}, {"HEAD.lock", true}, {"config.lock", true}, {"ORIG_HEAD.lock", true}, {"COMMIT_EDITMSG.lock", true},
-		{"evil.lock", false}, {"commondir.lock", false}, {"shallow.lock", false}, {"packed-refs.lock", false},
+		{"packed-refs.lock", true},
+		{"evil.lock", false}, {"commondir.lock", false}, {"shallow.lock", false},
 		{"hooks.lock", false}, {"info.lock", false}, {"objects.lock", false}, {".lock", false}, {"lock", false},
 		{"index.lockx", false}, {"index.lock.lock", false},
 	}
@@ -437,10 +441,10 @@ func TestVerifyGitDirAcceptsTheLockOfAFileTheAgentMakesAndNoOtherName(t *testing
 			err := VerifyGitDir(r.gitDir, r.work)
 
 			if tt.accept && err != nil {
-				t.Errorf("the lock of a file the agent makes is refused: %v", err)
+				t.Errorf("the lock of a file the agent writes is refused: %v", err)
 			}
 			if !tt.accept && !errors.Is(err, ErrGitDirUntrusted) {
-				t.Errorf("error = %v, want %s refused: it is not the lock of a file the agent makes", err, tt.name)
+				t.Errorf("error = %v, want %s refused: it is not the lock of a file the agent writes", err, tt.name)
 			}
 		})
 	}

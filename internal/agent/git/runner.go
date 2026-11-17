@@ -54,9 +54,12 @@ const (
 	// reason a command failed is its last lines.
 	stderrLimit = 64 << 10
 
-	// killGrace is how long Wait waits for the output of a killed command to
-	// close. A process that left the group, which an ssh with a control master
-	// can, holds the pipe open, and would otherwise hold the call.
+	// termGrace is how long a command that is told to stop has to end before it is killed (docs/adr/0028).
+	termGrace = 3 * time.Second
+
+	// killGrace is how long Wait waits for the output of a command to close, once the group has been
+	// killed, and after the command itself has ended. A process that left the group, which an ssh with
+	// a control master can, holds the pipe open, and would otherwise hold the call.
 	killGrace = 2 * time.Second
 
 	// defaultPath is where the programs that Git starts itself are looked for.
@@ -434,6 +437,8 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, args []string) 
 	if len(args) > 0 {
 		sub = args[0]
 	}
+	// While this runs, no lock file in the Git directory is known to be stale (RemoveStaleLocks).
+	defer begin(r.gitDir)()
 	if r.verify {
 		if err := VerifyGitDir(r.gitDir, r.workTree); err != nil {
 			return Result{}, &Error{Subcommand: sub, Cause: err}
@@ -461,20 +466,35 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, args []string) 
 // command builds the command without starting it. The process gets a group of its
 // own, so that a timeout can stop it and what it started, an ssh for one, and
 // not only the process that Git started first.
+//
+// A command that is stopped is told to end first, with SIGTERM to the whole group, and is killed,
+// the group with it, when it is still there after termGrace. Git removes the lock files that it holds
+// when it is told to end, and cannot when it is killed (docs/adr/0028), so a stop that kills at once
+// leaves a lock that fails every command after it. The kill after the grace is sent whether or not
+// the leader has ended: what Git started and did not end for SIGTERM, an ssh for one, is killed too.
+// The system does not give the number of a group away while a process is in it, and in the process
+// namespace of the sync pod a number is not reused within seconds.
 func (r *Runner) command(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, r.git, slices.Concat(r.settings, args)...)
 	cmd.Dir = r.workTree
 	cmd.Env = r.env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
+		pid := cmd.Process.Pid
 		// A negative pid is the whole group.
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		err := syscall.Kill(-pid, syscall.SIGTERM)
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		time.AfterFunc(termGrace, func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+		return nil
 	}
-	cmd.WaitDelay = killGrace
+	// Wait gives up on the output of the command, and kills the first process of it, only when the
+	// group has had its chance to end and to be killed.
+	cmd.WaitDelay = termGrace + killGrace
 	return cmd
 }
 

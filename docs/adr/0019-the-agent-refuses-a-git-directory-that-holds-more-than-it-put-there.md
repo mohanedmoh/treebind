@@ -37,8 +37,9 @@ when Git turns out to write one.
 - **The entries at the top of the Git directory** are the ones that `init` with an empty
   template and the subcommands the Runner allows write: `HEAD`, `config`, `index`,
   `FETCH_HEAD`, `ORIG_HEAD`, `COMMIT_EDITMSG`, `MERGE_HEAD`, `MERGE_MSG`, `MERGE_MODE`,
-  `AUTO_MERGE`, `objects`, `refs`, `logs`, `hooks` and `info`, and a `.lock` file. A link is
-  refused in any of them. `hooks` and `info` have to be empty, which covers `info/attributes`,
+  `AUTO_MERGE`, `objects`, `refs`, `logs`, `hooks` and `info`, and the `.lock` file of each of
+  the files among them (and, since ADR 0028, `packed-refs.lock`, which a command that removes a
+  ref leaves when it is killed). A link is refused in any of them. `hooks` and `info` have to be empty, which covers `info/attributes`,
   `info/exclude` and `info/grafts`. Anything else is refused, among it `commondir`, `gitdir`,
   `shallow`, `packed-refs`, `worktrees`, `modules` and `config.worktree`, which send Git
   somewhere else or change the history it sees.

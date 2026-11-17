@@ -98,8 +98,8 @@ or read from somewhere else, and the agent cannot switch all of it off from the 
 - **`objects/info/alternates` and `objects/info/http-alternates`** have to be absent, so that no
   object is read from another place.
 - **At the top of `.treebind/git`** only the files and directories that Git writes for the commands
-  the agent runs are taken. Anything else, such as `commondir`, `packed-refs` or a file of your
-  own, is refused, and so is a link.
+  the agent runs are taken, and the lock file that such a command leaves when it is killed. Anything
+  else, such as `commondir`, `packed-refs` or a file of your own, is refused, and so is a link.
 - **Replace refs** are not looked at but switched off for every command, so one in the refs
   changes nothing that Git sees.
 
@@ -130,6 +130,55 @@ config. The agent checks again, carries on, and reopens the checkout as it was. 
 empty `.treebind/git`. The agent then makes it again and makes the checkout as on a first start,
 which takes the files in the synced directory when they match the branch and refuses them with
 `DirectoryNotEmpty` when they do not. The commits that were not pushed are lost with it.
+
+## When Git was stopped in the middle of a write
+
+While Git writes it holds a lock file in `.treebind/git`, such as `index.lock` or `refs/heads/main.lock`, and
+removes it when it is done. A Git that is killed cannot, and every Git command after it fails with `Unable to
+create '...lock': File exists` until the file is gone.
+
+The agent stops Git gently. It tells a command to end first, and Git then removes its own lock files. It kills it
+only when it has not ended after 3 seconds. A stop of the pod does not cut off an update that is writing its
+files either: the update has up to 10 seconds to finish. What still kills Git is an out-of-memory kill, a lost
+node, and a pod that is killed when its termination grace period ends.
+
+Before it makes the checkout and before every pull, the agent looks for lock files that a stopped Git left. When
+it finds some, it checks that it still holds the writer lock, removes them, and says which in the check
+`Checkout` or `Pull` and in its log:
+
+```
+removed the lock file that a Git command that was stopped left: index.lock
+```
+
+It removes only a regular file named like the lock of a file that its Git commands write at the top of
+`.treebind/git` (`index.lock`, `HEAD.lock`, `ORIG_HEAD.lock`, `config.lock`, `FETCH_HEAD.lock`, `packed-refs.lock`)
+and the files that end in `.lock` under `refs`. It follows no link and leaves every other file. This is safe
+because one agent at a time writes to the checkout and it runs one Git command at a time, so a lock file that is
+there when none of its commands runs was left by one that ended. Do not run Git by hand in the sync pod while the
+agent works: the agent can remove the lock file that your command holds, and your command then fails. The reasons
+are in [ADR 0028](adr/0028-the-agent-stops-git-gently-and-removes-the-lock-files-that-a-stopped-git-leaves.md).
+
+## When an update was cut off in the middle of its files
+
+A Git that is killed while it applies an update leaves some of its files written. Before it applies an update, the
+agent writes a small file, `.treebind/updating`, with the commit the checkout is at and the commit the update goes
+to, and removes it when the update has been applied. A pull that finds it left puts the checkout back as it was before
+the update began, and then applies the update again, with every check a pull has. The `Pull` check says what it did:
+
+```
+the update from 0123456789ab to fedcba987654 was cut off, and was undone, and the next pull applies it again: 2 file(s) put back, 1 removed
+```
+
+It puts back a file that the update changed when the file is not there, or is the whole of the new file, or the start of
+it, which is what a write that was cut off leaves. It removes a file that the update added in the same cases. A file
+that is as it was is left. **A file that is anything else is yours and is left**, and the next pull is `Blocked` by it and
+names it, as for any local edit: revert it or remove it, and the next pull goes on. A file that the update deletes is left
+as it is. [ADR 0028](adr/0028-the-agent-stops-git-gently-and-removes-the-lock-files-that-a-stopped-git-leaves.md) has the
+rule for each state, the links, and the files too large to compare.
+
+If the index cannot be read, the agent makes it again from the commit the checkout is at before a pull, and says so. It
+does the same reset when the index holds files that are staged, which nothing here leaves for long. Your files are not
+touched: an edit stays an edit, as a change that is not staged.
 
 ## Room on the claim
 
