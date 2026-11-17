@@ -58,7 +58,42 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://<name>-sync-0.<name>-sync.<namespace>.svc:8080/status
 ```
 
-The agent's probes need no token: `/healthz` and `/readyz` on the same port.
+The agent's probes need no token: `/healthz` and `/readyz` on the same port, which [the next section](#the-probes)
+describes.
+
+## The probes
+
+The kubelet asks the sync pod two questions on port 8080 every 10 seconds, with a timeout of 2 seconds, and a probe that
+fails three times in a row counts as failed. Neither needs a token and neither says more than its word.
+
+| Probe | Path | Answers 200 | Answers 503 |
+| :-- | :-- | :-- | :-- |
+| Readiness | `/readyz` | A pull has passed since the agent started | No pull has passed yet |
+| Liveness | `/healthz` | The agent is running | Never, for now |
+
+**Ready means the agent has synced.** The first pull that ends `Passed` makes it ready: the checkout was at the tip of the
+branch (`UpToDate`), was brought to it (`Advanced`), or has commits that the repository does not have yet (`Ahead`). The
+`Pull` check in the report says `Passed` before the pod is ready, and the agent logs one line when it turns ready. The
+first pull comes up to one interval after the checkout ([pulling](pull.md)), and the kubelet sees the agent ready at its
+next probe, up to 10 seconds after that. The operator turns the `Ready` condition of the Treebind on when the sync pod is
+ready, so `kubectl wait --for=condition=Ready treebind/<name>` waits for the first pull.
+
+**It stays ready while the agent runs.** A pull that fails later (the repository does not answer, a file is in the way,
+the branches diverged, the update would remove too many files) does not make the pod not ready, because the files on the
+volume are as they were, and a Git host that is down for an hour should not turn every Treebind that uses it
+not ready. The `Pull` check says what the last pull found. A container that restarts starts not ready, because nothing in its
+memory says that the one before it synced, and is ready again after its first pull.
+
+| What you see | What it means | What to check |
+| :-- | :-- | :-- |
+| The pod is `0/1`, and `Ready` is `False` with `SyncPodNotReady`, for less than one interval after it started | The first pull is not due yet | Wait |
+| The same, for longer | No pull has passed | The `Pull` check: its reason says what is in the way, and [pulling](pull.md) says what to do |
+| The same, with `BranchGone` | The repository has no such branch, or no commit at all yet | Put a commit on the branch, or set `spec.repository.branch` to one that exists |
+| The same, and the `Pull` check is `Skipped` with `NotChecked` | The volume, the lock or the checkout has not passed | The check that failed, in the same report |
+
+While the pod is not ready, `kubectl describe pod` shows the event `Readiness probe failed: HTTP probe failed with
+statuscode: 503`. That is the probe doing its work and not a fault of its own. A repository that has no commit yet says
+`BranchGone` with the words "has no branch ... any more", which is also what a branch that was deleted says.
 
 ## How the keys reach the agent
 

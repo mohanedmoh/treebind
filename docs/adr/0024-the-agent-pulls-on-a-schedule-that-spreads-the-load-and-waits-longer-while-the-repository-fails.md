@@ -92,7 +92,7 @@ the checkout has not passed, until the first pull is due, and while the first pu
 names what matters: the files in the way, the number of commits on each side, what Git said. A line is
 logged when what the check says changes, and not at every poll, so the messages hold no time, and a pull that
 keeps finding the same thing is logged once. This is not readiness: the Treebind turns ready after the first
-sync (#48).
+pull that passes (ADR 0030).
 
 ## Consequences
 
@@ -106,5 +106,5 @@ sync (#48).
   intervals that are short, are still near one another. What this does for a host that many agents share is to
   make most pulls one cheap question, at moments that are not the same. A cap that holds across Treebinds needs
   the operator to give each agent its share, and is a separate change.
-- The first pull comes up to one interval after the checkout, which is the same wait as the readiness of #48 will
-  see after a restart.
+- The first pull comes up to one interval after the checkout, which is the same wait as the readiness of ADR 0030
+  sees after a restart.

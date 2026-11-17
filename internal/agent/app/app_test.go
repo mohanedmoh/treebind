@@ -342,7 +342,7 @@ func TestLogsAFailureOnceAndTheChangeWhenItEnds(t *testing.T) {
 }
 
 func TestProbes(t *testing.T) {
-	t.Run("alive at once, never ready, because nothing syncs yet", func(t *testing.T) {
+	t.Run("alive at once, and not ready, because nothing has been pulled", func(t *testing.T) {
 		r := start(t, nil)
 
 		if code, _ := r.get(t, status.HealthPath); code != http.StatusOK {
@@ -350,20 +350,6 @@ func TestProbes(t *testing.T) {
 		}
 		if code, _ := r.get(t, status.ReadyPath); code != http.StatusServiceUnavailable {
 			t.Errorf("readyz is %d, want 503", code)
-		}
-	})
-
-	t.Run("ready when the agent says it has synced", func(t *testing.T) {
-		var synced atomic.Bool
-		r := start(t, func(o *Options) { o.Ready = synced.Load })
-
-		if code, _ := r.get(t, status.ReadyPath); code != http.StatusServiceUnavailable {
-			t.Fatalf("readyz is %d before the sync", code)
-		}
-		synced.Store(true)
-
-		if code, _ := r.get(t, status.ReadyPath); code != http.StatusOK {
-			t.Errorf("readyz is %d after the sync, want 200", code)
 		}
 	})
 

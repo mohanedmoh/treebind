@@ -17,7 +17,8 @@ limitations under the License.
 // Package app runs the agent: it serves the status endpoint and the probes, it
 // checks the volume until the checks pass, takes the writer lock of the volume,
 // makes the checkout of the repository or opens the one that is there, and then
-// pulls the commits that the repository gains, every interval, for as long as it runs.
+// pulls the commits that the repository gains, every interval, for as long as it runs. It says it is
+// ready once a pull has ended well, and stays ready for as long as it runs (docs/adr/0030).
 //
 // A failed check does not end the agent. It stays up, says what failed in its
 // report, and checks again, so the operator can read the failure and the failure
@@ -127,9 +128,6 @@ type Options struct {
 	// when nil. A clock for a loop with scans has Now as well (syncloop.WallClock).
 	SyncClock  syncloop.Clock
 	SyncRandom func() float64
-	// Ready says whether the agent has synced. It defaults to never: there is no
-	// sync yet, and a Treebind must not turn ready before anything syncs.
-	Ready func() bool
 	// Logger defaults to the default logger of log/slog.
 	Logger *slog.Logger
 	// Listener, when set, is served instead of listening on Config.StatusAddr.
@@ -146,6 +144,9 @@ type agent struct {
 	startedAt time.Time
 	// checks is the latest results of the checks, as a report carries them.
 	checks atomic.Pointer[checked]
+	// synced is whether a pull has ended well, which is what the readiness probe answers. It is set once and
+	// never cleared: the agent does not turn not ready again while it runs (docs/adr/0030).
+	synced atomic.Bool
 	refuse *rateLimit
 	// holder names this start of the agent in the writer lock: the name of its pod, and a token
 	// that differs between two starts of it.
@@ -187,7 +188,7 @@ func Run(ctx context.Context, options Options) error {
 
 	handler := status.NewHandler(a.report, a.Verifier)
 	handler.Rejected = a.logRefused
-	server := status.Server(listener.Addr().String(), status.Routes(handler, a.Ready))
+	server := status.Server(listener.Addr().String(), status.Routes(handler, a.synced.Load))
 
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
@@ -243,9 +244,6 @@ func Run(ctx context.Context, options Options) error {
 func (a *agent) fillDefaults() {
 	if a.Preflight == nil {
 		a.Preflight = preflight.Volume
-	}
-	if a.Ready == nil {
-		a.Ready = func() bool { return false }
 	}
 	if a.Logger == nil {
 		a.Logger = slog.Default()

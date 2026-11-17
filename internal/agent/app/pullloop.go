@@ -38,7 +38,8 @@ type Puller interface {
 
 // pullLoop pulls into the checkout every interval until the agent stops, and says in the report how
 // each pull went (docs/adr/0024). A pull that fails does not end it: the agent stays up, says why, and
-// asks again, after a wait that grows while the repository or the volume keeps failing.
+// asks again, after a wait that grows while the repository or the volume keeps failing. The first pull
+// that passes makes the agent ready, and nothing that follows makes it not ready (docs/adr/0030).
 func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 	interval := a.Config.SyncInterval
 	phase := syncloop.Phase(a.Config.Namespace, a.Config.Name, interval)
@@ -122,6 +123,10 @@ func (l *pulls) report(ctx context.Context, result pull.Result, err error, clear
 	l.p.pulling = &checked
 	l.a.publish(l.p)
 	l.logged = l.a.logChanges("pull", []preflight.Result{checked}, l.logged)
+	// The report says that the pull passed before the probe says that the agent is ready.
+	if checked.Outcome == preflight.Passed && l.a.synced.CompareAndSwap(false, true) {
+		l.a.Logger.Info("the first pull passed, and the agent reports itself ready")
+	}
 	return failed
 }
 
