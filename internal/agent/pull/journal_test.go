@@ -132,3 +132,16 @@ func TestAJournalIsWrittenOverTheOneThatWasLeft(t *testing.T) {
 		t.Errorf("journal = %+v, want the last one", got)
 	}
 }
+
+func TestAJournalThatIsNotAFileIsAProblemAndNotAnUpdate(t *testing.T) {
+	p := journalWorld(t)
+	if err := os.Mkdir(journalFile(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, present, problem := p.readJournal()
+
+	if !present || problem == nil || !strings.Contains(problem.Error(), "not a file of the size of a journal") {
+		t.Errorf("present %v, problem %v, want a journal that is there, and is not a file", present, problem)
+	}
+}

@@ -35,14 +35,15 @@ import (
 
 // The names of the states of a file, and what the note says of them.
 const (
-	stateAsItWas   = "as it was"
-	stateAsUpdate  = "as the update has it"
-	stateEmpty     = "empty"
-	stateNotThere  = "not there"
-	noteOnePutBack = "1 file(s) put back"
-	noteLeft       = "are left as they are"
-	noteOneRemoved = "1 removed"
-	newLonger      = "new, longer\n"
+	stateAsItWas    = "as it was"
+	stateAsUpdate   = "as the update has it"
+	stateEmpty      = "empty"
+	stateNotThere   = "not there"
+	noteOnePutBack  = "1 file(s) put back"
+	noteLeft        = "are left as they are"
+	noteOneRemoved  = "1 removed"
+	newLonger       = "new, longer\n"
+	couldNotCompare = "could not be compared"
 )
 
 const (
@@ -168,7 +169,8 @@ func TestAFileThatTheUpdateChangedIsPutBackWhenItIsTheAgentsOwnAndLeftWhenItIsNo
 			func(f *gittest.Fixture) string { return f.Publish(branchMain, map[string]string{fileA: longA}) })
 	}
 	runStateCases(t, fileA, setup, []stateCase{
-		{name: stateAsItWas, plant: func(*testing.T, layout.Layout) {}, want: oldA, noted: []string{"0 file(s) put back"}},
+		{name: stateAsItWas, plant: func(*testing.T, layout.Layout) {}, want: oldA, noted: []string{"0 file(s) put back"},
+			notNoted: []string{noteLeft}},
 		{name: stateAsUpdate, plant: func(t *testing.T, l layout.Layout) { put(t, l, fileA, longA) }, want: oldA,
 			noted: []string{noteOnePutBack}},
 		{name: "the start of the one the update has", plant: func(t *testing.T, l layout.Layout) { put(t, l, fileA, prefixA) }, want: oldA,
@@ -182,7 +184,7 @@ func TestAFileThatTheUpdateChangedIsPutBackWhenItIsTheAgentsOwnAndLeftWhenItIsNo
 		{name: "longer than the one the update has", plant: func(t *testing.T, l layout.Layout) { put(t, l, fileA, longA+"and more\n") },
 			want: longA + "and more\n", noted: []string{noteLeft, fileA}, blocked: true},
 		{name: "a link, where the commits have a file", plant: func(t *testing.T, l layout.Layout) { plantLink(t, l, fileA, elsewhere) },
-			want: "->" + elsewhere, noted: []string{noteLeft, fileA}, blocked: true},
+			want: "->" + elsewhere, noted: []string{noteLeft, fileA}, notNoted: []string{couldNotCompare}, blocked: true},
 	})
 }
 
@@ -201,7 +203,7 @@ func TestAFileThatTheUpdateAddedIsRemovedWhenItIsTheAgentsOwnAndLeftWhenItIsNot(
 		{name: "a file of the application", plant: func(t *testing.T, l layout.Layout) { put(t, l, fileD, oldDFile) }, want: oldDFile,
 			noted: []string{"0 removed", noteLeft, fileD}, blocked: true},
 		{name: "a link, where the update adds a file", plant: func(t *testing.T, l layout.Layout) { plantLink(t, l, fileD, elsewhere) },
-			want: "->" + elsewhere, noted: []string{noteLeft, fileD}, blocked: true},
+			want: "->" + elsewhere, noted: []string{noteLeft, fileD}, notNoted: []string{couldNotCompare}, blocked: true},
 	})
 }
 
@@ -244,7 +246,7 @@ func TestABlobThatTheRunnerCannotHandOverIsRecognisedWhenWholeAndNeverAsAStart(t
 	runStateCases(t, fileA, setup, []stateCase{
 		{name: "whole", plant: func(t *testing.T, l layout.Layout) { put(t, l, fileA, big) }, want: oldA, noted: []string{noteOnePutBack}},
 		{name: "the start of it", plant: func(t *testing.T, l layout.Layout) { put(t, l, fileA, big[:1000]) }, want: big[:1000],
-			noted: []string{"could not be compared and are left as they are", fileA}, blocked: true},
+			noted: []string{couldNotCompare + " and are left as they are", fileA}, blocked: true},
 		{name: stateAsItWas, plant: func(*testing.T, layout.Layout) {}, want: oldA, notNoted: []string{"could not be compared"}},
 	})
 }
@@ -310,4 +312,25 @@ func TestAListOfFilesThatTheRunnerCannotHandOverPutsNothingBackAndSaysSo(t *test
 	if observed(u.l, fileA) != newLonger || journalPresent(u.world) {
 		t.Errorf("a.json = %q, journal present %v, want the file left, and the journal removed", observed(u.l, fileA), journalPresent(u.world))
 	}
+}
+
+func TestAFileOfTheApplicationWhereTheUpdateWantsADirectoryIsNotLookedInside(t *testing.T) {
+	// The update adds sub/x.json, and the application has a file called sub. Nothing can be under a file: the path
+	// is not there, which is not a file that could not be looked at.
+	u := plantedUpdate(t, map[string]string{fileA: oldA},
+		func(f *gittest.Fixture) string {
+			return f.Publish(branchMain, map[string]string{"sub/x.json": newDFile})
+		})
+	put(t, u.l, "sub", oldDFile)
+
+	note, failure := u.puller.repair(context.Background(), u.head())
+
+	if failure != nil || !strings.Contains(note, "0 file(s) put back, 0 removed") || strings.Contains(note, couldNotCompare) {
+		t.Fatalf("repair = %q, %v, want nothing to put back and nothing that could not be looked at", note, failure)
+	}
+	if gittest.Read(t, u.l, "sub") != oldDFile || journalPresent(u.world) {
+		t.Error("the file of the application was changed, or the journal is still there")
+	}
+	_, err := u.pull(t)
+	wantReason(t, err, ReasonBlocked)
 }
