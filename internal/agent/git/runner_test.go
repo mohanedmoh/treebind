@@ -238,6 +238,7 @@ func TestTheEnvironmentIsBuiltFromNothing(t *testing.T) {
 		"GIT_ALLOW_PROTOCOL":     "ssh:https",
 		"GIT_ATTR_SOURCE":        emptyTree,
 		"GIT_NO_REPLACE_OBJECTS": "1",
+		"GIT_OPTIONAL_LOCKS":     "0",
 	}
 	// With no bundle given, the system's is named, so that one that a repository
 	// config names is not used.
