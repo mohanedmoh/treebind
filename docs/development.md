@@ -63,12 +63,15 @@ replica, see [operator-replicas.md](operator-replicas.md#running-one-replica).
 The operator creates a one-replica StatefulSet and a headless Service, both named
 `treebind-sample-sync`, and reports `Ready` in the Treebind's status. The sample
 names a claim, a key Secret and a known hosts ConfigMap that the dev cluster does
-not have, so the sync pod stays `Pending` until you create them. Once it runs,
-the sync agent is still a stub that exits, so the pod restarts and `Ready` stays
-`False` until the agent lands. The sample still names a GitHub repository.
+not have, so the sync pod stays `Pending` until you create them. Once it runs, the
+agent makes the checkout and pulls, and `Ready` turns `True` after the first pull that
+passes ([the probes](agent-status.md#the-probes)). The sample still names a GitHub
+repository.
 
 The Git remote serves one empty bare repository, `sample.git`, over the git
-protocol. Reach it from the terminal through a port-forward:
+protocol. A Treebind that syncs from it is not ready while it has no commit: the
+pull says `BranchGone`, and `Ready` stays `False` until you push one. Reach it
+from the terminal through a port-forward:
 
 ```sh
 kubectl -n treebind-dev port-forward svc/git-remote 9418:9418 &

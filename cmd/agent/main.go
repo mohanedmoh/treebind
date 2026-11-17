@@ -18,8 +18,8 @@ limitations under the License.
 //
 // It checks the volume it works on, makes the checkout of the repository or opens
 // the one that is there, pulls into it, and, for a Treebind that syncs in both directions, looks for what
-// the application changed, and serves its status to the operator. It does not commit yet, so the agent never
-// reports itself ready.
+// the application changed, and serves its status to the operator. It reports itself ready once a pull has
+// passed, and it does not commit yet.
 package main
 
 import (
