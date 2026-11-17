@@ -36,8 +36,8 @@ func indexPath(w *world) string { return filepath.Join(w.l.GitDir, "index") }
 
 func TestAnIndexThatCannotBeReadIsMadeAgainAndTheEditsOfTheApplicationStayEdits(t *testing.T) {
 	for name, damage := range map[string][]byte{
-		"garbage": []byte("this is not an index\n"),
-		"empty":   {},
+		"garbage":  []byte("this is not an index\n"),
+		stateEmpty: {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := newWorld(t, subPath)

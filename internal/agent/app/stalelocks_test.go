@@ -38,6 +38,7 @@ import (
 )
 
 const (
+	updatedA     = "a, updated\n"
 	lockIndex    = "index.lock"
 	lockRemote   = "refs/remotes/origin/main.lock"
 	lockPacked   = "packed-refs.lock"
@@ -234,7 +235,7 @@ func TestAPullAfterAKilledGitGoesOnWithoutAPersonForTheIndexAndForARef(t *testin
 			if _, err := os.Lstat(stale); err != nil {
 				t.Fatalf("the killed Git left no %s: %v", c.lock, err)
 			}
-			tip := f.Publish(testBranch, map[string]string{jsonA: "a, updated\n", jsonC: "c\n"})
+			tip := f.Publish(testBranch, map[string]string{jsonA: updatedA, jsonC: "c\n"})
 			waiting.pass()
 			clock.wait(t)
 
@@ -243,7 +244,7 @@ func TestAPullAfterAKilledGitGoesOnWithoutAPersonForTheIndexAndForARef(t *testin
 				!strings.Contains(got.Message, c.said) {
 				t.Fatalf("pull = %+v, want it advanced, with the lock file that was removed said", got)
 			}
-			if gittest.Read(t, where, jsonA) != "a, updated\n" || f.InCheckout(where, "rev-parse", "HEAD") != tip {
+			if gittest.Read(t, where, jsonA) != updatedA || f.InCheckout(where, "rev-parse", "HEAD") != tip {
 				t.Error("the update is not in the checkout")
 			}
 			if _, err := os.Lstat(stale); err == nil {
@@ -382,7 +383,7 @@ func TestAnAgentThatStartsAfterAnUpdateWasKilledInTheMiddleOfItsFilesUndoesItAnd
 	}
 	// An agent applies an update, and its Git is killed in the middle of the files, as a kernel that is short of memory does.
 	held := f.HoldMerge(jsonB)
-	tip := f.Publish(testBranch, map[string]string{jsonA: "a, updated\n", jsonB: "b, updated\n", jsonC: "c, updated\n"})
+	tip := f.Publish(testBranch, map[string]string{jsonA: updatedA, jsonB: "b, updated\n", jsonC: "c, updated\n"})
 	options := pull.Options{Layout: where, URL: f.URL, Branch: testBranch, Git: f.GitOptions()}
 	options.Git.Git = held.Binary
 	killed, err := pull.New(options)
@@ -399,7 +400,7 @@ func TestAnAgentThatStartsAfterAnUpdateWasKilledInTheMiddleOfItsFilesUndoesItAnd
 	if err := <-done; err == nil {
 		t.Fatal("the pull of the merge that was killed did not fail")
 	}
-	if gittest.Read(t, where, jsonA) != "a, updated\n" || gittest.Exists(filepath.Join(where.WorkTree, jsonB)) {
+	if gittest.Read(t, where, jsonA) != updatedA || gittest.Exists(filepath.Join(where.WorkTree, jsonB)) {
 		t.Fatal("the update was not cut off in the middle of the files: the test does not hold the merge where it means to")
 	}
 
@@ -421,7 +422,7 @@ func TestAnAgentThatStartsAfterAnUpdateWasKilledInTheMiddleOfItsFilesUndoesItAnd
 			t.Errorf("pull = %+v, want it passed, with %q said", got, want)
 		}
 	}
-	if gittest.Read(t, where, jsonA) != "a, updated\n" || gittest.Read(t, where, jsonB) != "b, updated\n" ||
+	if gittest.Read(t, where, jsonA) != updatedA || gittest.Read(t, where, jsonB) != "b, updated\n" ||
 		gittest.Read(t, where, jsonC) != "c, updated\n" || f.InCheckout(where, "rev-parse", "HEAD") != tip {
 		t.Error("the update is not in the checkout")
 	}

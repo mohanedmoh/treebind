@@ -39,6 +39,10 @@ import (
 )
 
 const (
+	// What the tests of the Pull check give and look for.
+	recoveryRefSeven = "refs/treebind/recovery/00000007"
+	noRoute          = "no route to host"
+
 	testInterval = 20 * time.Second
 	otherCommit  = "fedcba9876543210fedcba9876543210fedcba98"
 
@@ -821,14 +825,14 @@ func TestTurnsWhatAPullDidIntoAResultAndWhetherToWaitLonger(t *testing.T) {
 		},
 		{
 			name:        "advanced a checkout that had a commit, which is kept",
-			result:      pull.Result{Outcome: pull.Advanced, Branch: testBranch, From: testCommit, To: otherCommit, Recovery: "refs/treebind/recovery/00000007"},
+			result:      pull.Result{Outcome: pull.Advanced, Branch: testBranch, From: testCommit, To: otherCommit, Recovery: recoveryRefSeven},
 			wantOutcome: preflight.Passed,
 			wantMessage: "advanced the checkout on the branch main from 0123456789ab to fedcba987654; the commit it was at is kept as refs/treebind/recovery/00000007",
 		},
 		{
 			name: "advanced, with an old recovery ref that could not be removed",
 			result: pull.Result{Outcome: pull.Advanced, Branch: testBranch, From: testCommit, To: otherCommit,
-				Recovery: "refs/treebind/recovery/00000007", Warning: "the old recovery ref refs/treebind/recovery/00000002 cannot be removed: locked"},
+				Recovery: recoveryRefSeven, Warning: "the old recovery ref refs/treebind/recovery/00000002 cannot be removed: locked"},
 			wantOutcome: preflight.Passed,
 			wantMessage: "advanced the checkout on the branch main from 0123456789ab to fedcba987654; the commit it was at is kept as " +
 				"refs/treebind/recovery/00000007; the old recovery ref refs/treebind/recovery/00000002 cannot be removed: locked",
@@ -836,7 +840,7 @@ func TestTurnsWhatAPullDidIntoAResultAndWhetherToWaitLonger(t *testing.T) {
 		{
 			name: "advanced, after an update that was cut off was undone",
 			result: pull.Result{Outcome: pull.Advanced, Branch: testBranch, From: testCommit, To: otherCommit,
-				Recovery: "refs/treebind/recovery/00000007", Repaired: "the update from 0123456789ab to fedcba987654 was cut off, and was undone"},
+				Recovery: recoveryRefSeven, Repaired: "the update from 0123456789ab to fedcba987654 was cut off, and was undone"},
 			wantOutcome: preflight.Passed,
 			wantMessage: "advanced the checkout on the branch main from 0123456789ab to fedcba987654; the commit it was at is kept as " +
 				"refs/treebind/recovery/00000007; the update from 0123456789ab to fedcba987654 was cut off, and was undone",
@@ -849,7 +853,7 @@ func TestTurnsWhatAPullDidIntoAResultAndWhetherToWaitLonger(t *testing.T) {
 		},
 		{
 			name:         "an error of a pull, after it put something right",
-			err:          &pull.Error{Reason: pull.ReasonFetchFailed, Message: "no route to host", Repaired: "the index was reset"},
+			err:          &pull.Error{Reason: pull.ReasonFetchFailed, Message: noRoute, Repaired: "the index was reset"},
 			wantOutcome:  preflight.Failed,
 			wantReason:   pull.ReasonFetchFailed,
 			wantMessage:  "no route to host; the index was reset",
@@ -863,10 +867,10 @@ func TestTurnsWhatAPullDidIntoAResultAndWhetherToWaitLonger(t *testing.T) {
 		},
 		{
 			name:         "an error of a pull",
-			err:          &pull.Error{Reason: pull.ReasonFetchFailed, Message: "no route to host"},
+			err:          &pull.Error{Reason: pull.ReasonFetchFailed, Message: noRoute},
 			wantOutcome:  preflight.Failed,
 			wantReason:   "FetchFailed",
-			wantMessage:  "no route to host",
+			wantMessage:  noRoute,
 			wantBacksOff: true,
 		},
 		{

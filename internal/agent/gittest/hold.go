@@ -208,9 +208,9 @@ func (f *Fixture) holdMerge(dir, name, setting, value string, more ...string) *H
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		f.T.Fatal(err)
 	}
-	extra := ""
+	var extra strings.Builder
 	for _, arg := range more {
-		extra += " '" + arg + "'"
+		extra.WriteString(" '" + arg + "'")
 	}
 	f.script(h.Binary, `merging=
 for arg in "$@"; do
@@ -228,7 +228,7 @@ while [ "$seen" -lt "$count" ]; do
   seen=$((seen + 1))
 done
 export HOLD_NAME='`+name+`' HOLD_FLAG='`+h.flag+`' HOLD_FIFO='`+fifo+`'
-exec '`+f.git+`'`+extra+` "$@"`)
+exec '`+f.git+`'`+extra.String()+` "$@"`)
 	return h
 }
 

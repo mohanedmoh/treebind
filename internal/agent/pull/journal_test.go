@@ -78,7 +78,7 @@ func TestThereIsNoJournalUnlessOneWasWritten(t *testing.T) {
 func TestAJournalThatIsTornOrNotOneOfOursIsAProblemAndNotAnUpdate(t *testing.T) {
 	good := `{"version":1,"from":"` + commitOne + `","to":"` + commitTwo + `"}`
 	for name, content := range map[string]string{
-		"empty":                "",
+		stateEmpty:             "",
 		"garbage":              "not json at all\n",
 		"cut short":            good[:len(good)/2],
 		"another version":      strings.Replace(good, `"version":1`, `"version":2`, 1),
