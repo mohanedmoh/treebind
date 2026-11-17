@@ -374,9 +374,16 @@ func TestTemplateHash(t *testing.T) {
 			name: "settings the pod does not read leave it alone",
 			mutate: func(tb *treebindv1alpha1.Treebind) {
 				tb.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowLocal
-				tb.Spec.Sync.SettleTime = &metav1.Duration{Duration: time.Minute}
 			},
 			image: testImage,
+		},
+		{
+			name: "a settle time changes it",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Sync.SettleTime = &metav1.Duration{Duration: time.Minute}
+			},
+			image:      testImage,
+			wantChange: true,
 		},
 	}
 	for _, tt := range tests {
