@@ -834,6 +834,28 @@ func TestTurnsWhatAPullDidIntoAResultAndWhetherToWaitLonger(t *testing.T) {
 				"refs/treebind/recovery/00000007; the old recovery ref refs/treebind/recovery/00000002 cannot be removed: locked",
 		},
 		{
+			name: "advanced, after an update that was cut off was undone",
+			result: pull.Result{Outcome: pull.Advanced, Branch: testBranch, From: testCommit, To: otherCommit,
+				Recovery: "refs/treebind/recovery/00000007", Repaired: "the update from 0123456789ab to fedcba987654 was cut off, and was undone"},
+			wantOutcome: preflight.Passed,
+			wantMessage: "advanced the checkout on the branch main from 0123456789ab to fedcba987654; the commit it was at is kept as " +
+				"refs/treebind/recovery/00000007; the update from 0123456789ab to fedcba987654 was cut off, and was undone",
+		},
+		{
+			name:        "at the tip, after the index was made again",
+			result:      pull.Result{Outcome: pull.UpToDate, Branch: "main", To: testCommit, Repaired: "the index could not be read, and was made again"},
+			wantOutcome: preflight.Passed,
+			wantMessage: "the checkout is at the tip of the branch main (0123456789ab); the index could not be read, and was made again",
+		},
+		{
+			name:         "an error of a pull, after it put something right",
+			err:          &pull.Error{Reason: pull.ReasonFetchFailed, Message: "no route to host", Repaired: "the index was reset"},
+			wantOutcome:  preflight.Failed,
+			wantReason:   pull.ReasonFetchFailed,
+			wantMessage:  "no route to host; the index was reset",
+			wantBacksOff: true,
+		},
+		{
 			name:        "at the tip with no commit, as an empty repository is",
 			result:      pull.Result{Outcome: pull.UpToDate, Branch: "main"},
 			wantOutcome: preflight.Passed,

@@ -129,12 +129,15 @@ func (l *pulls) report(ctx context.Context, result pull.Result, err error, clear
 // the wait before the next pull should grow.
 func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 	if err != nil {
-		reason := pull.ReasonPullFailed
+		reason, message := pull.ReasonPullFailed, err.Error()
 		if failure, ok := errors.AsType[*pull.Error](err); ok {
 			reason = failure.Reason
+			if failure.Repaired != "" {
+				message += "; " + failure.Repaired
+			}
 		}
 		return preflight.Result{
-			Check: CheckPull, Outcome: preflight.Failed, Reason: reason, Message: shortened(err.Error()),
+			Check: CheckPull, Outcome: preflight.Failed, Reason: reason, Message: shortened(message),
 		}, backsOff(reason)
 	}
 	var message string
@@ -152,6 +155,9 @@ func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 			"and there is nothing to pull", result.Branch, shortOf(result.To))
 	default:
 		message = fmt.Sprintf("the checkout is at the tip of the branch %s (%s)", result.Branch, shortOf(result.To))
+	}
+	if result.Repaired != "" {
+		message += "; " + result.Repaired
 	}
 	return preflight.Result{Check: CheckPull, Outcome: preflight.Passed, Message: message}, false
 }

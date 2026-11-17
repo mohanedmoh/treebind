@@ -117,6 +117,9 @@ type Error struct {
 	Message string
 	// Err is the error underneath, if any.
 	Err error
+	// Repaired says what the pull put right before it failed, such as an update that was cut off, in words for the
+	// check. It is empty when there was nothing to put right.
+	Repaired string
 }
 
 // Error returns the message.
@@ -170,9 +173,12 @@ type Result struct {
 	// Recovery is the ref that keeps the commit the checkout was at before it was advanced, and is
 	// empty when it was not advanced or had no commit.
 	Recovery string
-	// Warning says what the pull could not do that does not fail it: an old recovery ref that it could
-	// not remove. It is empty when there is nothing to say.
+	// Warning says what the pull could not do that does not fail it: an old recovery ref or the journal of
+	// the update that it could not remove. It is empty when there is nothing to say.
 	Warning string
+	// Repaired says what the pull put right before it began, such as an update that was cut off or an index that
+	// could not be read (docs/adr/0028), in words for the check. It is empty when there was nothing to put right.
+	Repaired string
 }
 
 // Puller pulls into one checkout. It is not safe for concurrent use: one pull runs at a time.
@@ -236,7 +242,22 @@ func (p *Puller) Pull(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// What a pull that was cut off left is put right before this one begins, and said with whatever it comes to.
+	repaired, failure := p.repair(ctx, head)
+	if failure != nil {
+		failure.Repaired = repaired
+		return Result{}, failure
+	}
+	result, err := p.update(ctx, head)
+	result.Repaired = repaired
+	if failure, ok := errors.AsType[*Error](err); ok {
+		failure.Repaired = repaired
+	}
+	return result, err
+}
 
+// update asks the repository for the tip of the branch and applies what is new, for a checkout that is at head.
+func (p *Puller) update(ctx context.Context, head string) (Result, error) {
 	remote, err := p.remoteTip(ctx)
 	if err != nil {
 		return Result{}, err
@@ -357,6 +378,12 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 	if err := ctx.Err(); err != nil {
 		return Result{}, p.fail(ReasonPullFailed, "the update was not applied, because the agent was told to stop: %v", err)
 	}
+	// The journal says that the files of the update may be half written from here on, so that a start that finds
+	// it knows to put them back (docs/adr/0028). An update that cannot be recorded is not applied.
+	if err := p.writeJournal(from, to); err != nil {
+		return Result{}, p.fail(ReasonPullFailed, "the update was not applied, because its journal cannot be written in %s: %v",
+			p.o.Layout.StateDir, err)
+	}
 	applying, applied := drained(ctx, p.o.Drain)
 	defer applied()
 
@@ -366,9 +393,22 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 	// hides, unless it is told not to, and a file that the application keeps out of the repository,
 	// a .env or a local config, is the application's all the same.
 	if _, err := p.git.RunTimeout(applying, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to); err != nil {
-		return Result{}, p.mergeFailed(ctx, from, to, err)
+		failure := p.mergeFailed(ctx, from, to, err)
+		if failure.Reason == ReasonBlocked {
+			// Git refused before it wrote a file. Any other failure may have left some written, and the journal stays
+			// for the next pull to put them back.
+			_ = p.removeJournal()
+		}
+		return Result{}, failure
 	}
-	return Result{Outcome: Advanced, Branch: p.o.Branch, From: from, To: to, Recovery: recovery, Warning: p.tidyRecovery(ctx, refs)}, nil
+	var warnings []string
+	if err := p.removeJournal(); err != nil {
+		warnings = append(warnings, fmt.Sprintf("the journal of the update cannot be removed from %s: %v", p.o.Layout.StateDir, err))
+	}
+	if warning := p.tidyRecovery(ctx, refs); warning != "" {
+		warnings = append(warnings, warning)
+	}
+	return Result{Outcome: Advanced, Branch: p.o.Branch, From: from, To: to, Recovery: recovery, Warning: strings.Join(warnings, "; ")}, nil
 }
 
 // drained returns the context of a command that a stop of ctx does not cut off, and the function that
@@ -399,7 +439,7 @@ func drained(ctx context.Context, drain time.Duration) (context.Context, func())
 
 // mergeFailed turns the failure of the fast-forward into its reason, and names the files that are
 // in the way when Git refused for them.
-func (p *Puller) mergeFailed(ctx context.Context, from, to string, err error) error {
+func (p *Puller) mergeFailed(ctx context.Context, from, to string, err error) *Error {
 	if gitErr, ok := errors.AsType[*git.Error](err); ok && strings.Contains(gitErr.Stderr, "would be overwritten") {
 		blocked := p.inTheWay(ctx, from, to)
 		what := "a file that the update changes has a local edit or an untracked file is in its way"

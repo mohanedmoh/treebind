@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -46,7 +47,7 @@ type Held struct {
 // waits with the locks of the refs that it updates held, at the transaction that updates ref.
 func (f *Fixture) HoldRef(l layout.Layout, ref string, args ...string) *Held {
 	f.T.Helper()
-	dir := filepath.Join(f.scratch, "hold-hooks")
+	dir := filepath.Join(f.root, "hold-hooks")
 	f.script(filepath.Join(dir, "reference-transaction"), `if [ "$1" = prepared ]; then
   while read old new name; do
     if [ "$name" = "$HOLD_NAME" ]; then
@@ -64,13 +65,13 @@ exit 0`)
 // be one that has changed.
 func (f *Fixture) HoldIndex(l layout.Layout, file string) *Held {
 	f.T.Helper()
-	clean := filepath.Join(f.scratch, "hold-clean")
+	clean := filepath.Join(f.root, "hold-clean")
 	f.script(clean, `if [ "$1" = "$HOLD_NAME" ]; then
   echo waiting > "$HOLD_FLAG"
   read nothing < "$HOLD_FIFO"
 fi
 while IFS= read -r line; do printf '%s\n' "$line"; done`)
-	attributes := filepath.Join(f.scratch, "hold-attributes")
+	attributes := filepath.Join(f.root, "hold-attributes")
 	if err := os.WriteFile(attributes, []byte("* filter=hold\n"), 0o644); err != nil {
 		f.T.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func (f *Fixture) script(path, body string) {
 
 func (f *Fixture) hold(l layout.Layout, name string, settings, args []string) *Held {
 	f.T.Helper()
-	fifo, flag := filepath.Join(f.scratch, "hold-fifo"), filepath.Join(f.scratch, "hold-flag")
+	fifo, flag := filepath.Join(f.root, "hold-fifo"), filepath.Join(f.root, "hold-flag")
 	_ = os.Remove(fifo)
 	_ = os.Remove(flag)
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
@@ -145,5 +146,121 @@ func (h *Held) Kill() {
 	case <-h.done:
 	case <-time.After(20 * time.Second):
 		h.t.Fatal("the command did not end after SIGKILL")
+	}
+}
+
+// HeldMerge is a stand-in for the git binary that holds the merge of an update in the middle of its
+// writes, and that a test kills there. It runs the real Git, with a filter or a hook added to the merge
+// that waits at the point that the test names. A Runner that is given Binary as its git runs it as it
+// runs any other, and what is added comes after the settings that take filters and hooks out.
+type HeldMerge struct {
+	t *testing.T
+	// Binary is the path of the stand-in.
+	Binary string
+	flag   string
+	pidOf  string
+}
+
+// HoldMerge returns a stand-in that holds every merge it runs in the middle of the files that it writes:
+// when the merge asks for the file, it has written the files before that one and not the ones after it,
+// and it holds the lock of the index.
+func (f *Fixture) HoldMerge(file string) *HeldMerge {
+	f.T.Helper()
+	dir := filepath.Join(f.root, "hold-merge")
+	smudge := filepath.Join(dir, "smudge")
+	attributes := filepath.Join(dir, "attributes")
+	f.script(smudge, `if [ "$1" = "$HOLD_NAME" ]; then
+  echo waiting > "$HOLD_FLAG"
+  read nothing < "$HOLD_FIFO"
+fi
+while IFS= read -r line; do printf '%s\n' "$line"; done`)
+	if err := os.WriteFile(attributes, []byte("* filter=hold\n"), 0o644); err != nil {
+		f.T.Fatal(err)
+	}
+	return f.holdMerge(dir, file, "core.attributesFile", attributes, "-c", "filter.hold.smudge="+smudge+" %f")
+}
+
+// HoldMergeAtRef returns a stand-in that holds every merge it runs at the update of the ref, after it has
+// written the files and the index, and holds the locks of the refs.
+func (f *Fixture) HoldMergeAtRef(ref string) *HeldMerge {
+	f.T.Helper()
+	dir := filepath.Join(f.root, "hold-merge")
+	f.script(filepath.Join(dir, "hooks", "reference-transaction"), `if [ "$1" = prepared ]; then
+  while read old new name; do
+    if [ "$name" = "$HOLD_NAME" ]; then
+      echo waiting > "$HOLD_FLAG"
+      read nothing < "$HOLD_FIFO"
+    fi
+  done
+fi
+exit 0`)
+	return f.holdMerge(dir, ref, "core.hooksPath", filepath.Join(dir, "hooks"))
+}
+
+// holdMerge makes the stand-in. The arguments of the merge are rewritten, with what a shell has built in:
+// the setting that takes something away, which is named, is given the file that has what is to be held, and
+// what follows it is put in front of the arguments.
+func (f *Fixture) holdMerge(dir, name, setting, value string, more ...string) *HeldMerge {
+	h := &HeldMerge{t: f.T, Binary: filepath.Join(dir, "git"), flag: filepath.Join(dir, "flag"), pidOf: filepath.Join(dir, "pid")}
+	fifo := filepath.Join(dir, "fifo")
+	_ = os.Remove(fifo)
+	_ = os.Remove(h.flag)
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		f.T.Fatal(err)
+	}
+	extra := ""
+	for _, arg := range more {
+		extra += " '" + arg + "'"
+	}
+	f.script(h.Binary, `merging=
+for arg in "$@"; do
+  if [ "$arg" = merge ]; then merging=yes; fi
+done
+if [ -z "$merging" ]; then exec '`+f.git+`' "$@"; fi
+echo $$ > '`+h.pidOf+`'
+count=$#
+seen=0
+while [ "$seen" -lt "$count" ]; do
+  arg=$1
+  shift
+  if [ "$arg" = `+setting+`=/dev/null ]; then arg=`+setting+`=`+value+`; fi
+  set -- "$@" "$arg"
+  seen=$((seen + 1))
+done
+export HOLD_NAME='`+name+`' HOLD_FLAG='`+h.flag+`' HOLD_FIFO='`+fifo+`'
+exec '`+f.git+`'`+extra+` "$@"`)
+	return h
+}
+
+// WaitHeld waits until a merge is held.
+func (h *HeldMerge) WaitHeld() {
+	h.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(h.flag); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatal("no merge was held")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Kill kills the held merge and what it started with SIGKILL, as an out-of-memory kill does, so that it
+// leaves what it had written and the locks that it held.
+func (h *HeldMerge) Kill() {
+	h.t.Helper()
+	data, err := os.ReadFile(h.pidOf)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	// The Runner gives the command a group of its own, whose number is the one of the command.
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		h.t.Fatal(err)
 	}
 }

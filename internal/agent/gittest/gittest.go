@@ -169,6 +169,23 @@ func (f *Fixture) Publish(branch string, files map[string]string) string {
 	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
 }
 
+// PublishLink commits a link in the scratch repository, with the target, and pushes it as Publish does.
+func (f *Fixture) PublishLink(branch, name, target string) string {
+	f.T.Helper()
+	path := filepath.Join(f.scratch, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		f.T.Fatal(err)
+	}
+	_ = os.Remove(path)
+	if err := os.Symlink(target, path); err != nil {
+		f.T.Fatal(err)
+	}
+	f.Plain(f.scratch, "add", "-A")
+	f.Plain(f.scratch, "commit", "-q", "--allow-empty", "-m", "link")
+	f.Plain(f.scratch, "push", "-q", "--force", f.Bare, "HEAD:refs/heads/"+branch)
+	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
+}
+
 // PublishIgnored is Publish for files that a .gitignore of the scratch repository hides: they are
 // added by name, which Git does for an ignored file only when it is forced.
 func (f *Fixture) PublishIgnored(branch string, files map[string]string) string {
