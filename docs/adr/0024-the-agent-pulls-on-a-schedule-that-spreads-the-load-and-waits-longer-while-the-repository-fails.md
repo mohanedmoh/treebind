@@ -80,7 +80,7 @@ that by minutes to save one question.
 - A stop cancels the pull that is running, which kills the Git command that runs, and the wait. A pull that
   was cut short by a stop says nothing about the repository, so it is not reported.
 - Both directions only pull. `bidirectional` also commits and pushes, which are #36 and #37, and until then it
-  pulls like `pull`.
+  pulls like `pull`, and looks for local changes in the same loop, as a second kind of turn (ADR 0029).
 
 ### The report
 

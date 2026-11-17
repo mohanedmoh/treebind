@@ -48,8 +48,10 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
+	"github.com/mohanedmoh/treebind/internal/agent/scan"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/agent/syncloop"
+	"github.com/mohanedmoh/treebind/internal/agent/watch"
 )
 
 const (
@@ -107,8 +109,22 @@ type Options struct {
 	// every Config.SyncInterval until the agent stops. It defaults to none, so that nothing is pulled:
 	// the agent starts with pull.New. Both sync directions only pull for now.
 	NewPuller func(options pull.Options) (Puller, error)
+	// NewScanner makes what scans the synced directory for local changes, once the checkout is made, for a
+	// Treebind that syncs in both directions. The scans go on beside the pulls, in the same loop, until the
+	// agent stops. It defaults to none, so that nothing is scanned: the agent starts with scan.New.
+	NewScanner func(options scan.Options) (Scanner, error)
+	// NewWatcher makes what tells the agent that the directory may have changed, so that it scans sooner than
+	// its interval. It defaults to none, and the scans are then on their interval alone: the agent starts
+	// with watch.New.
+	NewWatcher func(options watch.Options) (Watcher, error)
+	// Settled is called with the changes that have settled, at the scan that finds them settled, and again at
+	// each scan while they are still there. It is where the commit is to go (#36), and is none until then.
+	Settled func(ctx context.Context, settled []scan.Change)
+	// ScanInterval is the longest wait between two scans, and ScanGap the shortest time between the end of a
+	// scan and the next that an event calls for. The defaults of package syncloop when they are zero.
+	ScanInterval, ScanGap time.Duration
 	// SyncClock and SyncRandom are where the loop gets its waits and its jitter, and are the system's
-	// when nil.
+	// when nil. A clock for a loop with scans has Now as well (syncloop.WallClock).
 	SyncClock  syncloop.Clock
 	SyncRandom func() float64
 	// Ready says whether the agent has synced. It defaults to never: there is no
@@ -268,6 +284,8 @@ func (a *agent) report() status.Report {
 type progress struct {
 	volume                  []preflight.Result
 	lock, checkout, pulling *preflight.Result
+	// changes is the scan for local changes, which only a Treebind that syncs in both directions has.
+	changes *preflight.Result
 }
 
 // prepare checks the volume, and once it is in order takes the writer lock, which is held
@@ -280,6 +298,9 @@ func (a *agent) prepare(ctx context.Context) {
 	p := &progress{volume: volume}
 	if a.pullsFollow() {
 		p.pulling = notTried(CheckPull, "not tried, because the checkout is not made yet")
+	}
+	if a.scansFollow() {
+		p.changes = notTried(CheckChanges, "not tried, because the checkout is not made yet")
 	}
 	if a.AcquireLock != nil {
 		if !a.takeLock(ctx, p) {
@@ -350,6 +371,12 @@ func (a *agent) waitingForTheVolume(volume []preflight.Result, failed bool) *pro
 			p.pulling = notTried(CheckPull, later)
 		}
 	}
+	if a.scansFollow() {
+		p.changes = notTried(CheckChanges, "not tried, because the checkout is not made yet")
+		if failed {
+			p.changes = notTried(CheckChanges, later)
+		}
+	}
 	return p
 }
 
@@ -366,7 +393,7 @@ func notTried(check, message string) *preflight.Result {
 // the steps that there are.
 func (a *agent) publish(p *progress) {
 	results := append([]preflight.Result(nil), p.volume...)
-	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling} {
+	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling, p.changes} {
 		if step != nil {
 			results = append(results, *step)
 		}

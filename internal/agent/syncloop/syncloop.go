@@ -27,6 +27,13 @@ limitations under the License.
 // The loop runs one pull at a time and waits for it. That is the whole of the cap on what one agent
 // asks of a Git host: it never has two operations that ask the repository running at once, and a
 // push that comes later is made in the same loop and not beside it.
+//
+// A loop that is given a scan for local changes (#34, docs/adr/0029) has a second kind of turn, in the
+// same loop and so never beside a pull. The first scan is at once, and the next is a scan interval
+// after the end of the one before, or sooner: when the scan says that a file settles before that, at
+// the time it does, and when an event of the file system calls for one, after a short gap that keeps
+// a program that writes a great deal from being scanned all the time. A pull and a scan that are due
+// together are taken pull first. Scans are local, so they have no jitter and no backoff.
 package syncloop
 
 import (
@@ -43,6 +50,14 @@ const (
 
 	// DefaultMaxWait is the longest wait after a failed pull.
 	DefaultMaxWait = 10 * time.Minute
+
+	// DefaultScanInterval is the longest wait between two scans for local changes, which is how long a
+	// change that the events of the file system did not tell takes to be found. A scan is one call of
+	// Git that lists what differs, and the time it takes grows with the number of files.
+	DefaultScanInterval = 30 * time.Second
+
+	// DefaultScanGap is the shortest time from the end of a scan to the next one that an event calls for.
+	DefaultScanGap = time.Second
 )
 
 // Clock is where the loop gets its waits. A test gives its own, so that no test waits.
@@ -51,9 +66,18 @@ type Clock interface {
 	After(d time.Duration) <-chan time.Time
 }
 
+// WallClock is a Clock that also says what time it is. A loop that has scans needs one, to tell how long
+// is left of a wait that an event cut short.
+type WallClock interface {
+	Clock
+	// Now is the time on the clock.
+	Now() time.Time
+}
+
 type systemClock struct{}
 
 func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (systemClock) Now() time.Time                         { return time.Now() }
 
 // Options say how often to pull and what a pull is.
 type Options struct {
@@ -73,6 +97,20 @@ type Options struct {
 	// that a person has to put right, and that the repository answered, did not fail in this sense.
 	// It is called again when its context is not done, whatever it returned.
 	Pull func(ctx context.Context) (failed bool)
+
+	// Scan, when it is set, is a turn of the loop beside the pull: it looks for local changes, at the time
+	// now, which is the time on the clock when the scan began, and says how long until a change that it
+	// found settles, or zero when none is waiting. That is when the next scan is due, if it is sooner
+	// than a scan interval. A loop with a Scan needs a Clock that is a WallClock.
+	Scan func(ctx context.Context, now time.Time) (next time.Duration)
+	// ScanInterval is the longest wait between two scans. DefaultScanInterval when it is zero.
+	ScanInterval time.Duration
+	// ScanGap is the shortest time from the end of a scan to the next one that an event calls for.
+	// DefaultScanGap when it is zero.
+	ScanGap time.Duration
+	// Wake delivers a signal when something may have changed, which calls for a scan sooner than the
+	// interval. It can be nil, and the loop does without it when it is closed.
+	Wake <-chan struct{}
 }
 
 // Run pulls until ctx is done, which is when it returns nil. It returns an error only for options that
@@ -92,6 +130,9 @@ func Run(ctx context.Context, o Options) error {
 	}
 	if o.Random == nil {
 		o.Random = rand.Float64
+	}
+	if o.Scan != nil {
+		return runWithScans(ctx, o)
 	}
 
 	wait := o.Phase
@@ -166,4 +207,89 @@ func Phase(namespace, name string, interval time.Duration) time.Duration {
 	// The separator is not allowed in a namespace or in a name, so that two pairs do not make one string.
 	_, _ = h.Write([]byte(namespace + "/" + name))
 	return time.Duration(h.Sum64() % uint64(interval))
+}
+
+// runWithScans is Run for a loop that has scans. Each kind of turn has the time it is due, and the loop
+// waits for the earlier of the two, or for an event, which may make the scan due sooner.
+func runWithScans(ctx context.Context, o Options) error {
+	clock, ok := o.Clock.(WallClock)
+	if !ok {
+		return errors.New("syncloop: a loop with scans needs a clock that has Now")
+	}
+	if o.ScanInterval <= 0 {
+		o.ScanInterval = DefaultScanInterval
+	}
+	if o.ScanGap <= 0 {
+		o.ScanGap = DefaultScanGap
+	}
+
+	now := clock.Now()
+	pullAt, scanAt := now.Add(o.Phase), now
+	var lastScanEnd time.Time
+	failures := 0
+	wake := o.Wake
+	for {
+		now = clock.Now()
+		due := pullAt
+		if scanAt.Before(due) {
+			due = scanAt
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-clock.After(max(due.Sub(now), 0)):
+		case _, open := <-wake:
+			if !open {
+				wake = nil
+				continue
+			}
+			// Something may have changed: scan once the gap since the last scan has passed, if that is
+			// sooner than the scan was due. The events that come meanwhile are one scan.
+			soonest := now
+			if gapEnds := lastScanEnd.Add(o.ScanGap); gapEnds.After(soonest) {
+				soonest = gapEnds
+			}
+			if soonest.Before(scanAt) {
+				scanAt = soonest
+			}
+			continue
+		}
+		// A wait that has passed and a stop that has come are both ready at times, and the stop wins.
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		now = clock.Now()
+		pullDue, scanDue := !pullAt.After(now), !scanAt.After(now)
+		switch {
+		case pullDue && (!scanDue || !scanAt.Before(pullAt)):
+			failed := o.Pull(ctx)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if failed {
+				failures++
+			} else {
+				failures = 0
+			}
+			pullAt = clock.Now().Add(Next(o.Interval, o.MaxWait, failures, o.Random()))
+		case scanDue:
+			started := now
+			next := o.Scan(ctx, started)
+			if ctx.Err() != nil {
+				return nil
+			}
+			lastScanEnd = clock.Now()
+			scanAt = lastScanEnd.Add(o.ScanInterval)
+			if settles := started.Add(next); next > 0 && settles.Before(scanAt) {
+				// The file settles when the scan began plus next. A scan of a large tree can end after that, and
+				// scans that follow one another with nothing between them are all that the tree would do, so
+				// the next is not sooner than the gap after the end of this one.
+				scanAt = settles
+				if floor := lastScanEnd.Add(o.ScanGap); scanAt.Before(floor) {
+					scanAt = floor
+				}
+			}
+		}
+	}
 }

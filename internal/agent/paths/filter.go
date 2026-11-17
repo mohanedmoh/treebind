@@ -120,6 +120,18 @@ func (f *Filter) Reason(path string) Reason {
 	return Synced
 }
 
+// SkipsDir reports whether no file below a directory is ever synced, by the names in the path of the
+// directory alone: a .git segment, the state directory, and a name that is a secret. The watcher does not
+// watch such a directory. It says nothing of the patterns, which can take some of the files of a directory
+// and not others, and the files that a directory has are for the scan, which is Reason's. The directory is
+// relative to the synced directory, with slashes and none at the end.
+func (f *Filter) SkipsDir(dir string) bool {
+	segments := strings.Split(dir, "/")
+	return slices.ContainsFunc(segments, gitName) ||
+		f.stateDir != "" && foldASCII(segments[0]) == f.stateDir ||
+		slices.ContainsFunc(segments, secretName)
+}
+
 func matchesAny(patterns []*Pattern, path string) bool {
 	return slices.ContainsFunc(patterns, func(p *Pattern) bool { return p.Match(path) })
 }

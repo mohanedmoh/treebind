@@ -53,9 +53,15 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 
 	p.pulling = notTried(CheckPull, fmt.Sprintf("waiting: the first pull is due in %s", phase.Round(time.Second)))
 	a.publish(p)
-	err := syncloop.Run(ctx, syncloop.Options{
-		Interval: interval, Phase: phase, Clock: a.SyncClock, Random: a.SyncRandom, Pull: l.once,
-	})
+	loop := syncloop.Options{Interval: interval, Phase: phase, Clock: a.SyncClock, Random: a.SyncRandom, Pull: l.once}
+	if a.scansFollow() {
+		// The scans are turns of the same loop, and never run beside a pull (docs/adr/0029).
+		if s := a.startScans(p, done); s != nil {
+			defer s.close()
+			loop.Scan, loop.ScanInterval, loop.ScanGap, loop.Wake = s.once, a.ScanInterval, a.ScanGap, s.wake()
+		}
+	}
+	err := syncloop.Run(ctx, loop)
 	if err != nil {
 		// Only an interval that is not positive, which the settings of the agent do not allow.
 		result := preflight.Result{
