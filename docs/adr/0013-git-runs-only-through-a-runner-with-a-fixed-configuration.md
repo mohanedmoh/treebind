@@ -32,8 +32,12 @@ built from nothing, and only the subcommands the agent needs.
 `GIT_DIR` and `GIT_WORK_TREE` as given, `GIT_CONFIG_GLOBAL` and
 `GIT_CONFIG_SYSTEM` set to `/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=:`,
 `GIT_PAGER=cat`, `GIT_SSH_COMMAND`, `GIT_ALLOW_PROTOCOL=ssh:https`,
-`GIT_ATTR_SOURCE` set to the empty tree, and `GIT_SSL_CAINFO`, the CA bundle that
-was given or else the system's, found in the usual places. Nothing else is inherited, so no
+`GIT_ATTR_SOURCE` set to the empty tree, `GIT_OPTIONAL_LOCKS=0`, and `GIT_SSL_CAINFO`, the CA bundle that
+was given or else the system's, found in the usual places. `GIT_OPTIONAL_LOCKS=0` is for the commands that
+only read: a plain `git status` refreshes the index and writes it back under `index.lock` (tried, Git
+2.34.1: the index file changes after a status of files that were only touched), which would be a write that
+the writer lock does not guard, so the scan for local changes (#34) would not be a read. The commands that
+write take the locks they need whatever it says. Nothing else is inherited, so no
 `GIT_*` variable, proxy, trace or askpass of the agent's own environment reaches
 Git.
 
