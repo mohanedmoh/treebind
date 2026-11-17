@@ -282,6 +282,11 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	if interval := treebind.Spec.Sync.Interval; interval != nil {
 		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSyncInterval, Value: interval.Duration.String()})
 	}
+	// How long a file has to be quiet before the agent commits it (#34). As for the interval, the agent has
+	// the default of the CRD for one that was not set.
+	if settle := treebind.Spec.Sync.SettleTime; settle != nil {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSyncSettleTime, Value: settle.Duration.String()})
+	}
 	// The cap on what one update removes, when the Treebind says (docs/adr/0027). The variable is left out
 	// otherwise, so that a pod template that never had it does not change, and its pod is not replaced, when
 	// the operator learns to pass it on. It is a number, which the kubelet does not rewrite.

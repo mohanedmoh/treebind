@@ -37,11 +37,13 @@ const (
 	hostFile = "/etc/treebind/known-hosts/known_hosts"
 	podName  = "dashboards-sync-0"
 
-	branchRelease   = "release/1.2"
-	problemScheme   = "must use ssh:// or https://"
-	problemControl  = "whitespace or control"
-	problemLeast    = "must be at least 1s"
-	problemDuration = "must be a duration"
+	branchRelease    = "release/1.2"
+	problemScheme    = "must use ssh:// or https://"
+	problemControl   = "whitespace or control"
+	notADuration     = "soon"
+	justUnderASecond = "999ms"
+	problemLeast     = "must be at least 1s"
+	problemDuration  = "must be a duration"
 
 	problemMaxDeletionsLeast   = "must be at least 1"
 	problemMaxDeletionsMost    = "must be at most 2147483647"
@@ -73,7 +75,7 @@ func TestFromEnvReadsTheSettingsAndFillsTheDefaults(t *testing.T) {
 	}
 	want := Config{
 		Namespace: "apps", Name: "dashboards", MountPath: DefaultMountPath, RepoURL: repoURL,
-		SyncInterval: DefaultSyncInterval, SyncDirection: DirectionBidirectional, PodName: podName,
+		SyncInterval: DefaultSyncInterval, SettleTime: DefaultSettleTime, SyncDirection: DirectionBidirectional, PodName: podName,
 		StatusAddr:     DefaultStatusAddr,
 		StatusIssuer:   issuer,
 		StatusAudience: audience,
@@ -442,6 +444,7 @@ func TestCheckBranch(t *testing.T) {
 func TestFromEnvTakesHowToSyncAndWhoThePodIs(t *testing.T) {
 	env := complete()
 	env[EnvSyncInterval] = "2m"
+	env[EnvSyncSettleTime] = "12s"
 	env[EnvSyncDirection] = DirectionPull
 	env[EnvPodName] = "another-sync-0"
 
@@ -450,7 +453,8 @@ func TestFromEnvTakesHowToSyncAndWhoThePodIs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.SyncInterval != 2*time.Minute || config.SyncDirection != DirectionPull || config.PodName != "another-sync-0" {
+	if config.SyncInterval != 2*time.Minute || config.SettleTime != 12*time.Second || config.SyncDirection != DirectionPull ||
+		config.PodName != "another-sync-0" {
 		t.Errorf("the settings were not taken: %+v", config)
 	}
 }
@@ -465,12 +469,14 @@ func TestFromEnvRefusesWhatCannotBeSyncedWith(t *testing.T) {
 		{"a direction that is not one", map[string]string{EnvSyncDirection: "push"}, EnvSyncDirection + " must be pull or bidirectional"},
 		{"a direction in capitals", map[string]string{EnvSyncDirection: "Pull"}, EnvSyncDirection + " must be pull or bidirectional"},
 		{"no pod name", map[string]string{EnvPodName: ""}, EnvPodName + " is not set"},
-		{"an interval that is not a duration", map[string]string{EnvSyncInterval: "soon"}, EnvSyncInterval + " must be a duration such as 30s or 5m"},
+		{"an interval that is not a duration", map[string]string{EnvSyncInterval: notADuration}, EnvSyncInterval + " must be a duration such as 30s or 5m"},
 		{"an interval in days", map[string]string{EnvSyncInterval: "1d"}, EnvSyncInterval + " " + problemDuration},
 		{"an interval of nothing but a number", map[string]string{EnvSyncInterval: "30"}, EnvSyncInterval + " " + problemDuration},
-		{"an interval below the least", map[string]string{EnvSyncInterval: "999ms"}, EnvSyncInterval + " " + problemLeast},
+		{"an interval below the least", map[string]string{EnvSyncInterval: justUnderASecond}, EnvSyncInterval + " " + problemLeast},
 		{"an interval of nothing", map[string]string{EnvSyncInterval: "0s"}, EnvSyncInterval + " " + problemLeast},
 		{"a negative interval", map[string]string{EnvSyncInterval: "-30s"}, EnvSyncInterval + " " + problemLeast},
+		{"a settle time that is not a duration", map[string]string{EnvSyncSettleTime: notADuration}, EnvSyncSettleTime + " must be a duration such as 5s or 1m"},
+		{"a settle time below the least", map[string]string{EnvSyncSettleTime: justUnderASecond}, EnvSyncSettleTime + " " + problemLeast},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -488,7 +494,7 @@ func TestFromEnvRefusesWhatCannotBeSyncedWith(t *testing.T) {
 
 func TestFromEnvSaysABadIntervalWithTheOtherProblems(t *testing.T) {
 	env := complete()
-	env[EnvSyncInterval] = "soon"
+	env[EnvSyncInterval] = notADuration
 	env[EnvNamespace] = ""
 
 	_, err := fromMap(env)
@@ -512,7 +518,7 @@ func TestCheckSyncInterval(t *testing.T) {
 		{"1h30m", 90 * time.Minute, ""},
 		{"2562047h47m16.854775807s", time.Duration(1<<63 - 1), ""},
 		{"1000ms", time.Second, ""},
-		{"999ms", 0, problemLeast},
+		{justUnderASecond, 0, problemLeast},
 		{"0s", 0, problemLeast},
 		{"-1s", 0, problemLeast},
 		{"0", 0, problemLeast},
@@ -531,6 +537,39 @@ func TestCheckSyncInterval(t *testing.T) {
 				t.Errorf("CheckSyncInterval(%q) = %v, %v, want %v", tt.raw, got, err, tt.want)
 			case tt.err != "" && (err == nil || !strings.Contains(err.Error(), tt.err)):
 				t.Errorf("CheckSyncInterval(%q) = %v, %v, want a problem that says %q", tt.raw, got, err, tt.err)
+			}
+		})
+	}
+}
+
+func TestCheckSettleTime(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want time.Duration
+		err  string
+	}{
+		{"", DefaultSettleTime, ""},
+		{"5s", 5 * time.Second, ""},
+		{"1s", time.Second, ""},
+		{"1.5s", 1500 * time.Millisecond, ""},
+		{"2m", 2 * time.Minute, ""},
+		{"2562047h47m16.854775807s", time.Duration(1<<63 - 1), ""},
+		{justUnderASecond, 0, problemLeast},
+		{"0s", 0, problemLeast},
+		{"-5s", 0, problemLeast},
+		{"5", 0, problemDuration},
+		{"1d", 0, problemDuration},
+		{" 5s", 0, problemDuration},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := CheckSettleTime(tt.raw)
+
+			switch {
+			case tt.err == "" && (err != nil || got != tt.want):
+				t.Errorf("CheckSettleTime(%q) = %v, %v, want %v", tt.raw, got, err, tt.want)
+			case tt.err != "" && (err == nil || !strings.Contains(err.Error(), tt.err)):
+				t.Errorf("CheckSettleTime(%q) = %v, %v, want a problem that says %q", tt.raw, got, err, tt.err)
 			}
 		})
 	}
