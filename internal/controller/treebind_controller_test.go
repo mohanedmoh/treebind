@@ -368,9 +368,19 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(statefulSet.Annotations[templateHashAnnotation]).NotTo(Equal(hash))
 			hash = statefulSet.Annotations[templateHashAnnotation]
 
-			// The pod does not read how long to wait before a commit, yet.
+			// How long a file has to be quiet before the agent commits it is read too.
 			resource = get()
 			resource.Spec.Sync.SettleTime = &metav1.Duration{Duration: 45 * time.Second}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			reconcileOnce()
+
+			statefulSet = getStatefulSet()
+			Expect(statefulSet.Annotations[templateHashAnnotation]).NotTo(Equal(hash))
+			hash = statefulSet.Annotations[templateHashAnnotation]
+
+			// The pod does not read which side wins a conflict, yet.
+			resource = get()
+			resource.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowLocal
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			reconcileOnce()
 
