@@ -1,4 +1,4 @@
-# 0028. The agent stops Git gently and removes the lock files that a stopped Git leaves
+# 0028. The agent stops Git gently, removes the lock files that a stopped Git leaves, and undoes an update that was cut off
 
 - Status: accepted
 - Date: 2026-11-16
@@ -64,6 +64,83 @@ files were removed, and so does the log.
 
 **The check of the Git directory accepts `packed-refs.lock`**, and still refuses `packed-refs`.
 
+### An update that was cut off is undone before the next pull
+
+A lock file is the smaller part of what a kill in the middle of an update leaves. The files that the merge had
+written stay (the table above), and once the lock is gone the next pull is `Blocked` for files that the agent wrote
+itself. R-8 and NFR-2 ask for a crash at any point to be recovered on restart.
+
+**A journal.** After the fence has checked the writer lock and the commit the checkout is at has been kept, and
+before the merge, the pull writes the file `updating` in the state directory: a line of JSON with the format
+version, the commit the checkout is at, which is empty when it had none, and the commit it goes to. It is written
+to a file of its own, synced and renamed, so that it is there whole or not at all, and an update whose journal
+cannot be written is not applied. It is removed after the merge, and after a merge that Git refused with
+`Blocked`, which wrote nothing. A merge that failed for any other reason, a full volume for one, or was stopped,
+leaves it, because the files it wrote are half an update.
+
+**Looking at it.** `Puller.Pull` looks for the journal with one stat, after it has checked that the checkout is on
+its branch, and so after the agent removed the lock files a stopped Git left (this ADR above). The fence is
+called before the first write, and not when there is nothing to put right. A journal that cannot be read, is torn,
+is of another version or names what is not a commit, is no journal: it is removed and the Pull check says so, and
+the pull goes on. What the checkout is at decides the rest:
+
+- At the commit the update went to, the update had finished, and only the journal was left. It is removed.
+- At the commit it came from, which is no commit for a first update, the update is undone, as below.
+- At neither, the journal is removed and nothing else is done.
+
+**Undoing it** puts the files that the update changed back as they were, as far as they are the agent's own. The
+files are listed with `diff-tree` between the two commits, or with `ls-tree` of the second for a checkout that had
+no commit. For each, what is in the work tree decides, by what the update did to it:
+
+| The update | In the work tree | Done |
+| :-- | :-- | :-- |
+| added the file | not there | nothing |
+| added the file | the whole of the file the update adds, or the start of it, or empty | removed |
+| changed the file | not there | put back from the index |
+| changed the file | the whole of the new file, or the start of it, or empty | put back from the index |
+| changed the file | as the commit before had it | nothing |
+| deleted the file | anything | nothing: it is gone, or as it was, or an edit that the next pull is `Blocked` by |
+| added or changed it | anything else, a link where the commits have a file, a directory, an edit | left, and named |
+
+A file is the whole of a file when the id that Git would give its content is the id in the commit, which is
+computed while the file is read, so that a file of any size is compared and no command is run. A file is the start
+of a file when it is shorter and the blob begins with it, which takes the blob, read with `cat-file`. A blob that is
+longer than what the Runner lets a command write cannot be read, so a file that is the start of such a blob is
+not told from an edit: it is left, and the note says that it could not be compared. A whole copy of it is
+still recognised, by its id. A link is whole or not there: it is compared by what it points to, with the blob of the
+link, and a link where the commits have a file is anything else. An empty file is the start of every file that has
+content. Files are put back with `checkout-index -f -u` in batches of 500, and removed through
+the directory of the work tree, which follows no link out of it. The files that were left are what the next pull
+is `Blocked` by, with the names that the message of `Blocked` already gives, and the note names them too.
+
+Undoing never applies the update: the files are put back as the commit before had them, HEAD does not move, and
+the next pull applies the update with the cap on deletions, the fence, the recovery ref and the rest of what a pull
+checks. That it begins again where it was is the point.
+
+### The index
+
+Before the journal is looked at, and before every pull, the index is looked at with `diff-index --cached --quiet
+HEAD`, one command that reads it and writes nothing, and for a checkout with no commit with `ls-files`. An index
+that Git cannot read is made again, and one that holds what the commit does not, files that are staged, is reset:
+`read-tree HEAD`, or `read-tree --empty` when there is no commit. The work tree is not touched, so an edit of the
+application is still an edit, as an unstaged change. Nothing here stages for long today, and #36 will: a kill in
+the middle of a commit leaves files staged, which the scan of #34 would otherwise list as they are. A command that
+was stopped says nothing about the index, and the index is not made again on its word. The reset comes before
+the files are put back, which are put back from the index, and the index of a merge that was killed at the update
+of the branch holds the new commit. It costs a read of the index and of the tree of HEAD for each pull, which is
+about a tenth of a second for 50,000 files on a developer's machine.
+
+That the checkout is on the branch that the Treebind follows was already checked at the start of every pull, and a
+checkout that is not is refused before anything here is looked at.
+
+### What the pull says
+
+The `Pull` check and the log say what was put right, in the message of the check and in the sentence that the log
+line has: `the update from <commit> to <commit> was cut off, and was undone, and the next pull applies it again: 2
+file(s) put back, 1 removed`, and `the index could not be read, and was made again from the commit the checkout is
+at`. A pull that failed says it too, with its own reason. No reason is new: a pull that cannot put the checkout right
+is `PullFailed`, and a fence that stopped it is `Refused`.
+
 ### Why removing a lock is safe, and where it is not
 
 A lock file is stale when no command holds it. The agent holds the writer lock of the volume (NFR-1, ADR 0012), so
@@ -89,11 +166,16 @@ What this does not rest on, and where it can be wrong:
   is writing its files, unless the update takes longer than the drain. A node drain and an upgrade of the
   operator are stops of this kind.
 - An out-of-memory kill, a lost node, and an update that outlasts the drain and the grace period still kill Git. The
-  lock files are removed at the next pull, and the next pull goes on, for every step but one: **an update that was
-  killed in the middle of the files leaves the files half written**, and the next pull is `Blocked` for files
-  that the agent wrote itself. It is not repaired by this change. It is the next change of #39: a record of the
-  update that was begun, and putting its files back when it was not finished. That has to land before #36
-  commits local changes, or a half-applied update is committed as an edit of the application.
+  lock files are removed at the next pull, the update that was cut off is undone, and the next pull applies it.
+  A cut-off update no longer leaves a checkout that is refused for good, and the files that are not the agent's
+  own are left for the person whose they are, with their names.
+- The tests kill a real merge that a filter holds in the middle of the files, which leaves some files whole and one not there, and a merge that a hook holds
+  at the update of the branch, which leaves every file and the index. Git writes a file with one write, so the
+  state of a file that is the start of the new one cannot be had on cue, and the tests put it in place by hand.
+- A directory where a file was, or a file where a directory was, is not looked at specially: a path under it is
+  looked at as it is, and what the update would write over is left for `Blocked`.
+- A list of files that is longer than what the Runner lets a command write cannot be read, and then no file is
+  put back, the journal is removed, and the note says so.
 - The pull now looks at the top of the Git directory and at `refs` before each pull, which is a read of a few
   directories.
 - The first checkout still removes its own `index.lock` when it resumes (ADR 0017), as `Open` alone has to.

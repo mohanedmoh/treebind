@@ -372,3 +372,60 @@ func TestAnAgentThatLostTheWriterLockRemovesNoLockFileBeforeTheCheckoutAndSaysSo
 		t.Error("a lock file was removed by an agent that lost the writer lock")
 	}
 }
+
+func TestAnAgentThatStartsAfterAnUpdateWasKilledInTheMiddleOfItsFilesUndoesItAndAppliesIt(t *testing.T) {
+	f := gittest.New(t)
+	f.Publish(testBranch, map[string]string{jsonA: "a\n", jsonB: "b\n", jsonC: "c\n"})
+	where := f.Layout(subDir)
+	if _, err := checkout.Open(context.Background(), f.CheckoutOptions(where, testBranch)); err != nil {
+		t.Fatal(err)
+	}
+	// An agent applies an update, and its Git is killed in the middle of the files, as a kernel that is short of memory does.
+	held := f.HoldMerge(jsonB)
+	tip := f.Publish(testBranch, map[string]string{jsonA: "a, updated\n", jsonB: "b, updated\n", jsonC: "c, updated\n"})
+	options := pull.Options{Layout: where, URL: f.URL, Branch: testBranch, Git: f.GitOptions()}
+	options.Git.Git = held.Binary
+	killed, err := pull.New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := killed.Pull(context.Background())
+		done <- err
+	}()
+	held.WaitHeld()
+	held.Kill()
+	if err := <-done; err == nil {
+		t.Fatal("the pull of the merge that was killed did not fail")
+	}
+	if gittest.Read(t, where, jsonA) != "a, updated\n" || gittest.Exists(filepath.Join(where.WorkTree, jsonB)) {
+		t.Fatal("the update was not cut off in the middle of the files: the test does not hold the merge where it means to")
+	}
+
+	// The agent that starts again removes the lock the killed Git left, undoes the update, and applies it.
+	clock := newGatedClock()
+	r := agentOn(t, f, clock)
+	clock.wait(t).pass()
+	clock.wait(t)
+
+	// The lock is removed before the checkout is opened, which is where it is said.
+	if opened, _ := checkoutCheck(t, r); !strings.Contains(opened.Message, "removed the lock file that a Git command that was stopped left: index.lock") {
+		t.Errorf("checkout = %+v, want the lock file that was removed said", opened)
+	}
+	got, _ := pullCheck(t, r)
+	for _, want := range []string{
+		"advanced the checkout", "was cut off, and was undone, and the next pull applies it again: 2 file(s) put back, 0 removed",
+	} {
+		if got.Outcome != outcomePassed || !strings.Contains(got.Message, want) {
+			t.Errorf("pull = %+v, want it passed, with %q said", got, want)
+		}
+	}
+	if gittest.Read(t, where, jsonA) != "a, updated\n" || gittest.Read(t, where, jsonB) != "b, updated\n" ||
+		gittest.Read(t, where, jsonC) != "c, updated\n" || f.InCheckout(where, "rev-parse", "HEAD") != tip {
+		t.Error("the update is not in the checkout")
+	}
+	if n := r.logs.count("was cut off, and was undone"); n != 1 {
+		t.Errorf("what the pull put right was logged %d times, want once\n%s", n, r.logs.String())
+	}
+}

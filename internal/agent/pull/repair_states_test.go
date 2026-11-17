@@ -280,3 +280,22 @@ func TestAnUpdateThatChangesManyFilesPutsThemBackInSeveralCommands(t *testing.T)
 		t.Errorf("repair = %q, %v, status %q, want every file put back", note, failure, u.dirty(t))
 	}
 }
+
+func TestAListOfFilesThatTheRunnerCannotHandOverPutsNothingBackAndSaysSo(t *testing.T) {
+	before, after := map[string]string{}, map[string]string{}
+	for _, name := range []string{fileA, fileB, fileC, fileD, fileE} {
+		before[name], after[name] = "old\n", "new, longer\n"
+	}
+	u := plantedUpdate(t, subPath, before, func(f *gittest.Fixture) string { return f.Publish(branchMain, after) },
+		func(o *Options) { o.Git.MaxOutput = bigLimit / 4 })
+	put(t, u.l, fileA, "new, longer\n")
+
+	note, failure := u.puller.repair(context.Background(), u.head())
+
+	if failure != nil || !strings.Contains(note, "cannot be listed") || !strings.Contains(note, "none was put back") {
+		t.Fatalf("repair = %q, %v, want the files of the update said to be too many to list", note, failure)
+	}
+	if observed(u.l, fileA) != "new, longer\n" || journalPresent(u.world) {
+		t.Errorf("a.json = %q, journal present %v, want the file left, and the journal removed", observed(u.l, fileA), journalPresent(u.world))
+	}
+}

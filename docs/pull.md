@@ -27,6 +27,10 @@ kubectl describe treebind <name>
   applied, and the check says `TooManyDeletions`. See [the deletion guard](deletion-guard.md).
 - **It keeps where your directory was before an update.** The commit it was at is kept under
   `refs/treebind/recovery/<n>`, so that removed files can be got back. The same page says how.
+- **It undoes an update that was cut off.** A Git that is killed in the middle of the files of an update leaves some of
+  them written. The pull that follows puts back the ones that are the agent's own, says so in the check, and applies the
+  update again. A file that is yours is left, and the pull is `Blocked` by it. It makes the index again when it cannot
+  be read. See [the Git directory](git-directory.md).
 - **It does not cut off an update that is writing files.** When the agent is told to stop, the update that is
   being applied has up to 10 seconds to finish. Git that is stopped is told to end first, so that it removes its
   own lock files, and the agent removes the ones that a Git that was killed left before each pull and says so in

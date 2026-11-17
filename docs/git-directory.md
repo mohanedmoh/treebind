@@ -158,16 +158,27 @@ there when none of its commands runs was left by one that ended. Do not run Git 
 agent works: the agent can remove the lock file that your command holds, and your command then fails. The reasons
 are in [ADR 0028](adr/0028-the-agent-stops-git-gently-and-removes-the-lock-files-that-a-stopped-git-leaves.md).
 
-**What it does not put right yet.** A Git that was killed while it wrote the files of an update leaves some of them
-written. The lock file is removed, and the next pull is then `Blocked`, for files that the agent wrote itself.
-Put them back as the checkout has them, with `GIT_DIR` and `GIT_WORK_TREE` set to the Git directory and the
-synced directory:
+## When an update was cut off in the middle of its files
+
+A Git that is killed while it applies an update leaves some of its files written. Before it applies an update, the
+agent writes a small file, `.treebind/updating`, with the commit the checkout is at and the commit the update goes
+to, and removes it when the update has been applied. A pull that finds it left puts the checkout back as it was before
+the update began, and then applies the update again, with every check a pull has. The `Pull` check says what it did:
 
 ```
-git checkout -- <the files that the message names>
+the update from 0123456789ab to fedcba987654 was cut off, and was undone, and the next pull applies it again: 2 file(s) put back, 1 removed
 ```
 
-The next pull then applies the update. The agent is going to do this itself (#39).
+It puts back a file that the update changed when the file is not there, or is the whole of the new file, or the start of
+it, which is what a write that was cut off leaves. It removes a file that the update added in the same cases. A file
+that is as it was is left. **A file that is anything else is yours and is left**, and the next pull is `Blocked` by it and
+names it, as for any local edit: revert it or remove it, and the next pull goes on. A file that the update deletes is left
+as it is. [ADR 0028](adr/0028-the-agent-stops-git-gently-and-removes-the-lock-files-that-a-stopped-git-leaves.md) has the
+rule for each state, the links, and the files too large to compare.
+
+If the index cannot be read, the agent makes it again from the commit the checkout is at before a pull, and says so. It
+does the same reset when the index holds files that are staged, which nothing here leaves for long. Your files are not
+touched: an edit stays an edit, as a change that is not staged.
 
 ## Room on the claim
 
