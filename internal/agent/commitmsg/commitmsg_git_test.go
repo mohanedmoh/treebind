@@ -76,7 +76,7 @@ func gitBinary(t *testing.T) string {
 func TestGitKeepsAnAuthorThatValidateAuthorAccepts(t *testing.T) {
 	git := gitBinary(t)
 	for _, tt := range []struct{ name, email string }{
-		{"treebind-bot", goodEmail},
+		{DefaultAuthorName, goodEmail},
 		{"Treebind Bot", "bot+treebind@example.org"},
 		{"Zoë Ünï ✓", "zoe@example.org"},
 		{"bo.t", goodEmail},
