@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
+	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/gittest"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
@@ -169,14 +170,40 @@ type world struct {
 	scanOpts chan scan.Options
 	watchOpt chan watch.Options
 	made     atomic.Int32
+	// committer is what commits the settled changes, and commitOpt gets the options that it was made with.
+	committer *fakeCommitter
+	commitOpt chan commit.Options
+	// commitErr, when it is set, is why the committer cannot be made.
+	commitErr error
+}
+
+// fakeCommitter says each call on settled, and answers with what the test says: a commit of all the files that
+// it was given, until the test gives it another answer.
+type fakeCommitter struct {
+	settled chan<- []scan.Change
+	calls   atomic.Int32
+	// answer, when it is set, is the answer to the call with the number n, from 1.
+	answer func(n int, changes []scan.Change) (commit.Result, error)
+}
+
+func (f *fakeCommitter) Commit(ctx context.Context, changes []scan.Change) (commit.Result, error) {
+	f.settled <- changes
+	n := int(f.calls.Add(1))
+	if f.answer != nil {
+		return f.answer(n, changes)
+	}
+	return commit.Result{Outcome: commit.Committed, Commit: testCommit, Files: len(changes)}, nil
 }
 
 func newWorld() *world {
 	clock := newTickWall()
-	return &world{
+	w := &world{
 		clock: clock, scanner: newFakeScanner(clock), watcher: newFakeWatcher(),
 		settled: make(chan []scan.Change, 100), scanOpts: make(chan scan.Options, 10), watchOpt: make(chan watch.Options, 10),
+		commitOpt: make(chan commit.Options, 10),
 	}
+	w.committer = &fakeCommitter{settled: w.settled}
+	return w
 }
 
 // with gives the agent a bidirectional Treebind, a checkout that works, pulls that find nothing, and the
@@ -199,7 +226,13 @@ func (w *world) with(more ...func(*Options)) func(*Options) {
 			w.watchOpt <- options
 			return w.watcher, nil
 		}
-		o.Settled = func(_ context.Context, changes []scan.Change) { w.settled <- changes }
+		o.NewCommitter = func(options commit.Options) (Committer, error) {
+			w.commitOpt <- options
+			if w.commitErr != nil {
+				return nil, w.commitErr
+			}
+			return w.committer, nil
+		}
 		for _, m := range more {
 			m(o)
 		}
@@ -231,13 +264,16 @@ func TestScansABidirectionalTreebindAfterTheCheckoutAndSaysInTheReportWhatItFoun
 	if !ok || got.Outcome != outcomePassed || got.Reason != "" {
 		t.Fatalf("changes = %+v, want it passed", got)
 	}
-	for _, want := range []string{"2 files changed on the volume", "0 settled", "2 waiting", "does not commit them yet"} {
+	for _, want := range []string{"2 files changed on the volume", "0 settled", "2 waiting"} {
 		if !strings.Contains(got.Message, want) {
 			t.Errorf("message = %q, want it to say %q", got.Message, want)
 		}
 	}
-	if names := checkNames(t, r); names != "Mount,Writable,Checkout,Pull,Changes" {
-		t.Errorf("checks = %s, want the changes after the pull", names)
+	if strings.Contains(got.Message, "does not commit") {
+		t.Errorf("message = %q, want it not to say that the agent does not commit: it does", got.Message)
+	}
+	if names := checkNames(t, r); names != "Mount,Writable,Checkout,Pull,Changes,Commit" {
+		t.Errorf("checks = %s, want the changes after the pull, and the commit after the changes", names)
 	}
 }
 

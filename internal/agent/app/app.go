@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
+	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/heartbeat"
@@ -119,9 +120,12 @@ type Options struct {
 	// its interval. It defaults to none, and the scans are then on their interval alone: the agent starts
 	// with watch.New.
 	NewWatcher func(options watch.Options) (Watcher, error)
-	// Settled is called with the changes that have settled, at the scan that finds them settled, and again at
-	// each scan while they are still there. It is where the commit is to go (#36), and is none until then.
-	Settled func(ctx context.Context, settled []scan.Change)
+	// NewCommitter makes what commits the changes that have settled, once the checkout is made, for a Treebind
+	// that syncs in both directions and has a scanner. It is called with the author and the template of the
+	// spec, and with the fence of the writer lock, and its commit is made in the scan that finds the changes
+	// settled, and again at each scan while they are still there (docs/adr/0031). It defaults to none, so that
+	// nothing is committed: the agent starts with commit.New.
+	NewCommitter func(options commit.Options) (Committer, error)
 	// ScanInterval is the longest wait between two scans, and ScanGap the shortest time between the end of a
 	// scan and the next that an event calls for. The defaults of package syncloop when they are zero.
 	ScanInterval, ScanGap time.Duration
@@ -297,8 +301,9 @@ func (a *agent) report() status.Report {
 type progress struct {
 	volume                  []preflight.Result
 	lock, checkout, pulling *preflight.Result
-	// changes is the scan for local changes, which only a Treebind that syncs in both directions has.
-	changes *preflight.Result
+	// changes is the scan for local changes, which only a Treebind that syncs in both directions has, and
+	// commit is what came of the last commit of the files that the scans found settled.
+	changes, commit *preflight.Result
 }
 
 // prepare checks the volume, and once it is in order takes the writer lock, which is held
@@ -314,6 +319,9 @@ func (a *agent) prepare(ctx context.Context) {
 	}
 	if a.scansFollow() {
 		p.changes = notTried(CheckChanges, "not tried, because the checkout is not made yet")
+	}
+	if a.commitsFollow() {
+		p.commit = notTried(CheckCommit, "not tried, because the checkout is not made yet")
 	}
 	if a.AcquireLock != nil {
 		if !a.takeLock(ctx, p) {
@@ -396,6 +404,12 @@ func (a *agent) waitingForTheVolume(volume []preflight.Result, failed bool) *pro
 			p.changes = notTried(CheckChanges, later)
 		}
 	}
+	if a.commitsFollow() {
+		p.commit = notTried(CheckCommit, "not tried, because the checkout is not made yet")
+		if failed {
+			p.commit = notTried(CheckCommit, later)
+		}
+	}
 	return p
 }
 
@@ -412,7 +426,7 @@ func notTried(check, message string) *preflight.Result {
 // the steps that there are.
 func (a *agent) publish(p *progress) {
 	results := append([]preflight.Result(nil), p.volume...)
-	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling, p.changes} {
+	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling, p.changes, p.commit} {
 		if step != nil {
 			results = append(results, *step)
 		}
@@ -505,16 +519,16 @@ func (a *agent) runCheckout(ctx context.Context, options checkout.Options) (pref
 	if err != nil {
 		return failedCheckout(err), checkout.Result{}
 	}
-	commit := shortOf(made.Commit)
+	short := shortOf(made.Commit)
 	var message string
 	switch made.Outcome {
 	case checkout.Cloned:
-		message = fmt.Sprintf("cloned the branch %s (%s) into %s", made.Branch, commit, options.Layout.WorkTree)
+		message = fmt.Sprintf("cloned the branch %s (%s) into %s", made.Branch, short, options.Layout.WorkTree)
 	case checkout.Adopted:
 		message = fmt.Sprintf("%s holds exactly the files of the branch %s (%s) and is the checkout now",
-			options.Layout.WorkTree, made.Branch, commit)
+			options.Layout.WorkTree, made.Branch, short)
 	default:
-		message = fmt.Sprintf("reopened the checkout of the branch %s (%s) in %s", made.Branch, commit, options.Layout.WorkTree)
+		message = fmt.Sprintf("reopened the checkout of the branch %s (%s) in %s", made.Branch, short, options.Layout.WorkTree)
 	}
 	if note := clearedNote(cleared); note != "" {
 		message += "; " + note
@@ -523,11 +537,11 @@ func (a *agent) runCheckout(ctx context.Context, options checkout.Options) (pref
 }
 
 // shortOf is how much of a commit a message shows, or says that there is none.
-func shortOf(commit string) string {
-	if commit == "" {
+func shortOf(id string) string {
+	if id == "" {
 		return "no commit yet"
 	}
-	return commit[:min(len(commit), shortCommit)]
+	return id[:min(len(id), shortCommit)]
 }
 
 // failedCheckout is the failed result for an error of the checkout: its own reason when
