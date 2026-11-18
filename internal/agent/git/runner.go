@@ -108,6 +108,16 @@ type Options struct {
 	// MaxOutput is how many bytes a command may write to its standard output.
 	// DefaultMaxOutput when it is zero.
 	MaxOutput int64
+
+	// Running, when it is set, is called when a command is about to run, with the longest it may take, and
+	// the function it returns is called when the command has ended, in whatever way: it finished, it failed,
+	// it was stopped at its timeout or it was cancelled. It is for what watches the agent for a loop that is
+	// stuck (docs/adr/0030): a command takes as long as its timeout says, and is not stuck before that. It
+	// is called before the Git directory is looked at, because a volume that does not answer holds that
+	// look too. A command that is not run, because its subcommand is not allowed, is not told. The function
+	// that it returns can be nil. What watches the agent holds one promise at a time, so it relies on the
+	// commands of the agent running one at a time (docs/adr/0024), as they do.
+	Running func(timeout time.Duration) (done func())
 }
 
 // SSH holds what Git needs to connect to an ssh:// repository.
@@ -145,6 +155,7 @@ type Runner struct {
 	caBundle  string
 	timeout   time.Duration
 	maxOutput int64
+	running   func(timeout time.Duration) func()
 
 	// settings and env are computed once, because they never change.
 	settings []string
@@ -232,6 +243,7 @@ func New(o Options) (*Runner, error) {
 		caBundle:  o.CABundle,
 		timeout:   o.Timeout,
 		maxOutput: o.MaxOutput,
+		running:   o.Running,
 	}
 	if r.git == "" {
 		git, err := exec.LookPath("git")
@@ -436,6 +448,11 @@ func (r *Runner) run(ctx context.Context, timeout time.Duration, args []string) 
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
+	}
+	if r.running != nil {
+		if done := r.running(timeout); done != nil {
+			defer done()
+		}
 	}
 	// While this runs, no lock file in the Git directory is known to be stale (RemoveStaleLocks).
 	defer begin(r.gitDir)()

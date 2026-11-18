@@ -23,8 +23,11 @@ import (
 	"testing"
 )
 
-func routes(ready bool) http.Handler {
-	return Routes(newHandler(onlyGoodToken), func() bool { return ready })
+// routes is the handler of an agent that is alive, with the readiness that the test gives.
+func routes(ready bool) http.Handler { return routesFor(ready, true) }
+
+func routesFor(ready, alive bool) http.Handler {
+	return Routes(newHandler(onlyGoodToken), func() bool { return ready }, func() bool { return alive })
 }
 
 func get(handler http.Handler, method, path string, authorization ...string) *httptest.ResponseRecorder {
@@ -48,13 +51,37 @@ func TestRoutesServeTheReportOnlyToAnAcceptedCaller(t *testing.T) {
 }
 
 func TestProbes(t *testing.T) {
-	t.Run("healthz is ok whatever the readiness", func(t *testing.T) {
+	t.Run("healthz is ok for a loop that is alive, whatever the readiness", func(t *testing.T) {
 		for _, ready := range []bool{false, true} {
 			w := get(routes(ready), http.MethodGet, HealthPath)
 
 			if w.Code != http.StatusOK || w.Body.String() != "ok\n" {
 				t.Errorf("ready %v: %d %q", ready, w.Code, w.Body.String())
 			}
+		}
+	})
+
+	t.Run("healthz fails for a loop that is stuck, whatever the readiness", func(t *testing.T) {
+		for _, ready := range []bool{false, true} {
+			w := get(routesFor(ready, false), http.MethodGet, HealthPath)
+
+			// Not "not ready": a stuck loop is not about readiness, and the word is what a person finds in the
+			// events of the pod.
+			if w.Code != http.StatusServiceUnavailable || w.Body.String() != "not alive\n" {
+				t.Errorf("ready %v: %d %q, want 503 and not alive", ready, w.Code, w.Body.String())
+			}
+		}
+		if w := get(routesFor(true, false), http.MethodHead, HealthPath); w.Code != http.StatusServiceUnavailable {
+			t.Errorf("HEAD: %d, want 503", w.Code)
+		}
+	})
+
+	t.Run("readyz does not follow the liveness, and healthz does not follow the readiness", func(t *testing.T) {
+		if w := get(routesFor(true, false), http.MethodGet, ReadyPath); w.Code != http.StatusOK {
+			t.Errorf("ready and stuck: readyz is %d, want 200: the loop being late is not what readiness is about", w.Code)
+		}
+		if w := get(routesFor(false, true), http.MethodGet, HealthPath); w.Code != http.StatusOK {
+			t.Errorf("not ready and alive: healthz is %d, want 200", w.Code)
 		}
 	})
 
@@ -100,8 +127,10 @@ func TestProbes(t *testing.T) {
 	t.Run("no answer may be cached", func(t *testing.T) {
 		for _, path := range []string{HealthPath, ReadyPath, "/nothing"} {
 			for _, ready := range []bool{false, true} {
-				if got := get(routes(ready), http.MethodGet, path).Header().Get("Cache-Control"); got != noStore {
-					t.Errorf("%s, ready %v: Cache-Control is %q", path, ready, got)
+				for _, alive := range []bool{false, true} {
+					if got := get(routesFor(ready, alive), http.MethodGet, path).Header().Get("Cache-Control"); got != noStore {
+						t.Errorf("%s, ready %v, alive %v: Cache-Control is %q", path, ready, alive, got)
+					}
 				}
 			}
 		}
@@ -120,10 +149,12 @@ func TestRoutesServeNothingElse(t *testing.T) {
 	}
 }
 
-func TestRoutesNeedAHandlerAndAReadinessFunction(t *testing.T) {
+func TestRoutesNeedAHandlerAReadinessFunctionAndALivenessFunction(t *testing.T) {
+	yes := func() bool { return true }
 	for name, build := range map[string]func(){
-		"no report handler": func() { Routes(nil, func() bool { return true }) },
-		"no readiness":      func() { Routes(newHandler(onlyGoodToken), nil) },
+		"no report handler": func() { Routes(nil, yes, yes) },
+		"no readiness":      func() { Routes(newHandler(onlyGoodToken), nil, yes) },
+		"no liveness":       func() { Routes(newHandler(onlyGoodToken), yes, nil) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
