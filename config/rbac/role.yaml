@@ -17,10 +17,8 @@ rules:
   - services
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -29,10 +27,8 @@ rules:
   - statefulsets
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -40,24 +36,13 @@ rules:
   resources:
   - treebinds
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - treebind.example.org
   resources:
   - treebinds/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - treebind.example.org
-  resources:
   - treebinds/status
   verbs:
-  - get
-  - patch
   - update

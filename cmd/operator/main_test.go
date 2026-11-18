@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -78,5 +79,32 @@ func TestLeaderElectionTimingsAreInTheDocumentation(t *testing.T) {
 				t.Errorf("docs/operator-replicas.md has no table row that starts %q; change it and the timing together", row)
 			}
 		})
+	}
+}
+
+// main cannot be run in a test, so this holds the wiring of --watch-namespaces as it reads: the flag is read
+// with the parser that checks it, an invalid list stops the operator before it connects to anything, and the
+// namespaces reach the cache of the manager. The cluster run of #30 held that it works.
+func TestTheFlagForNamespacesIsParsedAndReachesTheCacheOfTheManager(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, want := range []string{
+		`flag.StringVar(&watchNamespaces, "watch-namespaces"`,
+		`controller.ParseWatchNamespaces(watchNamespaces)`,
+		`Invalid --watch-namespaces`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("main.go does not hold %q", want)
+		}
+	}
+	if !regexp.MustCompile(`Cache:\s+controller\.CacheOptions\(namespaces\),`).MatchString(text) {
+		t.Error("main.go does not give the manager the cache options that the namespaces make")
+	}
+	// The list is read and checked before the operator connects to the API server, so that a bad one fails at once.
+	if strings.Index(text, "ParseWatchNamespaces") > strings.Index(text, "ctrl.GetConfigOrDie()") {
+		t.Error("the list of namespaces is read after the operator has connected to the API server")
 	}
 }
