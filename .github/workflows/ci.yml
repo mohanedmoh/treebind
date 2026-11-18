@@ -232,6 +232,78 @@ jobs:
           image="$(ko build --local --bare --platform=linux/amd64 ./cmd/agent)"
           hack/check-agent-image.sh "$image"
 
+  # The chart is held to real Helm: helm lint --strict, helm template for the values
+  # that the tests of the chart use, and a test that holds the objects that Helm makes
+  # equal to the ones that the renderer of those tests makes
+  # (internal/controller/chart_helm_test.go), so that the functions that the renderer
+  # writes are proven against Helm. It follows the code filter, like e2e: a pull request
+  # that touches only documentation skips it, and a skipped job counts as passing.
+  chart:
+    name: chart
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # The same Helm as release.yml, pinned by version and by the SHA-256 of the
+      # download. The pin is in both files, and the two have to be updated together.
+      HELM_VERSION: v4.3.1
+      HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install Helm
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSLo helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          mv linux-amd64/helm helm
+          echo "$tools" >> "$GITHUB_PATH"
+
+      # The pin of Helm is in this file and in release.yml, and a chart that CI checks with one Helm and the release
+      # publishes with another is not what CI checked. The job fails when the two differ.
+      - name: The Helm pin is the one of the release
+        run: |
+          set -euo pipefail
+          for key in HELM_VERSION HELM_SHA256; do
+            here="$(sed -n "s/^ *${key}: *//p" .github/workflows/ci.yml | head -n 1)"
+            release="$(sed -n "s/^ *${key}: *//p" .github/workflows/release.yml | head -n 1)"
+            if [ -z "$here" ] || [ "$here" != "$release" ]; then
+              echo "::error::${key} is '${here}' in ci.yml and '${release}' in release.yml: change both together."
+              exit 1
+            fi
+          done
+
+      - name: Lint the chart
+        run: helm lint charts/treebind --strict
+
+      # The default values, the namespaced install with a list of namespaces, and the
+      # optional role on volumes. Each has to render.
+      - name: Render the chart for the values that the tests use
+        run: |
+          set -euo pipefail
+          helm template treebind charts/treebind --namespace treebind-system > /dev/null
+          helm template treebind charts/treebind --namespace treebind-system \
+            --set rbac.namespaced=true --set 'rbac.namespaces={apps,tools}' > /dev/null
+          helm template treebind charts/treebind --namespace treebind-system \
+            --set rbac.volumeRead.enabled=true > /dev/null
+
+      - name: Hold the objects of Helm to the renderer of the tests
+        env:
+          HELM_BIN: ${{ runner.temp }}/tools/helm
+        run: go test ./internal/controller/ -run 'TestRealHelm' -count=1 -v
+
   # Every commit needs a Signed-off-by line. Dependabot does not add one, so
   # its pull requests skip the job; a job skipped by its own condition counts
   # as passing, which keeps the required check satisfied.
@@ -294,7 +366,7 @@ jobs:
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [approve, changes, lint, unit, envtest, build, image, dco, pr-title, e2e]
+    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled

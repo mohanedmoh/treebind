@@ -5,11 +5,14 @@
 # Usage: hack/sync-chart-rbac.sh <generated-role> <chart-role>
 #
 # The chart template is the generated role with its header replaced, so that the
-# kind, the namespace and the name follow the rbac.namespaced value and the release.
-# The rules, from the "rules:" line down, are copied as they are. Anything else
-# that differs means the copy was edited by hand, which this script overwrites.
-# The generated file must hold one role: a second document, such as a Role that
-# a namespaced RBAC marker adds, would need its own template, so it is an error.
+# kind, the namespace and the name follow the rbac.namespaced value, the namespaces
+# that the operator serves (the helper treebind.watchNamespaces) and the release. It
+# writes the role once for each of those namespaces, as a Role, and once as a
+# ClusterRole when there are none. The rules, from the "rules:" line down, are copied
+# as they are. Anything else that differs means the copy was edited by hand, which
+# this script overwrites. The generated file must hold one role: a second document,
+# such as a Role that a namespaced RBAC marker adds, would need its own template, so
+# it is an error.
 set -euo pipefail
 
 src="${1:?usage: sync-chart-rbac.sh <generated-role> <chart-role>}"
@@ -20,15 +23,17 @@ trap 'rm -f "$tmp"' EXIT
 
 {
   cat <<'EOF'
+{{- range $namespace := splitList "," (include "treebind.watchNamespaces" .) }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
-{{- if .Values.rbac.namespaced }}
+{{- if $.Values.rbac.namespaced }}
 kind: Role
 {{- else }}
 kind: ClusterRole
 {{- end }}
 metadata:
-{{- if .Values.rbac.namespaced }}
-  namespace: {{ .Release.Namespace }}
+{{- if $.Values.rbac.namespaced }}
+  namespace: {{ $namespace }}
 {{- end }}
   name: {{ include "treebind.resourceName" (dict "suffix" "manager-role" "context" $) }}
 EOF
@@ -38,6 +43,7 @@ EOF
     found { print }
     END { if (!found) exit 1 }
   ' "$src"
+  echo '{{- end }}'
 } > "$tmp" || status=$?
 
 case "${status:-0}" in

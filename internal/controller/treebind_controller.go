@@ -57,11 +57,15 @@ func (r *TreebindReconciler) agentSettings() agentSettings {
 	return agentSettings{Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject}
 }
 
-// +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds/status,verbs=get;update;patch
+// What the operator may do is what its code does and no more (NFR-5): it reads Treebinds and writes their
+// status, and it creates and updates the StatefulSet and the Service that a Treebind owns, which the garbage
+// collector deletes with it. The finalizers verb is for the owner reference of what it creates, which sets
+// blockOwnerDeletion. The ConfigMap of the keys is in statuskeys.go. rbac_exact_test.go holds each list.
+// +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds,verbs=get;list;watch
+// +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds/status,verbs=update
 // +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update
 
 // awaitingReportMessage is the message of the Synced and Conflict conditions
 // until the sync agent's first report arrives.

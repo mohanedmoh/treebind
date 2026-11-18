@@ -77,7 +77,8 @@ func rulesFrom(t *testing.T, path string) []policyRule {
 	var kept []string
 	for line := range strings.SplitSeq(text[start:], "\n") {
 		if !helmDirective.MatchString(line) {
-			kept = append(kept, line)
+			// An expression inside a line, such as a name that the chart builds, stands in as a word.
+			kept = append(kept, inlineExpression.ReplaceAllStringFunc(line, placeholder))
 		}
 	}
 
