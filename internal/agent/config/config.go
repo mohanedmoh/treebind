@@ -70,6 +70,12 @@ const (
 	// array of strings. A list that is empty is not set (docs/adr/0022).
 	EnvPathsInclude = "TREEBIND_PATHS_INCLUDE"
 	EnvPathsExclude = "TREEBIND_PATHS_EXCLUDE"
+	// EnvCommitAuthorName and EnvCommitAuthorEmail are the author and the committer of every commit, and
+	// EnvCommitMessageTemplate is the template of its message, as spec.commit says them. Each is not set when
+	// the spec does not say it, and the agent has a default for it (docs/adr/0031).
+	EnvCommitAuthorName      = "TREEBIND_COMMIT_AUTHOR_NAME"
+	EnvCommitAuthorEmail     = "TREEBIND_COMMIT_AUTHOR_EMAIL"
+	EnvCommitMessageTemplate = "TREEBIND_COMMIT_MESSAGE_TEMPLATE"
 
 	EnvStatusAddr     = "TREEBIND_STATUS_ADDR"
 	EnvStatusIssuer   = "TREEBIND_STATUS_ISSUER"
@@ -136,6 +142,10 @@ type Config struct {
 	// PathsInclude and PathsExclude are the include and exclude patterns of spec.paths, which
 	// paths.Check takes. They are empty when the spec has none.
 	PathsInclude, PathsExclude []string
+	// CommitAuthorName, CommitAuthorEmail and CommitMessageTemplate are what spec.commit says, as they are
+	// written, and are empty when it does not say. They are not judged here: the commit package does that when
+	// it makes its committer, so that a wrong one is a failed check in the report and not an agent that exits.
+	CommitAuthorName, CommitAuthorEmail, CommitMessageTemplate string
 
 	// StatusAddr is the address the status endpoint and the probes listen on.
 	StatusAddr string
@@ -176,11 +186,16 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		PodName:        get(EnvPodName),
 		PathsInclude:   include,
 		PathsExclude:   exclude,
-		StatusAddr:     orDefault(get(EnvStatusAddr), DefaultStatusAddr),
-		StatusIssuer:   get(EnvStatusIssuer),
-		StatusAudience: get(EnvStatusAudience),
-		StatusSubject:  get(EnvStatusSubject),
-		StatusKeysFile: orDefault(get(EnvStatusKeysFile), DefaultStatusKeys),
+		// Not trimmed: spaces at the ends of a name are something that Git would drop, and the commit package
+		// says so, and one at the ends of a template is the template's.
+		CommitAuthorName:      getenv(EnvCommitAuthorName),
+		CommitAuthorEmail:     getenv(EnvCommitAuthorEmail),
+		CommitMessageTemplate: getenv(EnvCommitMessageTemplate),
+		StatusAddr:            orDefault(get(EnvStatusAddr), DefaultStatusAddr),
+		StatusIssuer:          get(EnvStatusIssuer),
+		StatusAudience:        get(EnvStatusAudience),
+		StatusSubject:         get(EnvStatusSubject),
+		StatusKeysFile:        orDefault(get(EnvStatusKeysFile), DefaultStatusKeys),
 	}
 	err := config.validate()
 	if intervalErr != nil {

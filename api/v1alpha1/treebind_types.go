@@ -210,18 +210,41 @@ type SyncSpec struct {
 	ConflictPolicy ConflictPolicy `json:"conflictPolicy,omitempty"`
 }
 
-// CommitSpec controls the commits the agent creates from local edits.
+// CommitSpec controls the commits the agent creates from local edits. Every commit is by one author, who is also
+// its committer, so that a commit of the agent is easy to tell from one by a person, and a name and an email are
+// set together or not at all. The agent has a default for what is not set: the author treebind-bot, with an
+// email that cannot exist, and the message "treebind: sync {{.Count}} file(s)". The agent is the judge of every
+// value, and the rules here refuse what it could never use, so that the mistake is found when the Treebind is
+// written, and not when the first commit fails (docs/adr/0031).
+// +kubebuilder:validation:XValidation:rule="has(self.authorName) == has(self.authorEmail)",message="authorName and authorEmail must be set together"
 type CommitSpec struct {
-	// authorName is the name recorded as the author of every commit.
+	// authorName is the name recorded as the author of every commit. Git drops a newline, '<' and '>' anywhere in a
+	// name, and a space, a control character and any of . , : ; " ' \ from its ends, so a name with one of them is
+	// refused: the commits would say another name than the one written here.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="!self.matches(r'[<>\\x00-\\x1f\\x7f]')",message="authorName must not contain '<', '>' or a control character such as a newline"
+	// +kubebuilder:validation:XValidation:rule="!self.matches(r'^[\\x00-\\x20.,:;\\x22\\x27\\x5c]|[\\x00-\\x20.,:;\\x22\\x27\\x5c]$')",message="authorName must not start or end with a space or one of . , : ; \" ' \\, which Git drops"
 	AuthorName string `json:"authorName,omitempty"`
 
-	// authorEmail is the email recorded as the author of every commit.
+	// authorEmail is the email recorded as the author of every commit. It is one bare address, such as
+	// bot@example.org, with no name and no comment.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=254
+	// +kubebuilder:validation:XValidation:rule="self.matches(r'^[^@\\s]+@[^@\\s]+$')",message="authorEmail must be an address of the form name@host, with no space"
+	// +kubebuilder:validation:XValidation:rule="!self.matches(r'[<>()\\x00-\\x1f\\x7f]')",message="authorEmail must be a bare address: no name, no comment, no '<' or '>' and no control character"
+	// +kubebuilder:validation:XValidation:rule="!self.matches(r'^[.,:;\\x22\\x27\\x5c]|[.,:;\\x22\\x27\\x5c]$')",message="authorEmail must not start or end with one of . , : ; \" ' \\, which Git drops"
 	AuthorEmail string `json:"authorEmail,omitempty"`
 
-	// messageTemplate is the commit message, as a Go text/template.
+	// messageTemplate is the commit message, as a Go text/template, with {{.Count}} for the number of files in
+	// the commit. Only the built-in functions of the package are there, so a template cannot run a program or read
+	// a file. The whitespace around the message is trimmed, and the first line is the subject.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:XValidation:rule="!self.matches(r'\\x00')",message="messageTemplate must not contain a NUL"
 	MessageTemplate string `json:"messageTemplate,omitempty"`
 }
 
