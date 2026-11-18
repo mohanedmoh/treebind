@@ -19,7 +19,8 @@ package status
 import "net/http"
 
 const (
-	// HealthPath answers whether the agent is running.
+	// HealthPath answers whether the agent is alive: its loop has beaten within what it promised
+	// (docs/adr/0030). The kubelet restarts a pod that does not answer it.
 	HealthPath = "/healthz"
 	// ReadyPath answers whether the agent is ready: it has synced.
 	ReadyPath = "/readyz"
@@ -27,22 +28,23 @@ const (
 
 // Routes returns the handler of everything the agent serves: the report at Path
 // for a caller with a token, and the two probe paths for the kubelet, which cannot
-// present one. A probe says "ok" or "not ready" and nothing else, so it tells a
-// stranger nothing the kubelet's own view of the pod does not. Any other path is
-// not found, and the path is compared as it was sent, with nothing cleaned,
-// decoded or redirected.
-func Routes(report http.Handler, ready func() bool) http.Handler {
-	if report == nil || ready == nil {
-		panic("status: Routes needs a report handler and a readiness function")
+// present one. The probes follow the two functions: alive for HealthPath and ready
+// for ReadyPath, and neither depends on the other. A probe says "ok" or "ready", or
+// "not alive" or "not ready", and nothing else, so it tells a stranger nothing the
+// kubelet's own view of the pod does not. Any other path is not found, and the path
+// is compared as it was sent, with nothing cleaned, decoded or redirected.
+func Routes(report http.Handler, ready, alive func() bool) http.Handler {
+	if report == nil || ready == nil || alive == nil {
+		panic("status: Routes needs a report handler, a readiness function and a liveness function")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() {
 		case Path:
 			report.ServeHTTP(w, r)
 		case HealthPath:
-			probe(w, r, true, "ok")
+			probe(w, r, alive(), "ok", "not alive")
 		case ReadyPath:
-			probe(w, r, ready(), "ready")
+			probe(w, r, ready(), "ready", "not ready")
 		default:
 			w.Header().Set("Cache-Control", noStore)
 			http.NotFound(w, r)
@@ -53,15 +55,15 @@ func Routes(report http.Handler, ready func() bool) http.Handler {
 // noStore keeps every answer of the endpoint out of caches.
 const noStore = "no-store"
 
-// probe answers a probe request with the word when the probe passes and with 503
-// when it does not.
-func probe(w http.ResponseWriter, r *http.Request, passes bool, word string) {
+// probe answers a probe request with the word when the probe passes and with 503 and
+// the failure word when it does not.
+func probe(w http.ResponseWriter, r *http.Request, passes bool, word, failure string) {
 	w.Header().Set("Cache-Control", noStore)
 	if !readOnlyMethod(w, r) {
 		return
 	}
 	if !passes {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		http.Error(w, failure, http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

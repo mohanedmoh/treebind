@@ -17,8 +17,8 @@ StatefulSet's pod is ready, and `Ready` is about the data path (ADR 0004, ADR 00
 before anything has synced, and a failure of the repository is not a reason to say it is not ready when the data on the
 volume is as it was. Tools such as `kubectl wait` and the health checks of a GitOps controller act on `Ready`.
 
-This record is the readiness probe. The liveness probe, which `/healthz` answers from the heartbeat of the loop, is a
-second change for the same issue, and it extends this record when it lands.
+This record is both probes: the readiness probe, which `/readyz` answers from the first pull, and the liveness probe,
+which `/healthz` answers from the heartbeat of the loop. They landed as two changes of the same issue.
 
 ## Decision
 
@@ -71,6 +71,49 @@ restarted starts not ready, because nothing in its memory says that its predeces
 first pull, up to one interval after its checkout. The volume checks stop once they pass (ADR 0011), so they do not
 bear on the readiness.
 
+### The loop beats, and `/healthz` answers from the beats
+
+`/healthz` answered 200 whatever the agent was doing, so a loop that had stopped for good, in a call that never returned,
+kept its pod. It now answers 503 when the loop has been silent for longer than it said it would be, and the kubelet restarts
+the container. The package `internal/agent/heartbeat` holds the beats, and takes its time from a function that a test
+moves by hand.
+
+A single deadline for the whole loop cannot work. `spec.sync.interval` has no maximum, so a Treebind may pull once a day.
+A pull that failed waits up to ten minutes (ADR 0024), and a fetch of a large repository is allowed half an hour. The
+agent waits for the writer lock for as long as another agent holds it (ADR 0023), which is not a fault that a restart puts
+right. So each beat carries its own promise: how long it is until the next. The agent is alive until that time and a
+grace have passed.
+
+| The loop is | The beat promises | Where it comes from |
+| :-- | :-- | :-- |
+| Waiting for the next pull or scan | The length of the wait | The loop (`syncloop.Options.Beat`), again when an event ends a wait sooner |
+| Waiting to retry the volume checks, the lock or the checkout | The length of the wait | The step, before it says that it failed |
+| Waiting for the lock of another agent | The interval of the lock (a third of the TTL, 10 seconds) and then a look at the volume, which is the next row | `lock.Config.Beat`, before each wait |
+| In a Git command | The timeout of the command | The Runner (`git.Options.Running`), before it looks at the Git directory |
+| In the code between waits and commands | 5 minutes (`heartbeat.Work`) | The start of each step, and the end of each command |
+
+The grace is 30 seconds (`heartbeat.Grace`). It is longer than a timer that fires late, and than a Git command that is being
+stopped after its timeout: SIGTERM, SIGKILL three seconds later, and the ten seconds that an update that is being applied is
+allowed to finish (ADR 0028). The probe asks every 10 seconds and fails after three misses, so the pod is restarted 20 to
+30 seconds after the grace, which is about a minute after a promise that was broken. A beat that comes late revives the agent: the kubelet
+counts misses, and a loop that was slow and went on is not restarted. The agent starts with a promise of 5 minutes.
+
+Four choices that are not obvious:
+
+- **Only the loop beats.** The keeper of the writer lock does not. A keeper that cannot write to the volume loses the lock in
+  30 seconds and ends the agent (ADR 0023), which is a stronger answer than a probe. The loop does one thing at a time (ADR
+  0024), so the last beat is the promise that holds, and a change that runs two commands at once has to give the monitor a
+  promise for each.
+- **A failed step is not a stuck loop.** A pull that fails, a volume check that fails and a checkout that cannot reach the
+  repository are all steps that return, and the loop beats for the wait after them. What the probe asks is whether the loop
+  goes on, and the report says what failed.
+- **An agent that has nothing more to do is alive for good.** With no lock, checkout or pulls to run, or with settings that
+  no wait puts right, the loop has ended and the process serves the report. A restart would bring it back to the same place.
+- **The probe does not follow the readiness, and the readiness does not follow the probe.** A pod that is ready and stuck
+  stays ready until the restart, and a pod that is alive and not ready is waiting for its first pull.
+
+A late loop is logged once a minute at most, with how late it is, so that the person who finds the pod restarted finds why.
+
 ### What does not change
 
 The pod template, the operator, the CRD and the report do not change: the probes, their paths and their timings are
@@ -92,6 +135,15 @@ agent says it itself.
 - A pull that fails after the first success does not show in `Ready`. It shows in the check `Pull` and in the log, and
   `Synced` is where it will show once the report carries the sync state (ADR 0015).
 - A container that is restarted is not ready until it has pulled, so a restart is seen in `Ready` for up to one interval.
-  What causes one today is a crash and the loss of the writer lock; the liveness probe adds another.
-- Not decided here: what makes the liveness probe fail, which is the second change of #48; whether a `bidirectional`
-  Treebind is ready before its first push (#37); and a probe that depends on the volume probe (#101).
+  What causes one is a crash, the loss of the writer lock, and a loop that is stuck.
+- A loop that is stuck in a call that does not return is restarted about a minute after its promise ran out, and not
+  before: the promise of a command is its timeout, so a fetch that hangs is stopped by the Runner at its own timeout (30
+  minutes for a fetch) before the liveness probe would find it, and the code between commands has 5 minutes. A restart does
+  not cure a volume that does not answer. It gives a pod whose restarts and events say that the agent was stuck, and a new
+  process whose volume checks say what the volume does.
+- The 5 minutes of `heartbeat.Work` and the 30 seconds of `heartbeat.Grace` are constants and not settings. A step of code
+  that takes longer than 5 minutes on a volume that is slow would be restarted, and it would be restarted again at the
+  same place. No step does that now (an update is applied by Git, whose command has the timeout of the fetch). A step that
+  could has to beat while it works, and that is what a later change must do.
+- Not decided here: whether a `bidirectional` Treebind is ready before its first push (#37); and a probe that depends on
+  the volume probe (#101).

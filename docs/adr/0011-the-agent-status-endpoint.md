@@ -141,10 +141,12 @@ first, requests that are being answered finish, and a volume check that does not
 return in five seconds is left behind, so that a hung mount cannot hold the agent
 past the time its pod gives it.
 
-The probes are on the same port and need no token. `/healthz` says the agent is
-running, and stays `ok` while a check fails, because a restart would not cure a
-volume. `/readyz` says it has synced: it answers `503` until a pull has passed
-(ADR 0030). A Treebind therefore does not turn `Ready` before anything syncs.
+The probes are on the same port and need no token. `/healthz` says the loop of
+the agent is not stuck: it answers `503` when the loop has been silent for longer
+than it promised (ADR 0030). It stays `ok` while a check fails, because the loop
+goes on and a restart would not cure a volume. `/readyz` says it has synced: it
+answers `503` until a pull has passed (ADR 0030). A Treebind therefore does not
+turn `Ready` before anything syncs.
 
 A caller that is refused is logged at most once in thirty seconds, with the count
 of the ones that were held back, because anyone who can reach the port can cause
