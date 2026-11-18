@@ -45,6 +45,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
+	"github.com/mohanedmoh/treebind/internal/agent/heartbeat"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
@@ -136,6 +137,9 @@ type Options struct {
 	RetryMin, RetryMax, ShutdownGrace time.Duration
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// HeartbeatClock is the time that the beats of the loop are measured on, and is time.Now when nil. A test
+	// moves it by hand, to see the agent late without waiting for it to be.
+	HeartbeatClock func() time.Time
 }
 
 // agent is the state of a running agent.
@@ -147,6 +151,10 @@ type agent struct {
 	// synced is whether a pull has ended well, which is what the readiness probe answers. It is set once and
 	// never cleared: the agent does not turn not ready again while it runs (docs/adr/0030).
 	synced atomic.Bool
+	// beats is where the loop says how long it is until it is heard from again, which the liveness probe
+	// answers from (docs/adr/0030), and stuck keeps a late loop from filling the log.
+	beats  *heartbeat.Monitor
+	stuck  *rateLimit
 	refuse *rateLimit
 	// holder names this start of the agent in the writer lock: the name of its pod, and a token
 	// that differs between two starts of it.
@@ -177,6 +185,8 @@ func Run(ctx context.Context, options Options) error {
 	a.fillDefaults()
 	a.startedAt = a.Now()
 	a.refuse = &rateLimit{every: refusedLogEvery, now: a.Now}
+	a.stuck = &rateLimit{every: stuckLogEvery, now: a.Now}
+	a.beats = heartbeat.New(a.HeartbeatClock)
 
 	listener := a.Listener
 	if listener == nil {
@@ -188,7 +198,7 @@ func Run(ctx context.Context, options Options) error {
 
 	handler := status.NewHandler(a.report, a.Verifier)
 	handler.Rejected = a.logRefused
-	server := status.Server(listener.Addr().String(), status.Routes(handler, a.synced.Load))
+	server := status.Server(listener.Addr().String(), status.Routes(handler, a.synced.Load, a.alive))
 
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
@@ -198,7 +208,12 @@ func Run(ctx context.Context, options Options) error {
 	var checking sync.WaitGroup
 	checkCtx, stopChecking := context.WithCancel(ctx)
 	defer stopChecking()
-	checking.Go(func() { a.prepare(checkCtx) })
+	checking.Go(func() {
+		a.prepare(checkCtx)
+		// What follows is nothing: the agent was told to stop, or it has nothing more to do and a restart would
+		// only bring it back to the same place.
+		a.beats.Finish()
+	})
 
 	var serveErr, lostErr error
 	select {
@@ -323,11 +338,17 @@ func (a *agent) checkVolume(ctx context.Context) ([]preflight.Result, bool) {
 	wait := a.RetryMin
 	var logged []string
 	for {
+		a.working()
 		results := a.Preflight(ctx, a.Config.MountPath, a.Config.SubPath)
 		if ctx.Err() != nil {
 			return nil, false
 		}
 		failed := preflight.AnyFailed(results)
+		if failed {
+			// The promise of the wait comes before the report of the failure, so that whoever has read the failure
+			// knows that the wait that follows it is promised.
+			a.beat(wait)
+		}
 		a.publish(a.waitingForTheVolume(results, failed))
 		logged = a.logChanges("volume check", results, logged)
 
@@ -418,6 +439,7 @@ func (a *agent) openCheckout(ctx context.Context, p *progress) (checkedOut, bool
 	wait := a.RetryMin
 	var logged []string
 	for {
+		a.working()
 		var result preflight.Result
 		var made checkout.Result
 		if err != nil {
@@ -427,6 +449,9 @@ func (a *agent) openCheckout(ctx context.Context, p *progress) (checkedOut, bool
 		}
 		if ctx.Err() != nil {
 			return checkedOut{}, false
+		}
+		if result.Outcome != preflight.Passed {
+			a.beat(wait)
 		}
 		p.checkout = &result
 		a.publish(p)
@@ -455,10 +480,15 @@ func (a *agent) checkoutOptions() (checkout.Options, error) {
 		Layout: where,
 		URL:    a.Config.RepoURL,
 		Branch: a.Config.RepoBranch,
-		Git: git.Options{SSH: git.SSH{
-			IdentityFile:   a.Config.SSHKeyFile,
-			KnownHostsFile: a.Config.KnownHostsFile,
-		}},
+		// The Runners of the checkout, the pulls and the scans are all made from these options, and each command
+		// tells the loop how long it may take.
+		Git: git.Options{
+			SSH: git.SSH{
+				IdentityFile:   a.Config.SSHKeyFile,
+				KnownHostsFile: a.Config.KnownHostsFile,
+			},
+			Running: a.running,
+		},
 	}, nil
 }
 

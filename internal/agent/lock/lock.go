@@ -94,6 +94,11 @@ type Config struct {
 	Interval time.Duration
 	// Clock is the system clock when nil.
 	Clock Clock
+	// Beat, when it is set, is called by Acquire before each wait for a lock that another agent holds,
+	// with the length of the wait, which is Interval. The wait is as long as the other agent holds the
+	// lock, which is for ever, and the caller that is watched by a liveness probe says by it that it is
+	// not stuck. A lock that is free is taken without a wait and without a call.
+	Beat func(wait time.Duration)
 }
 
 // checked fills in the defaults and refuses a configuration that cannot work.
@@ -169,6 +174,9 @@ func Acquire(ctx context.Context, cfg Config) (*Lock, error) {
 			if l, err := claim(cfg, top+1); l != nil || err != nil {
 				return l, err
 			}
+		}
+		if cfg.Beat != nil {
+			cfg.Beat(cfg.Interval)
 		}
 		select {
 		case <-ctx.Done():

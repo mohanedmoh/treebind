@@ -54,7 +54,7 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 
 	p.pulling = notTried(CheckPull, fmt.Sprintf("waiting: the first pull is due in %s", phase.Round(time.Second)))
 	a.publish(p)
-	loop := syncloop.Options{Interval: interval, Phase: phase, Clock: a.SyncClock, Random: a.SyncRandom, Pull: l.once}
+	loop := syncloop.Options{Interval: interval, Phase: phase, Clock: a.SyncClock, Random: a.SyncRandom, Pull: l.once, Beat: a.beat}
 	if a.scansFollow() {
 		// The scans are turns of the same loop, and never run beside a pull (docs/adr/0029).
 		if s := a.startScans(p, done); s != nil {
@@ -87,6 +87,8 @@ type pulls struct {
 // once runs one pull and puts what came of it in the report. It says whether the pull failed in the
 // sense of syncloop: whether the wait before the next one should grow.
 func (l *pulls) once(ctx context.Context) bool {
+	// What a pull does between its Git commands, and before its first, is code with a promise of its own.
+	l.a.working()
 	if l.p.pulling.Outcome == preflight.Skipped {
 		// No result yet, and a first pull can take as long as the repository does.
 		l.p.pulling = notTried(CheckPull, "running: the result of the first pull is here when it ends")
