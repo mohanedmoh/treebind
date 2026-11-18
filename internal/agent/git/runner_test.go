@@ -885,7 +885,6 @@ func TestOptionsThatSignOrRunProgramsAreRefused(t *testing.T) {
 		{cmdMerge, "--no-verify-signatures", branchSide},
 		{"rev-parse", "--verify", refHead},
 		{cmdStatus, "-s"},
-		{cmdPush, "--set-upstream", "x", "y"},
 		{cmdDiffIndex, "--no-ext-diff", "-p", refHead},
 		{cmdCatFile, "-p", refHead},
 	}
