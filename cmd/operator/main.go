@@ -96,6 +96,7 @@ func main() {
 	var enableHTTP2 bool
 	var agentImage string
 	var statusIssuer, statusSubject string
+	var watchNamespaces string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -125,6 +126,10 @@ func main() {
 		"The operator's service account as its tokens name it, system:serviceaccount:<namespace>:<name>. "+
 			"Built from POD_NAMESPACE and POD_SERVICE_ACCOUNT when empty. The operator asks for tokens of this "+
 			"account to call the sync agents, and the Role in its namespace allows that for its own account only.")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"The namespaces whose Treebinds the operator serves, separated by commas. Empty means every namespace, "+
+			"which needs a ClusterRole. With a list the operator never reads outside it, which is what a Role in "+
+			"each of those namespaces allows (docs/rbac.md).")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -132,6 +137,15 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	namespaces, err := controller.ParseWatchNamespaces(watchNamespaces)
+	if err != nil {
+		setupLog.Error(err, "Invalid --watch-namespaces")
+		os.Exit(1)
+	}
+	if len(namespaces) > 0 {
+		setupLog.Info("Serving only the Treebinds of these namespaces", "namespaces", namespaces)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -221,6 +235,7 @@ func main() {
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
+		Cache:                  controller.CacheOptions(namespaces),
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "c4984a8a.example.org",
 		LeaseDuration:          &leaseDuration,

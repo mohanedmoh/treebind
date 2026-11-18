@@ -1,0 +1,18 @@
+# An optional read-only ClusterRole on PersistentVolumes and StorageClasses, bound to the
+# operator's service account (docs/rbac.md). Add it to an overlay of config/default:
+#
+#   components:
+#   - ../components/volume-read
+#
+# The names carry the prefix of config/default themselves: kustomize adds the resources of a
+# component after it has applied the name prefix of the overlay, so a name without one would
+# stay without. The subject of the binding follows the operator's service account.
+#
+# The operator works without it. Nothing reads these objects yet: the volume details of the
+# Treebind status will (#98), and report the claim alone when this role is not there.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+- role.yaml
+- role_binding.yaml

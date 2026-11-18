@@ -88,6 +88,9 @@ spec:
         {{- range .Values.manager.args }}
         - {{ tpl . $ }}
         {{- end }}
+        {{- with (include "treebind.watchNamespacesArg" .) }}
+        - {{ . }}
+        {{- end }}
         env:
         - name: POD_NAMESPACE
           valueFrom:

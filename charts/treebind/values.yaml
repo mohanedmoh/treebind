@@ -149,10 +149,27 @@ manager:
 ##
 rbac:
   ## RBAC resource scope
-  ## - false (default): ClusterRole/ClusterRoleBinding (all namespaces)
-  ## - true: Role/RoleBinding (release namespace only)
+  ## - false (default): ClusterRole/ClusterRoleBinding. The operator serves the
+  ##   Treebinds of every namespace.
+  ## - true: Role/RoleBinding in each namespace of rbac.namespaces, which the operator is
+  ##   told to serve with --watch-namespaces (docs/rbac.md). A Treebind in another
+  ##   namespace is not looked at.
   ##
   namespaced: false
+
+  ## The namespaces that the operator serves when rbac.namespaced is true. The
+  ## release namespace when the list is empty. Setting it without rbac.namespaced
+  ## fails the install.
+  ##
+  # namespaces: []
+
+  ## A read-only ClusterRole on PersistentVolumes and StorageClasses. Nothing reads
+  ## them yet: the volume details of the Treebind status will, and report the claim
+  ## alone without this role. It is a ClusterRole whatever rbac.namespaced says, because
+  ## both are cluster-scoped.
+  ##
+  volumeRead:
+    enabled: false
 
   ## Helper roles for CRD management (admin/editor/viewer)
   ##
