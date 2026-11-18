@@ -64,7 +64,7 @@ func TestParseWatchNamespaces(t *testing.T) {
 		{name: "a name that starts with a dash", value: "-" + nsApps, fails: `"-apps"`},
 		{name: "a name that ends with a dash", value: nsApps + "-", fails: `"apps-"`},
 		{name: "a name of 64 characters", value: strings.Repeat("a", 64), fails: "63"},
-		{name: "a wildcard", value: "*", fails: `"*"`},
+		{name: caseWildcard, value: "*", fails: `"*"`},
 		{name: "a slash", value: nsApps + "/" + nsTools, fails: `"apps/tools"`},
 	}
 	for _, tt := range tests {

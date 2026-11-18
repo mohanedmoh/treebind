@@ -45,6 +45,7 @@ const (
 	// dirRBAC and dirTreebind are the names of the directories that the roles are read from.
 	dirRBAC          = "rbac"
 	dirTreebind      = "treebind"
+	dirConfig        = "config"
 	servicesResource = "services"
 	notUsed          = "which the operator does not use"
 )
@@ -57,6 +58,14 @@ var managerGrants = map[string][]string{
 	appsGroup + "/statefulsets":              {verbCreate, verbGet, verbList, verbUpdate, verbWatch},
 	"/services":                              {verbCreate, verbGet, verbList, verbUpdate, verbWatch},
 	"/" + configMaps:                         {verbCreate, verbPatch},
+}
+
+// volumeReadGrants is what the optional role reads: the volumes and the storage classes that the status of a
+// Treebind will say something about, and nothing more. It never writes, which holds the operator to FR-17:
+// deleting a Treebind cannot lose a claim or its data.
+var volumeReadGrants = map[string][]string{
+	"/" + volumes:                   {verbGet, verbList, verbWatch},
+	"storage.k8s.io/storageclasses": {verbGet, verbList, verbWatch},
 }
 
 // electionGrants is what leader election needs: a Lease that it reads, creates and renews, and the events
@@ -107,7 +116,7 @@ func grantDifference(got, want map[string][]string) string {
 
 func TestTheManagerRoleGrantsWhatTheOperatorUsesAndNothingElse(t *testing.T) {
 	for _, path := range []string{
-		filepath.Join("..", "..", "config", dirRBAC, "role.yaml"),
+		filepath.Join("..", "..", dirConfig, dirRBAC, "role.yaml"),
 		filepath.Join("..", "..", "charts", dirTreebind, "templates", dirRBAC, "manager-role.yaml"),
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -120,7 +129,7 @@ func TestTheManagerRoleGrantsWhatTheOperatorUsesAndNothingElse(t *testing.T) {
 
 func TestTheLeaderElectionRoleGrantsWhatALeaseLockUsesAndNothingElse(t *testing.T) {
 	for _, path := range []string{
-		filepath.Join("..", "..", "config", dirRBAC, "leader_election_role.yaml"),
+		filepath.Join("..", "..", dirConfig, dirRBAC, "leader_election_role.yaml"),
 		filepath.Join("..", "..", "charts", dirTreebind, "templates", dirRBAC, "leader-election-role.yaml"),
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -128,6 +137,13 @@ func TestTheLeaderElectionRoleGrantsWhatALeaseLockUsesAndNothingElse(t *testing.
 				t.Error(diff)
 			}
 		})
+	}
+}
+
+func TestTheOptionalVolumeRoleReadsVolumesAndStorageClassesAndNothingElse(t *testing.T) {
+	path := filepath.Join("..", "..", dirConfig, "components", "volume-read", "role.yaml")
+	if diff := grantDifference(grantsOf(rulesFrom(t, path)), volumeReadGrants); diff != "" {
+		t.Errorf("%s: %s", path, diff)
 	}
 }
 
@@ -152,7 +168,7 @@ func TestGrantDifference(t *testing.T) {
 		{"a group more", []policyRule{
 			{[]string{"", appsGroup}, []string{servicesResource}, []string{verbGet, verbList}},
 		}, notUsed},
-		{"a wildcard", []policyRule{{[]string{""}, []string{"*"}, []string{verbGet, verbList}}}, notUsed},
+		{caseWildcard, []policyRule{{[]string{""}, []string{"*"}, []string{verbGet, verbList}}}, notUsed},
 		{"nothing", nil, "is not granted"},
 	}
 	for _, tt := range tests {
@@ -197,7 +213,8 @@ func TestNoRoleOfTheOperatorReachesSecrets(t *testing.T) {
 		dir   []string
 		known []string
 	}{
-		{[]string{"config", dirRBAC}, []string{"role.yaml", "leader_election_role.yaml", "token_role.yaml"}},
+		{[]string{dirConfig, dirRBAC}, []string{"role.yaml", "leader_election_role.yaml", "token_role.yaml"}},
+		{[]string{dirConfig, "components", "volume-read"}, []string{"role.yaml"}},
 		{[]string{"charts", dirTreebind, "templates", dirRBAC}, []string{"manager-role.yaml", "leader-election-role.yaml", "token-role.yaml"}},
 	} {
 		files := roleFiles(t, walk.dir...)
