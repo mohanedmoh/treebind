@@ -126,8 +126,8 @@ func (l *pulls) report(ctx context.Context, result pull.Result, err error, clear
 	l.a.publish(l.p)
 	l.logged = l.a.logChanges("pull", []preflight.Result{checked}, l.logged)
 	// The report says that the pull passed before the probe says that the agent is ready.
-	if checked.Outcome == preflight.Passed && l.a.synced.CompareAndSwap(false, true) {
-		l.a.Logger.Info("the first pull passed, and the agent reports itself ready")
+	if checked.Outcome == preflight.Passed {
+		l.a.becomeReady("the first pull passed, and the agent reports itself ready")
 	}
 	return failed
 }

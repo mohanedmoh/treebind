@@ -51,6 +51,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
+	"github.com/mohanedmoh/treebind/internal/agent/push"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/agent/syncloop"
@@ -126,6 +127,12 @@ type Options struct {
 	// settled, and again at each scan while they are still there (docs/adr/0031). It defaults to none, so that
 	// nothing is committed: the agent starts with commit.New.
 	NewCommitter func(options commit.Options) (Committer, error)
+	// NewPusher makes what pushes the commits of the checkout to the branch that it follows, once the checkout is
+	// made, for a Treebind that syncs in both directions and has a scanner. The push is made in the scan turn,
+	// after the commit, never beside a pull (docs/adr/0033). It is called with the fence of the writer lock and
+	// the Runner options of the agent, so that a push tells the liveness probe how long it may take as any Git
+	// command does. It defaults to none, so that nothing is pushed: the agent starts with push.New.
+	NewPusher func(options push.Options) (Pusher, error)
 	// ScanInterval is the longest wait between two scans, and ScanGap the shortest time between the end of a
 	// scan and the next that an event calls for. The defaults of package syncloop when they are zero.
 	ScanInterval, ScanGap time.Duration
@@ -152,8 +159,9 @@ type agent struct {
 	startedAt time.Time
 	// checks is the latest results of the checks, as a report carries them.
 	checks atomic.Pointer[checked]
-	// synced is whether a pull has ended well, which is what the readiness probe answers. It is set once and
-	// never cleared: the agent does not turn not ready again while it runs (docs/adr/0030).
+	// synced is whether a pull has ended well, or a push has worked, whichever came first, which is what the
+	// readiness probe answers. It is set once and never cleared: the agent does not turn not ready again while it
+	// runs (docs/adr/0030, docs/adr/0033).
 	synced atomic.Bool
 	// beats is where the loop says how long it is until it is heard from again, which the liveness probe
 	// answers from (docs/adr/0030), and stuck keeps a late loop from filling the log.
@@ -295,15 +303,23 @@ func (a *agent) report() status.Report {
 	return report
 }
 
+// becomeReady turns the readiness on, once, and says why in the log. It is called after the report holds what made
+// the agent ready, so that a caller that sees the probe say ready and reads the report finds it there.
+func (a *agent) becomeReady(why string) {
+	if a.synced.CompareAndSwap(false, true) {
+		a.Logger.Info(why)
+	}
+}
+
 // progress is what the report holds of the steps that the agent takes one after another: the
 // volume checks, the writer lock if there is one to take, the checkout if there is one to make, and
 // the pulls if there are any to run.
 type progress struct {
 	volume                  []preflight.Result
 	lock, checkout, pulling *preflight.Result
-	// changes is the scan for local changes, which only a Treebind that syncs in both directions has, and
-	// commit is what came of the last commit of the files that the scans found settled.
-	changes, commit *preflight.Result
+	// changes is the scan for local changes, which only a Treebind that syncs in both directions has, commit is
+	// what came of the last commit of the files that the scans found settled, and push of the last push.
+	changes, commit, push *preflight.Result
 }
 
 // prepare checks the volume, and once it is in order takes the writer lock, which is held
@@ -322,6 +338,9 @@ func (a *agent) prepare(ctx context.Context) {
 	}
 	if a.commitsFollow() {
 		p.commit = notTried(CheckCommit, "not tried, because the checkout is not made yet")
+	}
+	if a.pushesFollow() {
+		p.push = notTried(CheckPush, "not tried, because the checkout is not made yet")
 	}
 	if a.AcquireLock != nil {
 		if !a.takeLock(ctx, p) {
@@ -410,6 +429,12 @@ func (a *agent) waitingForTheVolume(volume []preflight.Result, failed bool) *pro
 			p.commit = notTried(CheckCommit, later)
 		}
 	}
+	if a.pushesFollow() {
+		p.push = notTried(CheckPush, "not tried, because the checkout is not made yet")
+		if failed {
+			p.push = notTried(CheckPush, later)
+		}
+	}
 	return p
 }
 
@@ -426,7 +451,7 @@ func notTried(check, message string) *preflight.Result {
 // the steps that there are.
 func (a *agent) publish(p *progress) {
 	results := append([]preflight.Result(nil), p.volume...)
-	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling, p.changes, p.commit} {
+	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling, p.changes, p.commit, p.push} {
 		if step != nil {
 			results = append(results, *step)
 		}

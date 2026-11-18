@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
+	"github.com/mohanedmoh/treebind/internal/agent/push"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
 	"github.com/mohanedmoh/treebind/internal/agent/settle"
 	"github.com/mohanedmoh/treebind/internal/agent/syncloop"
@@ -41,6 +43,15 @@ const CheckChanges = "Changes"
 // CheckCommit is the name of the check that says what came of the last commit of the files that the scans found
 // settled. It is in the report after the changes, for a Treebind that syncs in both directions and commits.
 const CheckCommit = "Commit"
+
+// CheckPush is the name of the check that says what came of the last push of the commits of the checkout. It is in
+// the report after the commit, for a Treebind that syncs in both directions and pushes.
+const CheckPush = "Push"
+
+// Pusher pushes the commits of the checkout to the branch that it follows. The Pusher of package push is one.
+type Pusher interface {
+	Push(ctx context.Context) (push.Result, error)
+}
 
 // Committer commits the changes that have settled. The Committer of package commit is one.
 type Committer interface {
@@ -74,11 +85,33 @@ func (a *agent) scansFollow() bool {
 // commitsFollow says whether the scans are followed by commits: there are scans, and something to commit with.
 func (a *agent) commitsFollow() bool { return a.scansFollow() && a.NewCommitter != nil }
 
+// pushesFollow says whether the scans are followed by pushes: there are scans, and something to push with. The push
+// does not depend on the commit step: commits that an earlier run left are pushed by this one.
+func (a *agent) pushesFollow() bool { return a.scansFollow() && a.NewPusher != nil }
+
+// draw is a number from 0 up to but not including 1, for the wait after a push that failed: the random source of the
+// loop, or the process's own.
+func (a *agent) draw() float64 {
+	if a.SyncRandom != nil {
+		return a.SyncRandom()
+	}
+	return rand.Float64()
+}
+
 // scans is the state of the scans of one run of the loop (docs/adr/0029).
 type scans struct {
 	a       *agent
 	p       *progress
 	scanner Scanner
+	// pusher is what pushes the commits. It is nil when it could not be made, which the Push check says, and when
+	// the agent has none. A push is tried when pushPending says that commits may wait: at the first scan, for
+	// commits that an earlier run left, after a commit, and again after a try that did not work, no sooner than
+	// pushAfter. pushFailures counts the tries in a row that failed in a way that a longer wait is for.
+	pusher       Pusher
+	pushPending  bool
+	pushAfter    time.Time
+	pushFailures int
+	loggedPush   []string
 	// committer is what commits the settled changes. It is nil when it could not be made, which the Commit
 	// check says, and when the agent has none.
 	committer Committer
@@ -115,6 +148,9 @@ func (a *agent) startScans(p *progress, done checkedOut) *scans {
 		if a.commitsFollow() {
 			p.commit = notTried(CheckCommit, "not tried, because the scan cannot be set up")
 		}
+		if a.pushesFollow() {
+			p.push = notTried(CheckPush, "not tried, because the scan cannot be set up")
+		}
 		s.report(preflight.Result{
 			Check: CheckChanges, Outcome: preflight.Failed, Reason: scan.ReasonScanFailed,
 			Message: shortened(fmt.Sprintf("the scan cannot be set up: %v", err)),
@@ -139,6 +175,22 @@ func (a *agent) startScans(p *progress, done checkedOut) *scans {
 			})
 		} else {
 			s.committer = committer
+		}
+	}
+	if a.pushesFollow() {
+		p.push = notTried(CheckPush, "not tried, because the first scan is running")
+		pusher, err := a.NewPusher(push.Options{
+			Layout: l, URL: done.options.URL, Branch: done.made.Branch, Git: done.options.Git, Fence: a.fence,
+		})
+		if err != nil {
+			// A wrong setting is a failed check, and the scans, the commits and the pulls go on: the commits stay on
+			// the volume for a pod that has the settings put right.
+			s.reportPush(preflight.Result{
+				Check: CheckPush, Outcome: preflight.Failed, Reason: push.ReasonPushFailed,
+				Message: shortened(fmt.Sprintf("the push cannot be set up: %v; the commits stay on the volume until the settings are put right", err)),
+			})
+		} else {
+			s.pusher, s.pushPending = pusher, true
 		}
 	}
 	if a.NewWatcher != nil {
@@ -196,13 +248,95 @@ func (s *scans) once(ctx context.Context, now time.Time) time.Duration {
 	}
 	seen := s.tracker.Observe(now, result.Changes)
 	s.report(preflight.Result{Check: CheckChanges, Outcome: preflight.Passed, Message: shortened(s.message(result, seen))})
+	committed := false
 	if len(seen.Settled) > 0 {
-		s.commitSettled(ctx, seen.Settled)
+		committed = s.commitSettled(ctx, seen.Settled)
 	} else if len(result.Changes) == 0 {
 		s.forgetFailedCommit()
 	}
+	// The push is of what the turn committed, in the same turn, and never beside a pull (docs/adr/0024).
+	s.pushStep(ctx, now, committed)
 	return seen.Next
 }
+
+// pushStep pushes the commits of the checkout when some may wait and the wait after a failed try is over, and puts
+// what came of it in the Push check. It reports nothing of a push that was cut short by a stop. A try that failed
+// is tried again after the wait of a failed pull when the repository did not answer, and after the interval
+// when it answered and refused, which a person puts right (docs/adr/0024). The first push that worked makes the
+// agent ready.
+func (s *scans) pushStep(ctx context.Context, now time.Time, committed bool) {
+	if s.pusher == nil {
+		return
+	}
+	if committed {
+		s.pushPending = true
+	}
+	if !s.pushPending || now.Before(s.pushAfter) {
+		return
+	}
+	result, err := s.pusher.Push(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	checked, reason := pushResult(result, err)
+	s.reportPush(checked)
+	if err != nil {
+		if backsOffPush(reason) {
+			s.pushFailures++
+		} else {
+			s.pushFailures = 0
+		}
+		s.pushAfter = now.Add(syncloop.Next(s.a.Config.SyncInterval, syncloop.DefaultMaxWait, s.pushFailures, s.a.draw()))
+		return
+	}
+	s.pushPending, s.pushFailures, s.pushAfter = false, 0, time.Time{}
+	// The report holds the push before the probe says that the agent is ready.
+	if result.Outcome == push.Pushed {
+		s.a.becomeReady("the first push worked, and the agent reports itself ready")
+	}
+}
+
+// reportPush puts the result of a push in the report and in the log, which has a line when what it says changes and
+// not at every try that fails in the same way.
+func (s *scans) reportPush(result preflight.Result) {
+	s.p.push = &result
+	s.a.publish(s.p)
+	s.loggedPush = s.a.logChanges("push", []preflight.Result{result}, s.loggedPush)
+}
+
+// pushResult turns what a push did, or why it could not, into the result of the check, and says the reason of a
+// failure.
+func pushResult(result push.Result, err error) (preflight.Result, string) {
+	if err != nil {
+		reason := push.ReasonPushFailed
+		if failure, ok := errors.AsType[*push.Error](err); ok {
+			reason = failure.Reason
+		}
+		return preflight.Result{Check: CheckPush, Outcome: preflight.Failed, Reason: reason, Message: shortened(err.Error())}, reason
+	}
+	checked := preflight.Result{Check: CheckPush, Outcome: preflight.Passed}
+	switch {
+	case result.Outcome == push.Pushed && result.From == "":
+		checked.Message = fmt.Sprintf("pushed %s to the new branch %s, which is now at %s",
+			plural(result.Commits, "commit", "commits"), result.Branch, shortOf(result.To))
+	case result.Outcome == push.Pushed:
+		checked.Message = fmt.Sprintf("pushed %s to the branch %s: %s..%s",
+			plural(result.Commits, "commit", "commits"), result.Branch, shortOf(result.From), shortOf(result.To))
+	default:
+		checked.Message = "nothing to push: the repository has every commit of the checkout"
+	}
+	if result.Warning != "" {
+		checked.Message += "; " + result.Warning
+	}
+	return checked, ""
+}
+
+// backsOffPush says whether a push that failed for the reason is followed by a longer wait. It is the case when the
+// push did not get an answer, or the agent could not use its volume: asking again sooner is of no use, and asking a
+// host that fails again and again is what R-19 is about. It is not the case when the repository answered and
+// refused, or has moved: that is for a person, and the next try finds it at once when they have, and costs one
+// push.
+func backsOffPush(reason string) bool { return reason == push.ReasonPushFailed }
 
 // forgetFailedCommit takes a commit that failed out of the report once the scans find no change at all: the files
 // that could not be committed were put back or are gone, and the failure says nothing about what is there. A
@@ -221,9 +355,9 @@ func (s *scans) forgetFailedCommit() {
 // commitSettled commits the files that have settled, and puts what came of it in the Commit check. A commit
 // that fails is tried again at the next scan, because the files are still there. It reports nothing of a commit
 // that was cut short by a stop.
-func (s *scans) commitSettled(ctx context.Context, settled []scan.Change) {
+func (s *scans) commitSettled(ctx context.Context, settled []scan.Change) (committed bool) {
 	if s.committer == nil {
-		return
+		return false
 	}
 	// A Git command that was stopped in the middle of a write leaves a lock file that fails every command after
 	// it. The writer lock is held and no command runs, so what is there is stale (docs/adr/0028).
@@ -233,9 +367,10 @@ func (s *scans) commitSettled(ctx context.Context, settled []scan.Change) {
 		result, err = s.committer.Commit(ctx, settled)
 	}
 	if ctx.Err() != nil {
-		return
+		return false
 	}
 	s.reportCommit(commitResult(result, err, cleared))
+	return err == nil && result.Outcome == commit.Committed
 }
 
 // reportCommit puts the result of a commit in the report and in the log, which has a line when what it says

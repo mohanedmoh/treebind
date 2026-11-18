@@ -156,6 +156,44 @@ func TestFetchIgnoresFieldsOfTheReportThatItDoesNotKnow(t *testing.T) {
 	}
 }
 
+// The outcomes and the name of the check that the test of the push writes.
+const (
+	outcomePassed      = "Passed"
+	outcomeFailed      = "Failed"
+	checkPush          = "Push"
+	reasonPushRejected = "PushRejected"
+)
+
+// The operator reads the report as it is and interprets no check and no reason: a check that it has never heard of,
+// with a reason that is new, is read like any other (docs/adr/0033). The longest report that the agent can make, the
+// ten checks of a bidirectional Treebind each with the longest message it keeps, is far under the limit.
+func TestFetchReadsTheChecksAndTheReasonsOfThePushWithoutKnowingThem(t *testing.T) {
+	long := strings.Repeat("x", 4096)
+	report := goodReport()
+	report.Checks = []status.Check{
+		{Name: "Pull", Outcome: outcomePassed, Message: "the checkout is at the tip"},
+		{Name: "Changes", Outcome: outcomePassed, Message: "no local changes"},
+		{Name: "Commit", Outcome: outcomePassed, Message: "committed 1 file as abcdef"},
+		{Name: checkPush, Outcome: outcomeFailed, Reason: reasonPushRejected, Message: "the repository refused the push (pre-receive hook declined). It said: " + long},
+	}
+	for _, reason := range []string{"NonFastForward", reasonPushRejected, "PushFailed", "GitDirUnsafe"} {
+		report.Checks = append(report.Checks, status.Check{Name: checkPush, Outcome: outcomeFailed, Reason: reason, Message: long})
+	}
+	for range 4 {
+		report.Checks = append(report.Checks, status.Check{Name: "Other", Outcome: outcomeFailed, Reason: "NewReason", Message: long})
+	}
+	server := answering(t, func(w http.ResponseWriter, _ *http.Request) { writeReport(w, report) })
+
+	got, err := newTestClient(server, &fakeTokens{token: testToken}).Fetch(context.Background(), testTarget)
+	if err != nil {
+		t.Fatalf("Fetch = %v, want a report with the checks of the push read as any other", err)
+	}
+	if len(got.Checks) != len(report.Checks) || got.Checks[3].Name != checkPush || got.Checks[3].Reason != reasonPushRejected ||
+		got.Checks[4].Reason != "NonFastForward" || got.Checks[5].Reason != reasonPushRejected || got.Checks[6].Reason != "PushFailed" {
+		t.Errorf("checks = %+v, want the Push checks with their reasons as they were written", got.Checks)
+	}
+}
+
 func TestFetchSaysWhyAnAnswerIsNotAReport(t *testing.T) {
 	tests := []struct {
 		name        string

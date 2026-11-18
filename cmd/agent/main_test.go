@@ -35,6 +35,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
+	"github.com/mohanedmoh/treebind/internal/agent/push"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
 	"github.com/mohanedmoh/treebind/internal/agent/watch"
 )
@@ -44,8 +45,10 @@ var (
 	pullerOfThePackage  = newPuller
 	scannerOfThePackage = newScanner
 	watcherOfThePackage = newWatcher
-	// committerOfThePackage is the function that the agent commits with.
+	// committerOfThePackage is the function that the agent commits with, and pusherOfThePackage the one it pushes
+	// with.
 	committerOfThePackage = newCommitter
+	pusherOfThePackage    = newPusher
 )
 
 // No test of the agent's main starts Git: the checkout and the pulls are the ones of the packages,
@@ -63,6 +66,9 @@ func init() {
 	newCommitter = func(commit.Options) (app.Committer, error) {
 		return nil, errors.New("the tests of the main commit nothing")
 	}
+	newPusher = func(push.Options) (app.Pusher, error) {
+		return nil, errors.New("the tests of the main push nothing")
+	}
 	openCheckout = func(context.Context, checkout.Options) (checkout.Result, error) {
 		return checkout.Result{Outcome: checkout.Cloned, Branch: "main"}, nil
 	}
@@ -76,8 +82,9 @@ const (
 	repoURL  = "https://example.com/a.git"
 	otherURL = "https://example.com/b.git"
 
-	// botEmail is the author of the commits of the tests of the main.
+	// botEmail is the author of the commits of the tests of the main, and branch the branch that they follow.
 	botEmail = "bot@example.org"
+	branch   = "main"
 )
 
 func environment(extra map[string]string) func(string) string {
@@ -297,6 +304,40 @@ func TestTheAgentCommitsWithTheFunctionOfTheMain(t *testing.T) {
 
 	if err == nil || asked.AuthorName != "bot" || asked.AuthorEmail != botEmail {
 		t.Errorf("NewCommitter asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestTheAgentPushesWithTheFunctionOfTheMain(t *testing.T) {
+	previous := newPusher
+	t.Cleanup(func() { newPusher = previous })
+	var asked push.Options
+	newPusher = func(o push.Options) (app.Pusher, error) {
+		asked = o
+		return nil, errors.New("no pusher in a test")
+	}
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
+
+	_, err := options.NewPusher(push.Options{URL: repoURL, Branch: branch})
+
+	if err == nil || asked.URL != repoURL || asked.Branch != branch {
+		t.Errorf("NewPusher asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestThePusherOfThePackageRefusesWhatCannotWorkAndIsOneThatWorksOtherwise(t *testing.T) {
+	where, err := layout.New(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pusherOfThePackage(push.Options{Layout: where, URL: repoURL, Branch: "a:b"}); err == nil {
+		t.Error("a pusher was made for a branch that is two refs")
+	}
+	if _, err := pusherOfThePackage(push.Options{Layout: where, Branch: branch}); err == nil {
+		t.Error("a pusher was made with no repository")
+	}
+	pusher, err := pusherOfThePackage(push.Options{Layout: where, URL: repoURL, Branch: branch})
+	if err != nil || pusher == nil {
+		t.Errorf("the pusher = %v, %v, want one that can push", pusher, err)
 	}
 }
 
