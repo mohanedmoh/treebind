@@ -616,9 +616,10 @@ var _ = Describe("Manager", Ordered, func() {
 			By("asking the API server what the operator may delete")
 			asOperator := fmt.Sprintf("--as=system:serviceaccount:%s:%s", namespace, serviceAccountName)
 			cmd = exec.Command("kubectl", "auth", "can-i", "delete", "statefulsets", "-n", syncNamespace, asOperator)
-			output, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "The check cannot tell what the operator may do")
-			Expect(strings.TrimSpace(output)).To(Equal("yes"))
+			// The operator does not delete the StatefulSet: the garbage collector does, because the Treebind owns it
+			// (checked above). kubectl exits with 1 for an answer of no, so the error is not looked at.
+			output, _ = utils.Run(cmd)
+			Expect(strings.TrimSpace(output)).To(Equal("no"))
 			cmd = exec.Command("kubectl", "auth", "can-i", "delete", "persistentvolumeclaims", "-n", syncNamespace,
 				asOperator)
 			output, _ = utils.Run(cmd)
