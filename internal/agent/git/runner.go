@@ -323,7 +323,7 @@ var allowed = map[string]bool{
 	"add": true, "cat-file": true, "checkout": true, "checkout-index": true, "commit": true,
 	"commit-tree": true, "diff-index": true, "diff-tree": true, "fetch": true, "for-each-ref": true,
 	"hash-object": true, "init": true, "ls-files": true, "ls-remote": true, "ls-tree": true,
-	"merge": true, "merge-base": true, "push": true, "read-tree": true, "reset": true,
+	"merge": true, "merge-base": true, subcommandPush: true, "read-tree": true, "reset": true,
 	"rev-list": true, "rev-parse": true, "show-ref": true, "status": true, "symbolic-ref": true,
 	"update-index": true, "update-ref": true, "version": true, "write-tree": true,
 }
@@ -352,6 +352,14 @@ func (r *Runner) RunTimeout(ctx context.Context, timeout time.Duration, args ...
 	if option := refusedOption(args[0], args[1:]); option != "" {
 		return Result{}, &Error{Subcommand: args[0], Option: option, Cause: ErrNotAllowed}
 	}
+	if args[0] == subcommandPush {
+		if spec, refused := refusedRefspec(args[1:]); refused {
+			if spec == "" {
+				spec = "(empty)"
+			}
+			return Result{}, &Error{Subcommand: args[0], Refspec: spec, Cause: ErrNotAllowed}
+		}
+	}
 	return r.run(ctx, timeout, args)
 }
 
@@ -367,19 +375,39 @@ const (
 	optExec     = "exec"
 )
 
+// subcommandPush is the subcommand that the guard of a push is for.
+const subcommandPush = "push"
+
+// noRefspec is what the error of a refused push says of a push that names no refspec.
+const noRefspec = "(none)"
+
+// What a push is never given (FR-4: never force). Each of these forces, deletes, writes more than the branch or
+// changes something that is not the repository: the Git config (--set-upstream), the hooks of the host
+// (--push-option), another repository (--repo) or the submodules.
+var pushLong = []string{
+	"signed", "receive-pack", optExec,
+	"force", "force-with-lease", "force-if-includes", "mirror", "delete", "all", "branches", "tags", "prune",
+	"follow-tags", "set-upstream", "push-option", "repo", "recurse-submodules",
+}
+
+// pushShort are the short options of push that are refused: -f, -d, -u and -o.
+const pushShort = "fduo"
+
 var refusedOptions = map[string]struct {
 	short bool
-	long  []string
+	// shorts are the short options that are refused, besides -S for a command that has short set.
+	shorts string
+	long   []string
 }{
-	"commit":      {short: true, long: []string{optGPGSign, "trailer"}},
-	"commit-tree": {short: true, long: []string{optGPGSign}},
-	"merge":       {short: true, long: []string{optGPGSign, "verify-signatures"}},
-	"push":        {long: []string{"signed", "receive-pack", optExec}},
-	"fetch":       {long: []string{"upload-pack", optExec}},
-	"ls-remote":   {long: []string{"upload-pack", optExec}},
-	"diff-index":  {long: []string{"ext-diff", optTextconv, "output"}},
-	"diff-tree":   {long: []string{"ext-diff", optTextconv, "output"}},
-	"cat-file":    {long: []string{optTextconv, "filters"}},
+	"commit":       {short: true, long: []string{optGPGSign, "trailer"}},
+	"commit-tree":  {short: true, long: []string{optGPGSign}},
+	"merge":        {short: true, long: []string{optGPGSign, "verify-signatures"}},
+	subcommandPush: {shorts: pushShort, long: pushLong},
+	"fetch":        {long: []string{"upload-pack", optExec}},
+	"ls-remote":    {long: []string{"upload-pack", optExec}},
+	"diff-index":   {long: []string{"ext-diff", optTextconv, "output"}},
+	"diff-tree":    {long: []string{"ext-diff", optTextconv, "output"}},
+	"cat-file":     {long: []string{optTextconv, "filters"}},
 }
 
 // shortWithValue are the short options of those commands that take a value, which
@@ -406,9 +434,53 @@ func refusedOption(subcommand string, args []string) string {
 			}
 		} else if refused.short && signsShort(arg) {
 			return arg
+		} else if refused.shorts != "" && refusesShort(arg, refused.shorts) {
+			return arg
 		}
 	}
 	return ""
+}
+
+// refusesShort reports whether a word of short options has one of the letters in it, as in -qf.
+func refusesShort(arg, letters string) bool {
+	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+		return false
+	}
+	return strings.ContainsAny(arg[1:], letters)
+}
+
+// refusedRefspec returns the first refspec of a push that is not a branch: one that forces (+), deletes (an
+// empty source), matches many refs (*), or has a destination that is not under refs/heads/. A push with no refspec
+// is refused too, as "(none)": it leaves what is pushed to Git, by a setting that the Runner does not pin. The
+// arguments are the ones after "push": the repository is the first word that is not an option, and what comes
+// after it is the refspecs. Nothing after "--" is an option.
+func refusedRefspec(args []string) (string, bool) {
+	var words []string
+	options := true
+	for _, arg := range args {
+		switch {
+		case options && arg == "--":
+			options = false
+		case options && strings.HasPrefix(arg, "-") && arg != "-":
+			// An option. The ones that take a value are refused already, or are not given.
+		default:
+			words = append(words, arg)
+		}
+	}
+	if len(words) < 2 {
+		return noRefspec, true
+	}
+	for _, spec := range words[1:] {
+		source, destination, hasDestination := strings.Cut(spec, ":")
+		if !hasDestination {
+			destination = source
+		}
+		if source == "" || strings.HasPrefix(spec, "+") || strings.Contains(spec, "*") ||
+			!strings.HasPrefix(destination, "refs/heads/") || len(destination) == len("refs/heads/") {
+			return spec, true
+		}
+	}
+	return "", false
 }
 
 // signsShort reports whether a word of short options has -S in it. The word ends at

@@ -48,6 +48,8 @@ type Error struct {
 	Subcommand string
 	// Option is the option that was refused, with ErrNotAllowed.
 	Option string
+	// Refspec is the refspec of a push that was refused, with ErrNotAllowed.
+	Refspec string
 	// Cause is one of the errors above, the *exec.ExitError of a command that
 	// failed, or the error that kept it from starting.
 	Cause error
@@ -67,6 +69,9 @@ func (e *Error) Error() string {
 	switch {
 	case errors.Is(e.Cause, ErrNotAllowed) && e.Option != "":
 		return fmt.Sprintf("git: the option %s is not one the agent may pass to %s", quote(e.Option), e.Subcommand)
+	case errors.Is(e.Cause, ErrNotAllowed) && e.Refspec != "":
+		return fmt.Sprintf("git: the refspec %s is not one the agent may push: it has to name a branch, and nothing that forces, "+
+			"deletes or matches many", quote(e.Refspec))
 	case errors.Is(e.Cause, ErrNotAllowed):
 		return fmt.Sprintf("git: the subcommand %s is not one the agent may run", quote(e.Subcommand))
 	case errors.Is(e.Cause, ErrGitDirUntrusted):
