@@ -68,15 +68,19 @@ fails three times in a row counts as failed. Neither needs a token and neither s
 
 | Probe | Path | Answers 200 | Answers 503 |
 | :-- | :-- | :-- | :-- |
-| Readiness | `/readyz` | A pull has passed since the agent started | No pull has passed yet |
+| Readiness | `/readyz` | A pull has passed since the agent started, or, for a Treebind that syncs in both directions, a push has worked | Neither has happened yet |
 | Liveness | `/healthz` | The loop of the agent has been heard from within what it promised | It has not |
 
 **Ready means the agent has synced.** The first pull that ends `Passed` makes it ready: the checkout was at the tip of the
-branch (`UpToDate`), was brought to it (`Advanced`), or has commits that the repository does not have yet (`Ahead`). The
-`Pull` check in the report says `Passed` before the pod is ready, and the agent logs one line when it turns ready. The
-first pull comes up to one interval after the checkout ([pulling](pull.md)), and the kubelet sees the agent ready at its
-next probe, up to 10 seconds after that. The operator turns the `Ready` condition of the Treebind on when the sync pod is
-ready, so `kubectl wait --for=condition=Ready treebind/<name>` waits for the first pull.
+branch (`UpToDate`), was brought to it (`Advanced`), or has commits that the repository does not have yet (`Ahead`). For a
+Treebind that syncs in both directions the first push that works makes it ready as well, whichever of the two comes first,
+so a Treebind on an empty repository is ready as soon as its first commit is pushed, and does not wait for a second pull. A
+push that is rejected, that fails or that finds nothing to push does not make it ready. The `Pull` and `Push` checks in the
+report say `Passed` before the pod is ready, and the agent logs one line when it turns ready. The first pull comes up to one
+interval after the checkout ([pulling](pull.md)), and the kubelet sees the agent ready at its next probe, up to 10 seconds
+after that. The operator turns the `Ready` condition of the Treebind on when the sync pod is ready, so
+`kubectl wait --for=condition=Ready treebind/<name>` waits for the first pull or the first push.
+[ADR 0033](adr/0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md) has the reasons.
 
 **It stays ready while the agent runs.** A pull that fails later (the repository does not answer, a file is in the way,
 the branches diverged, the update would remove too many files) does not make the pod not ready, because the files on the
@@ -98,7 +102,7 @@ says `the loop of the agent did not beat within what it promised`, with how late
 | :-- | :-- | :-- |
 | The pod is `0/1`, and `Ready` is `False` with `SyncPodNotReady`, for less than one interval after it started | The first pull is not due yet | Wait |
 | The same, for longer | No pull has passed | The `Pull` check: its reason says what is in the way, and [pulling](pull.md) says what to do |
-| The same, with `BranchGone` | The repository has no such branch, or no commit at all yet | Put a commit on the branch, or set `spec.repository.branch` to one that exists |
+| The same, with `BranchGone` | The repository has no such branch, or no commit at all yet | Put a commit on the branch, or set `spec.repository.branch` to one that exists. A Treebind that syncs in both directions turns ready by itself when its first commit is pushed |
 | The same, and the `Pull` check is `Skipped` with `NotChecked` | The volume, the lock or the checkout has not passed | The check that failed, in the same report |
 | The container restarts, and `kubectl describe pod` shows `Liveness probe failed: HTTP probe failed with statuscode: 503` | The loop was stuck: a step took longer than it promised, most often a call on a volume that does not answer | The log of the container before the restart (`kubectl logs --previous`), for the line about the loop and how late it was, and the volume |
 
@@ -137,6 +141,7 @@ The report lists the agent's checks, in the order the agent runs them, each with
 | `Pull` | The last pull of the commits that the repository gained: at the tip, advanced, or why it did not work, for example `TooManyDeletions`. It is skipped until the first pull | [Pulling](pull.md), [the deletion guard](deletion-guard.md) |
 | `Changes` | The last scan of your directory for what the application changed: how many files, how many have settled, what is left out, and what the events of the file system cannot do. Only for a Treebind that syncs in both directions. It is skipped until the first scan | [Local changes](local-changes.md) |
 | `Commit` | The last commit of the files that the scans found settled: how many and the short id, that there was nothing to commit, or why it failed (`CommitFailed`). Only for a Treebind that syncs in both directions. It is skipped until a file settles | [Local changes](local-changes.md) |
+| `Push` | The last push of the commits of the checkout: how many and the two ids, that there is nothing to push, or why it failed (`NonFastForward`, `PushRejected` with the words of the host, `PushFailed`). Only for a Treebind that syncs in both directions. It is skipped until the first scan | [Local changes](local-changes.md) |
 
 A check that cannot be tried because one before it failed, or that waits, is `Skipped`, with the reason
 `NotChecked` and the check that failed in the message. The operator does not show the checks as

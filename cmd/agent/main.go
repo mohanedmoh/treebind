@@ -18,8 +18,8 @@ limitations under the License.
 //
 // It checks the volume it works on, makes the checkout of the repository or opens
 // the one that is there, pulls into it, and, for a Treebind that syncs in both directions, looks for what
-// the application changed, commits what has settled, and serves its status to the operator. It reports itself
-// ready once a pull has passed. It does not push yet.
+// the application changed, commits what has settled, pushes the commits, and serves its status to the operator.
+// It reports itself ready once a pull has passed or a push has worked.
 package main
 
 import (
@@ -39,6 +39,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
+	"github.com/mohanedmoh/treebind/internal/agent/push"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/agent/umask"
@@ -94,6 +95,16 @@ var newCommitter = func(options commit.Options) (app.Committer, error) {
 	return committer, nil
 }
 
+// newPusher makes what pushes the commits of the checkout. A test replaces it, so that no test starts Git against a
+// repository.
+var newPusher = func(options push.Options) (app.Pusher, error) {
+	pusher, err := push.New(options)
+	if err != nil {
+		return nil, err
+	}
+	return pusher, nil
+}
+
 // newWatcher makes what tells the agent that the directory may have changed. A test replaces it, so that no
 // test puts watches on a directory.
 var newWatcher = func(options watch.Options) (app.Watcher, error) {
@@ -118,12 +129,13 @@ func main() {
 
 // agentOptions is what the agent runs with: its settings, the check of the operator's token,
 // the checkout that it makes once the volume is in order, the pulls that follow it, and the scans for
-// local changes, and the commits of what they find settled, that go on beside them for a Treebind that syncs
-// in both directions.
+// local changes, the commits of what they find settled and the pushes of the commits, that go on beside them
+// for a Treebind that syncs in both directions.
 func agentOptions(settings config.Config, verifier status.Verifier, logger *slog.Logger) app.Options {
 	return app.Options{
 		Config: settings, Verifier: verifier, Logger: logger, AcquireLock: acquireLock, Checkout: openCheckout,
 		NewPuller: newPuller, NewScanner: newScanner, NewWatcher: newWatcher, NewCommitter: newCommitter,
+		NewPusher: newPusher,
 	}
 }
 

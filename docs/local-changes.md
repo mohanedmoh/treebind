@@ -1,15 +1,17 @@
-# What the agent does with your application's edits: finding them and committing them
+# What the agent does with your application's edits: finding them, committing them and pushing them
 
 For a Treebind whose `spec.sync.direction` is `bidirectional`, the agent looks at your directory for what the
-application changed since the commit the checkout is at, waits until the changes are done, and commits them. It
-does not push them yet: that is the next change. A Treebind that only pulls (`direction: pull`) never looks and
-never commits. The decisions behind it are in
+application changed since the commit the checkout is at, waits until the changes are done, commits them, and pushes
+the commits to the branch that it follows. It never forces. A Treebind that only pulls (`direction: pull`) never
+looks, never commits and never pushes. The decisions behind it are in
 [ADR 0029](adr/0029-the-agent-looks-for-local-changes-with-a-scan-and-events-only-make-it-scan-sooner.md) for
 finding the changes and in
 [ADR 0031](adr/0031-the-agent-commits-the-files-that-have-settled-as-literal-paths-in-one-commit-by-one-author.md)
-for the commit.
+for the commit and
+[ADR 0033](adr/0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md)
+for the push.
 
-The result is two checks in the agent's report, `Changes` and `Commit`, and a line in its log when what one says
+The result is three checks in the agent's report, `Changes`, `Commit` and `Push`, and a line in its log when what one says
 changes:
 
 ```
@@ -86,9 +88,33 @@ It is after `Changes`, and it says what came of the last commit, until the next 
 | `Failed` | `GitDirUnsafe` | The Git directory holds something that the agent did not put there. See [the Git directory](git-directory.md) |
 | `Skipped` | `NotChecked` | No file has settled yet, or the checkout is not made, or the scan cannot be set up |
 
-Until the push exists (the next change), the commits stay on the volume. A pull that finds that the repository has
-changed meanwhile says `Diverged`, because the checkout has commits that the repository lacks and the repository
-has commits that the checkout lacks. See [pulling](pull.md).
+## It pushes, as a fast-forward, and never forces
+
+The agent pushes right after a commit, in the same turn, and never beside a pull. It pushes only the branch that it
+follows, to the branch of the same name, and only as a fast-forward: when the repository has commits that the checkout
+lacks, or when the host refuses the push, the agent reports it and does not work around it. It does not force, delete,
+push tags or write the Git config, and the Runner refuses a push that tries ([ADR 0033](adr/0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md)).
+It tries when commits may wait: at the start, for commits that an earlier run left, after a commit, and again after a try
+that did not work.
+
+The first push that works makes the Treebind ready, like the first pull that passes does, whichever comes first, so a
+Treebind on an empty repository is ready once its first commit is pushed.
+
+### The check `Push`
+
+It is after `Commit`, and it says what came of the last push, until the next one.
+
+| Outcome | Reason | What it means and what to do |
+| :-- | :-- | :-- |
+| `Passed` | | The commits are in the repository. The message says how many and the two ids, for example `pushed 2 commits to the branch main: 1a2b3c4d5e6f..9f8e7d6c5b4a`, or that the branch is new |
+| `Passed` | | `nothing to push`: the repository has every commit of the checkout. Nothing is wrong |
+| `Failed` | `NonFastForward` | The repository has commits on the branch that the checkout lacks, so the push is not a fast-forward and is not forced. A pull brings them and says `Diverged` when the checkout has commits of its own. Put it right as [pulling](pull.md) says; the agent tries again after the interval |
+| `Failed` | `PushRejected` | The repository refused the push: a protected branch, a hook, a rule, a file that is too large, a secret that the host found. The message has what Git said and then the words of the host. Put right what it says, for example allow the deploy key to push to the branch; the agent tries again after the interval and does not force or push to another branch |
+| `Failed` | `PushFailed` | The push could not be made: the repository did not answer, the key was refused, the volume refused, or the writer lock could not be checked. The message says why. The agent tries again after a wait that grows to ten minutes |
+| `Failed` | `GitDirUnsafe` | The Git directory holds something that the agent did not put there. See [the Git directory](git-directory.md) |
+| `Skipped` | `NotChecked` | The checkout is not made yet, or the first scan is running |
+
+Until the conflict policies exist (the next change), a `NonFastForward` is for a person to put right.
 
 The message of a scan that worked also says when the events cannot do all of their work:
 
@@ -103,6 +129,6 @@ The message of a scan that worked also says when the events cannot do all of the
 
 ## What it does not do yet
 
-It does not push or resolve conflicts (the next changes), and it does not scan for secrets in the files it
-commits, apart from the names above. A scan interval that follows what the volume can do, and a way to set
+It does not resolve conflicts, or push to another branch, in the way that a conflict policy will (the next change), and it
+does not scan for secrets in the files it commits, apart from the names above. A scan interval that follows what the volume can do, and a way to set
 it, come with the volume probe.
