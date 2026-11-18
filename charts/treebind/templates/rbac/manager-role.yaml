@@ -1,12 +1,14 @@
+{{- range $namespace := splitList "," (include "treebind.watchNamespaces" .) }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
-{{- if .Values.rbac.namespaced }}
+{{- if $.Values.rbac.namespaced }}
 kind: Role
 {{- else }}
 kind: ClusterRole
 {{- end }}
 metadata:
-{{- if .Values.rbac.namespaced }}
-  namespace: {{ .Release.Namespace }}
+{{- if $.Values.rbac.namespaced }}
+  namespace: {{ $namespace }}
 {{- end }}
   name: {{ include "treebind.resourceName" (dict "suffix" "manager-role" "context" $) }}
 rules:
@@ -23,10 +25,8 @@ rules:
   - services
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -35,10 +35,8 @@ rules:
   - statefulsets
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -46,24 +44,14 @@ rules:
   resources:
   - treebinds
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - treebind.example.org
   resources:
   - treebinds/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - treebind.example.org
-  resources:
   - treebinds/status
   verbs:
-  - get
-  - patch
   - update
+{{- end }}
