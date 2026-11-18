@@ -37,7 +37,10 @@ was given or else the system's, found in the usual places. `GIT_OPTIONAL_LOCKS=0
 only read: a plain `git status` refreshes the index and writes it back under `index.lock` (tried, Git
 2.34.1: the index file changes after a status of files that were only touched), which would be a write that
 the writer lock does not guard, so the scan for local changes (#34) would not be a read. The commands that
-write take the locks they need whatever it says. Nothing else is inherited, so no
+write take the locks they need whatever it says. A Runner that is given an identity (#36) also has
+`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`, which are the one
+name and email of the agent's commits and beat the `user.name` and `user.email` of a repository config that
+an application could write; with none given, Git has the config's, as before. Nothing else is inherited, so no
 `GIT_*` variable, proxy, trace or askpass of the agent's own environment reaches
 Git.
 

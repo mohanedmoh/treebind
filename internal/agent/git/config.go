@@ -146,6 +146,13 @@ func (r *Runner) environment() []string {
 		// empty setting cannot (it breaks https to every host).
 		env = append(env, "GIT_SSL_CAINFO="+r.caBundle)
 	}
+	if r.identity != (Identity{}) {
+		// The author and the committer are one, and the environment beats user.name and user.email of the
+		// repository config, which an application could change.
+		env = append(env,
+			"GIT_AUTHOR_NAME="+r.identity.Name, "GIT_AUTHOR_EMAIL="+r.identity.Email,
+			"GIT_COMMITTER_NAME="+r.identity.Name, "GIT_COMMITTER_EMAIL="+r.identity.Email)
+	}
 	return env
 }
 

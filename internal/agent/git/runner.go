@@ -108,6 +108,18 @@ type Options struct {
 	// MaxOutput is how many bytes a command may write to its standard output.
 	// DefaultMaxOutput when it is zero.
 	MaxOutput int64
+
+	// Identity is who the commits that the Runner makes are by, as author and as committer. The environment
+	// of a Runner is built from nothing, so Git has no other place to take a name from, and one that is
+	// not given here is the one of the repository config, if it has any. Both parts are given, or neither.
+	// The caller checks that Git keeps them as they are written (commitmsg.ValidateAuthor): the Runner
+	// only checks that an environment variable can carry them.
+	Identity Identity
+}
+
+// Identity is a name and an email, as Git records them.
+type Identity struct {
+	Name, Email string
 }
 
 // SSH holds what Git needs to connect to an ssh:// repository.
@@ -145,6 +157,7 @@ type Runner struct {
 	caBundle  string
 	timeout   time.Duration
 	maxOutput int64
+	identity  Identity
 
 	// settings and env are computed once, because they never change.
 	settings []string
@@ -221,6 +234,12 @@ func New(o Options) (*Runner, error) {
 	if o.Timeout < 0 || o.MaxOutput < 0 {
 		return nil, errors.New("git: Timeout and MaxOutput must not be negative")
 	}
+	if (o.Identity.Name == "") != (o.Identity.Email == "") {
+		return nil, errors.New("git: Identity needs a Name and an Email, or neither")
+	}
+	if strings.ContainsRune(o.Identity.Name, 0) || strings.ContainsRune(o.Identity.Email, 0) {
+		return nil, errors.New("git: Identity must not contain a NUL byte, which an environment variable cannot carry")
+	}
 
 	r := &Runner{
 		git:       o.Git,
@@ -232,6 +251,7 @@ func New(o Options) (*Runner, error) {
 		caBundle:  o.CABundle,
 		timeout:   o.Timeout,
 		maxOutput: o.MaxOutput,
+		identity:  o.Identity,
 	}
 	if r.git == "" {
 		git, err := exec.LookPath("git")
