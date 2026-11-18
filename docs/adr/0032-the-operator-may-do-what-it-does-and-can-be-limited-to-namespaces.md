@@ -93,10 +93,13 @@ after it has applied the overlay's name prefix, and a name without one stayed wi
 - The operator can do less than it could, and a change that needs a new verb has to name it in the table, in a
   test that fails until it does. That is the point, and it is also a step that a feature has to take.
 - A namespaced install is possible with the chart. Its cost is the list above, and the documentation says so.
-- Helm itself was not run for this change. The templates are held by tests that run them with the few functions
-  that they use, and that parse every template of the chart, and the objects that they make were applied to a
-  cluster. `helm lint --strict` and `helm template` are what hold the chart to Helm, and the release workflow
-  runs the first.
+- Helm itself was not run when this was written: the download of its binary was refused where the change was made.
+  The templates are held by tests that run them with the few functions that they use, and that parse every
+  template of the chart, and the objects that they make were applied to a cluster. A job of CI, `chart`, installs
+  the Helm that `release.yml` pins, with the same version and checksum, and runs `helm lint --strict`, `helm
+  template` for the values of the tests, and tests (`chart_helm_test.go`) that hold the objects and the refusals
+  of real Helm to the ones of the renderer. The job and those tests were added without having been run, so their
+  first run, on the pull request, is also their first test. The pin is in two files and has to be changed in both.
 - The operator's own `Role`s for leader election and for tokens are in the release namespace, so a namespaced
   install adds no cluster-wide permission to them.
 - Not decided here: reading claims, volumes and storage classes into the status (#98), a namespaced kustomize
