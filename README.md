@@ -43,6 +43,11 @@ other takes over within seconds if it goes away. How a failover works and how lo
 it takes, where the replicas are placed, and how to run one replica for
 development are in [docs/operator-replicas.md](docs/operator-replicas.md).
 
+## What the operator may do
+
+Its roles are the calls that it makes and no more, and it never reads a Secret. It can be limited to the
+namespaces you name. What it may do, how to limit it and what that costs are in [docs/rbac.md](docs/rbac.md).
+
 ## Pod Security and file ownership
 
 Both pods run under the `restricted` Pod Security level. What they set, and what
