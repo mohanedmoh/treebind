@@ -271,6 +271,20 @@ jobs:
           mv linux-amd64/helm helm
           echo "$tools" >> "$GITHUB_PATH"
 
+      # The pin of Helm is in this file and in release.yml, and a chart that CI checks with one Helm and the release
+      # publishes with another is not what CI checked. The job fails when the two differ.
+      - name: The Helm pin is the one of the release
+        run: |
+          set -euo pipefail
+          for key in HELM_VERSION HELM_SHA256; do
+            here="$(sed -n "s/^ *${key}: *//p" .github/workflows/ci.yml | head -n 1)"
+            release="$(sed -n "s/^ *${key}: *//p" .github/workflows/release.yml | head -n 1)"
+            if [ -z "$here" ] || [ "$here" != "$release" ]; then
+              echo "::error::${key} is '${here}' in ci.yml and '${release}' in release.yml: change both together."
+              exit 1
+            fi
+          done
+
       - name: Lint the chart
         run: helm lint charts/treebind --strict
 
