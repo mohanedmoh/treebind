@@ -40,6 +40,14 @@ import (
 // DefaultTemplate is the message of a commit when the Treebind has no template of its own.
 const DefaultTemplate = "treebind: sync {{.Count}} file(s)"
 
+// DefaultAuthorName and DefaultAuthorEmail are the author of every commit when the Treebind names none. The
+// domain of the email is one that cannot exist (RFC 2606), so that no mail goes to anyone and no account of a
+// host is taken for the agent. A commit by it is easy to tell from one by a person.
+const (
+	DefaultAuthorName  = "treebind-bot"
+	DefaultAuthorEmail = "treebind-bot@treebind.invalid"
+)
+
 // MaxMessageBytes is the longest output that a template may have. A commit message is a few lines, and one longer than
 // this does not fit in an argument of a command on every system. It also stops a template that loops for a very long
 // time, as `range` over a large number does, from building a message until the agent has no memory left.

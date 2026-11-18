@@ -105,7 +105,7 @@ func TestRenderRefusesWhatCannotBeACommitMessage(t *testing.T) {
 
 func TestValidateAuthorAcceptsAFixedAuthor(t *testing.T) {
 	tests := []struct{ name, email string }{
-		{"treebind-bot", goodEmail},
+		{DefaultAuthorName, goodEmail},
 		{"Treebind Bot", goodEmail},
 		{"Zoë Ünï ✓", "zoe@example.org"},
 		{shortName, "bot+treebind@example.org"},
@@ -300,5 +300,14 @@ func TestValidateAuthorNamesTheNameWhenBothAreWrong(t *testing.T) {
 	err := ValidateAuthor("", "not-an-email")
 	if err == nil || !strings.Contains(err.Error(), fieldName) || !strings.Contains(err.Error(), fieldEmail) {
 		t.Errorf("error = %v, want it to name both: one wrong value does not hide the other", err)
+	}
+}
+
+func TestTheDefaultAuthorIsOneThatGitKeepsAsItIsWritten(t *testing.T) {
+	if err := ValidateAuthor(DefaultAuthorName, DefaultAuthorEmail); err != nil {
+		t.Errorf("ValidateAuthor(%q, %q) = %v: the default author is one that Git would change", DefaultAuthorName, DefaultAuthorEmail, err)
+	}
+	if DefaultAuthorName != "treebind-bot" || DefaultAuthorEmail != "treebind-bot@treebind.invalid" {
+		t.Errorf("the default author is %q <%s>, want treebind-bot <treebind-bot@treebind.invalid>, which docs and ADR 0031 name", DefaultAuthorName, DefaultAuthorEmail)
 	}
 }
