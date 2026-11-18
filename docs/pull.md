@@ -40,8 +40,8 @@ kubectl describe treebind <name>
   comes after a point in the interval that comes from its name, so that many Treebinds on one Git host do not
   ask it together. After a failure of the repository the wait grows, up to ten minutes, and goes back to the
   interval at the first pull that works.
-- **Both directions only pull for now.** `bidirectional` will also commit and push, and until it does it pulls
-  like `pull`, and looks for what the application changed, which is [its own page](local-changes.md).
+- **Both directions pull.** `bidirectional` also looks for what the application changed, commits it and pushes the
+  commits, which is [its own page](local-changes.md); a `pull` Treebind does none of that.
 
 ## What the check says
 
@@ -49,7 +49,7 @@ kubectl describe treebind <name>
 | :-- | :-- | :-- |
 | `Passed`, at the tip | Your directory has what the branch has | Nothing |
 | `Passed`, advanced | The agent brought in new commits. The message names the recovery ref that keeps the commit your directory was at | Nothing |
-| `Passed`, ahead | Your directory has commits that the repository does not have yet | Nothing: they are pushed when push is there |
+| `Passed`, ahead | Your directory has commits that the repository does not have yet | Nothing: a `bidirectional` Treebind pushes them ([local changes](local-changes.md)) |
 | `Skipped` `NotChecked` | The volume, the lock or the checkout has not passed, or the first pull is not due yet | Read the check that failed |
 
 ## When it does not work

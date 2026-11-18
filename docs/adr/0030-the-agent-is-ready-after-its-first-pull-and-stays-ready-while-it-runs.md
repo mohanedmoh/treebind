@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-17
 - Issue: #48
+- Extended by: [0033](0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md), which
+  makes the first push that works a sync too for a `bidirectional` Treebind
 
 ## Context
 
@@ -40,11 +42,12 @@ Nothing else makes the agent ready:
   passed yet, and each says why in the check `Pull`.
 - **A repository with no commit yet, and a branch that is gone, are the same.** The pull asks the repository for the
   tip of the branch and gets none, and says `BranchGone` for both: the agent cannot tell an empty repository from a
-  branch that was named wrong, and it has not synced either way. When the agent commits and pushes (#36, #37) the first
-  push gives the branch a tip, and the next pull makes it ready. Until then a Treebind on an empty repository is not
-  ready, and the check says why.
-- **The direction does not matter.** Both directions only pull until #36 and #37 are there. When they are, the first sync
-  of a `bidirectional` Treebind has to include what it pushes, and the change that adds the push says so.
+  branch that was named wrong, and it has not synced either way. A `bidirectional` Treebind that commits and pushes gives
+  the branch its tip with the first push, and that push makes it ready (ADR 0033). A `pull` Treebind on an empty
+  repository is not ready until someone puts a commit on the branch, and the check says why.
+- **The direction matters only for the push.** A `pull` Treebind is ready after its first pull that passes. A
+  `bidirectional` Treebind is ready after its first pull that passes or its first push that works, whichever comes first
+  (ADR 0033, which extends this record).
 - **A scan is not a sync.** What the scans of a `bidirectional` Treebind find, or that one fails, does not change
   the readiness.
 
@@ -130,8 +133,9 @@ agent says it itself.
   The first pull waits for a point in the interval that comes from the name of the Treebind, so that agents that start
   together do not ask the Git host together, and readiness inherits that. Counting a cloned checkout as synced would
   shorten it for the first start, and would be a second rule; it is left until someone needs it.
-- A Treebind on an empty repository, or on a branch that does not exist, stays not ready, with `BranchGone` in the check
-  `Pull`. That is the case until #37 pushes the first commit.
+- A Treebind on an empty repository, or on a branch that does not exist, is not ready, with `BranchGone` in the check
+  `Pull`. A `bidirectional` one turns ready at its first push that works (ADR 0033); a `pull` one stays not ready until
+  a commit is on the branch.
 - A pull that fails after the first success does not show in `Ready`. It shows in the check `Pull` and in the log, and
   `Synced` is where it will show once the report carries the sync state (ADR 0015).
 - A container that is restarted is not ready until it has pulled, so a restart is seen in `Ready` for up to one interval.
@@ -145,5 +149,5 @@ agent says it itself.
   that takes longer than 5 minutes on a volume that is slow would be restarted, and it would be restarted again at the
   same place. No step does that now (an update is applied by Git, whose command has the timeout of the fetch). A step that
   could has to beat while it works, and that is what a later change must do.
-- Not decided here: whether a `bidirectional` Treebind is ready before its first push (#37); and a probe that depends on
-  the volume probe (#101).
+- Not decided here: a probe that depends on the volume probe (#101). Whether a `bidirectional` Treebind is ready from its
+  first push was decided with the push (ADR 0033).

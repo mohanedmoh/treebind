@@ -70,7 +70,8 @@ repository.
 
 The Git remote serves one empty bare repository, `sample.git`, over the git
 protocol. A Treebind that syncs from it is not ready while it has no commit: the
-pull says `BranchGone`, and `Ready` stays `False` until you push one. Reach it
+pull says `BranchGone`, and `Ready` stays `False` until a commit is pushed to it, by you or, for a Treebind that
+syncs in both directions, by the agent with the first commit of what the application writes. Reach it
 from the terminal through a port-forward:
 
 ```sh
