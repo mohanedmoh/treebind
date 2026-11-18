@@ -42,8 +42,9 @@ helm install treebind charts/treebind --namespace treebind-system --create-names
   --set 'rbac.namespaces={apps,tools}'
 ```
 
-The chart then makes a Role and a RoleBinding in each of those namespaces, and starts the operator with
-`--watch-namespaces=apps,tools`, which makes it read only there. Both come from the same list, so the operator
+The namespaces have to exist before you install: the chart makes a Role in each, and Helm stops with the error of
+the API server for one that is not there. The chart then makes a Role and a RoleBinding in each of those
+namespaces, and starts the operator with `--watch-namespaces=apps,tools`, which makes it read only there. Both come from the same list, so the operator
 cannot watch a namespace that it has no Role in. With `rbac.namespaced=true` and no list, it is the namespace of
 the release.
 
