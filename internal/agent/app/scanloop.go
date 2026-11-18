@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
@@ -36,6 +37,15 @@ import (
 // CheckChanges is the name of the check that says what the last scan for local changes found. It is in the
 // report after the pull, for a Treebind that syncs in both directions.
 const CheckChanges = "Changes"
+
+// CheckCommit is the name of the check that says what came of the last commit of the files that the scans found
+// settled. It is in the report after the changes, for a Treebind that syncs in both directions and commits.
+const CheckCommit = "Commit"
+
+// Committer commits the changes that have settled. The Committer of package commit is one.
+type Committer interface {
+	Commit(ctx context.Context, settled []scan.Change) (commit.Result, error)
+}
 
 // Scanner scans the synced directory for local changes once. The Scanner of package scan is one.
 type Scanner interface {
@@ -61,11 +71,21 @@ func (a *agent) scansFollow() bool {
 	return a.pullsFollow() && a.NewScanner != nil && a.Config.SyncDirection == config.DirectionBidirectional
 }
 
+// commitsFollow says whether the scans are followed by commits: there are scans, and something to commit with.
+func (a *agent) commitsFollow() bool { return a.scansFollow() && a.NewCommitter != nil }
+
 // scans is the state of the scans of one run of the loop (docs/adr/0029).
 type scans struct {
 	a       *agent
 	p       *progress
 	scanner Scanner
+	// committer is what commits the settled changes. It is nil when it could not be made, which the Commit
+	// check says, and when the agent has none.
+	committer Committer
+	gitDir    string
+	// loggedCommit is the last result of the Commit check that was logged, so that a commit that fails in the same
+	// way at every scan is one line of the log.
+	loggedCommit []string
 	// watcher is nil when there are no events: none was given, or it could not be made, and watchErr says why.
 	watcher  Watcher
 	watchErr error
@@ -92,11 +112,34 @@ func (a *agent) startScans(p *progress, done checkedOut) *scans {
 		s.scanner, err = a.NewScanner(scan.Options{Layout: l, Git: done.options.Git, Filter: filter})
 	}
 	if err != nil {
+		if a.commitsFollow() {
+			p.commit = notTried(CheckCommit, "not tried, because the scan cannot be set up")
+		}
 		s.report(preflight.Result{
 			Check: CheckChanges, Outcome: preflight.Failed, Reason: scan.ReasonScanFailed,
 			Message: shortened(fmt.Sprintf("the scan cannot be set up: %v", err)),
 		})
 		return nil
+	}
+	s.gitDir = l.GitDir
+	if a.commitsFollow() {
+		p.commit = notTried(CheckCommit, "not tried, because no file has settled yet")
+		committer, err := a.NewCommitter(commit.Options{
+			Layout: l, Git: done.options.Git, Fence: a.fence,
+			AuthorName: a.Config.CommitAuthorName, AuthorEmail: a.Config.CommitAuthorEmail,
+			MessageTemplate: a.Config.CommitMessageTemplate,
+		})
+		if err != nil {
+			// A wrong author or template is a failed check, and the scans and the pulls go on: the files wait for a
+			// pod that has the settings put right.
+			s.reportCommit(preflight.Result{
+				Check: CheckCommit, Outcome: preflight.Failed, Reason: commit.ReasonCommitFailed,
+				Message: shortened(fmt.Sprintf("the commit cannot be set up: %v; the files that settle are not committed until "+
+					"the settings are put right", err)),
+			})
+		} else {
+			s.committer = committer
+		}
 	}
 	if a.NewWatcher != nil {
 		made, watchErr := a.NewWatcher(watch.Options{Root: l.WorkTree, Skip: filter.SkipsDir})
@@ -150,11 +193,86 @@ func (s *scans) once(ctx context.Context, now time.Time) time.Duration {
 		return 0
 	}
 	seen := s.tracker.Observe(now, result.Changes)
-	if s.a.Settled != nil && len(seen.Settled) > 0 {
-		s.a.Settled(ctx, seen.Settled)
-	}
 	s.report(preflight.Result{Check: CheckChanges, Outcome: preflight.Passed, Message: shortened(s.message(result, seen))})
+	if len(seen.Settled) > 0 {
+		s.commitSettled(ctx, seen.Settled)
+	} else if len(result.Changes) == 0 {
+		s.forgetFailedCommit()
+	}
 	return seen.Next
+}
+
+// forgetFailedCommit takes a commit that failed out of the report once the scans find no change at all: the files
+// that could not be committed were put back or are gone, and the failure says nothing about what is there. A
+// commit that passed stays, because it says what was committed last. A committer that could not be made stays
+// failed too, because that is about the settings and not about the files.
+func (s *scans) forgetFailedCommit() {
+	if s.committer == nil || s.p.commit == nil || s.p.commit.Outcome != preflight.Failed {
+		return
+	}
+	s.p.commit = notTried(CheckCommit, "not tried, because no file has settled yet")
+	s.a.publish(s.p)
+	// The same failure that comes back is a new line of the log.
+	s.loggedCommit = nil
+}
+
+// commitSettled commits the files that have settled, and puts what came of it in the Commit check. A commit
+// that fails is tried again at the next scan, because the files are still there. It reports nothing of a commit
+// that was cut short by a stop.
+func (s *scans) commitSettled(ctx context.Context, settled []scan.Change) {
+	if s.committer == nil {
+		return
+	}
+	// A Git command that was stopped in the middle of a write leaves a lock file that fails every command after
+	// it. The writer lock is held and no command runs, so what is there is stale (docs/adr/0028).
+	cleared, err := clearLocks(ctx, s.gitDir, s.a.fence)
+	var result commit.Result
+	if err == nil {
+		result, err = s.committer.Commit(ctx, settled)
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	s.reportCommit(commitResult(result, err, cleared))
+}
+
+// reportCommit puts the result of a commit in the report and in the log, which has a line when what it says
+// changes and not at every scan that fails in the same way.
+func (s *scans) reportCommit(result preflight.Result) {
+	s.p.commit = &result
+	s.a.publish(s.p)
+	s.loggedCommit = s.a.logChanges("commit", []preflight.Result{result}, s.loggedCommit)
+}
+
+// commitResult turns what a commit did, or why it could not, into the result of the check, with the lock files
+// that were removed before it.
+func commitResult(result commit.Result, err error, cleared []string) preflight.Result {
+	checked := preflight.Result{Check: CheckCommit, Outcome: preflight.Passed}
+	if err != nil {
+		reason := commit.ReasonCommitFailed
+		if failure, ok := errors.AsType[*commit.Error](err); ok {
+			reason = failure.Reason
+		}
+		checked = preflight.Result{Check: CheckCommit, Outcome: preflight.Failed, Reason: reason, Message: shortened(err.Error())}
+	} else {
+		switch result.Outcome {
+		case commit.Committed:
+			checked.Message = fmt.Sprintf("committed %s as %s", plural(result.Files, "file", "files"), shortOf(result.Commit))
+		default:
+			checked.Message = "the files that had settled came to nothing to commit: they were changed back, or are gone"
+		}
+		if result.Gone > 0 {
+			if result.Gone == 1 {
+				checked.Message += "; 1 file that had settled was gone before it could be committed"
+			} else {
+				checked.Message += fmt.Sprintf("; %d files that had settled were gone before they could be committed", result.Gone)
+			}
+		}
+	}
+	if note := clearedNote(cleared); note != "" {
+		checked.Message += "; " + note
+	}
+	return checked
 }
 
 // report puts the result of a scan in the report and in the log, which has a line when what it says changes
@@ -172,7 +290,7 @@ func (s *scans) message(result scan.Result, seen settle.Observation) string {
 	if len(result.Changes) == 0 {
 		text = "no local changes"
 	} else {
-		text = fmt.Sprintf("%s changed on the volume: %d settled, %d waiting for their quiet period; the agent does not commit them yet",
+		text = fmt.Sprintf("%s changed on the volume: %d settled, %d waiting for their quiet period",
 			plural(len(result.Changes), "file", "files"), len(seen.Settled), len(seen.Waiting))
 	}
 	if len(result.Left) > 0 {

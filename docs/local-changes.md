@@ -1,12 +1,16 @@
-# What the agent does with your application's edits: looking for them
+# What the agent does with your application's edits: finding them and committing them
 
 For a Treebind whose `spec.sync.direction` is `bidirectional`, the agent looks at your directory for what the
-application changed since the commit the checkout is at. It does not commit or push what it finds yet: that is
-the next change. What it does now is find the changes, wait until they are done, and say in its report what it
-found. A Treebind that only pulls (`direction: pull`) never looks. The decisions behind it are in
-[ADR 0029](adr/0029-the-agent-looks-for-local-changes-with-a-scan-and-events-only-make-it-scan-sooner.md).
+application changed since the commit the checkout is at, waits until the changes are done, and commits them. It
+does not push them yet: that is the next change. A Treebind that only pulls (`direction: pull`) never looks and
+never commits. The decisions behind it are in
+[ADR 0029](adr/0029-the-agent-looks-for-local-changes-with-a-scan-and-events-only-make-it-scan-sooner.md) for
+finding the changes and in
+[ADR 0031](adr/0031-the-agent-commits-the-files-that-have-settled-as-literal-paths-in-one-commit-by-one-author.md)
+for the commit.
 
-The result is the check `Changes` in the agent's report, and a line in its log when what it says changes:
+The result is two checks in the agent's report, `Changes` and `Commit`, and a line in its log when what one says
+changes:
 
 ```
 kubectl logs <name>-sync-0
@@ -33,7 +37,35 @@ kubectl describe treebind <name>
   and `spec.paths.exclude`, and the `.gitignore` files of your directory, which hide the files that are not in
   the repository. See [ADR 0022](adr/0022-the-agent-decides-what-it-syncs-with-gitignore-patterns-of-its-own.md).
 
-## What the check says
+## It commits, as one author, with the message you choose
+
+When a file has settled, the agent commits it. Every commit is by one author, who is also the committer, so that a
+commit of the agent is easy to tell from one by a person. A scan that finds several settled files makes one commit
+of them, and a file that settles at another scan is in another commit.
+
+```yaml
+spec:
+  commit:
+    authorName: treebind-bot
+    authorEmail: bot@example.org
+    messageTemplate: "treebind: sync {{.Count}} file(s)"
+```
+
+- **The author** is `treebind-bot <treebind-bot@treebind.invalid>` when the spec says none. A name and an email
+  are set together, or not at all. Git drops a newline, `<` and `>` from a name, and a space, a control character
+  and any of `. , : ; " ' \` from its ends, so a name that has one of them is refused when you write the
+  Treebind: the commits would say another name than yours.
+- **The message** is the template, which is a Go `text/template` with `{{.Count}}` for the number of files in the
+  commit, and `treebind: sync {{.Count}} file(s)` when the spec says none. Only the built-in functions are there,
+  so a template cannot run a program or read a file. The blank lines inside the message are kept, and the first
+  line is the subject. A template can be at most 4096 characters, and what it renders at most 64 KiB.
+- **A `$` in a name or a template** is what you wrote. The operator takes care of the way the kubelet rewrites
+  `$(NAME)` and `$$` in an environment variable.
+- **A name or a template that is wrong** and that the API server could not tell, such as a template that names a
+  field that is not there, is a failed check `Commit` with the reason `CommitFailed` and what is wrong, and the
+  agent goes on pulling and scanning. Put it right in the spec and the pod is replaced.
+
+## What the checks say
 
 | Outcome | Reason | What it means and what to do |
 | :-- | :-- | :-- |
@@ -41,6 +73,22 @@ kubectl describe treebind <name>
 | `Failed` | `ScanFailed` | Git could not list the changes, and the message says why: a merge that was not finished (finish or abort it in the Git directory), so many changes that Git's list does not fit in the agent's limit, or a file that cannot be looked at. The next scan is at the interval |
 | `Failed` | `GitDirUnsafe` | The Git directory holds something that the agent did not put there. See [the Git directory](git-directory.md) |
 | `Skipped` | `NotChecked` | The checkout is not made yet, a volume check failed, or the first scan is running |
+
+### The check `Commit`
+
+It is after `Changes`, and it says what came of the last commit, until the next one.
+
+| Outcome | Reason | What it means and what to do |
+| :-- | :-- | :-- |
+| `Passed` | | The files that had settled are committed. The message says how many and the short id of the commit, for example `committed 2 files as 1a2b3c4d5e6f`. It also says when files that had settled were gone before the commit, and which lock files of a stopped Git were removed first |
+| `Passed` | | `the files that had settled came to nothing to commit`: they were changed back, or are gone. Nothing was committed, and nothing is wrong |
+| `Failed` | `CommitFailed` | The commit could not be made, and the message says why: what Git said, that the writer lock could not be checked, that the volume refused a write, or that the author or the template of the spec cannot be used. The files are still there, and the agent tries again at the next scan. A failure of the first kinds goes away from the report when the scans find no change at all; a wrong author or template stays until you put it right in the spec, and the files that settle are not committed until then |
+| `Failed` | `GitDirUnsafe` | The Git directory holds something that the agent did not put there. See [the Git directory](git-directory.md) |
+| `Skipped` | `NotChecked` | No file has settled yet, or the checkout is not made, or the scan cannot be set up |
+
+Until the push exists (the next change), the commits stay on the volume. A pull that finds that the repository has
+changed meanwhile says `Diverged`, because the checkout has commits that the repository lacks and the repository
+has commits that the checkout lacks. See [pulling](pull.md).
 
 The message of a scan that worked also says when the events cannot do all of their work:
 
@@ -55,6 +103,6 @@ The message of a scan that worked also says when the events cannot do all of the
 
 ## What it does not do yet
 
-It does not commit, push or resolve conflicts (the next changes), and it does not scan for secrets in the files it
-would commit, apart from the names above. A scan interval that follows what the volume can do, and a way to set
+It does not push or resolve conflicts (the next changes), and it does not scan for secrets in the files it
+commits, apart from the names above. A scan interval that follows what the volume can do, and a way to set
 it, come with the volume probe.

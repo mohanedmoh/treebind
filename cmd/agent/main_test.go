@@ -29,6 +29,7 @@ import (
 
 	"github.com/mohanedmoh/treebind/internal/agent/app"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
+	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
@@ -43,6 +44,8 @@ var (
 	pullerOfThePackage  = newPuller
 	scannerOfThePackage = newScanner
 	watcherOfThePackage = newWatcher
+	// committerOfThePackage is the function that the agent commits with.
+	committerOfThePackage = newCommitter
 )
 
 // No test of the agent's main starts Git: the checkout and the pulls are the ones of the packages,
@@ -57,6 +60,9 @@ func init() {
 	newWatcher = func(watch.Options) (app.Watcher, error) {
 		return nil, errors.New("the tests of the main watch nothing")
 	}
+	newCommitter = func(commit.Options) (app.Committer, error) {
+		return nil, errors.New("the tests of the main commit nothing")
+	}
 	openCheckout = func(context.Context, checkout.Options) (checkout.Result, error) {
 		return checkout.Result{Outcome: checkout.Cloned, Branch: "main"}, nil
 	}
@@ -69,6 +75,9 @@ func init() {
 const (
 	repoURL  = "https://example.com/a.git"
 	otherURL = "https://example.com/b.git"
+
+	// botEmail is the author of the commits of the tests of the main.
+	botEmail = "bot@example.org"
 )
 
 func environment(extra map[string]string) func(string) string {
@@ -271,6 +280,38 @@ func TestTheAgentScansWithTheFunctionOfTheMain(t *testing.T) {
 
 	if err == nil || asked.Layout.WorkTree != "/w" {
 		t.Errorf("NewScanner asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestTheAgentCommitsWithTheFunctionOfTheMain(t *testing.T) {
+	previous := newCommitter
+	t.Cleanup(func() { newCommitter = previous })
+	var asked commit.Options
+	newCommitter = func(o commit.Options) (app.Committer, error) {
+		asked = o
+		return nil, errors.New("no committer in a test")
+	}
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
+
+	_, err := options.NewCommitter(commit.Options{AuthorName: "bot", AuthorEmail: botEmail})
+
+	if err == nil || asked.AuthorName != "bot" || asked.AuthorEmail != botEmail {
+		t.Errorf("NewCommitter asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestTheCommitterOfThePackageRefusesWhatCannotWorkAndIsOneThatWorksOtherwise(t *testing.T) {
+	where, err := layout.New(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := commit.Options{Layout: where, AuthorName: "bot <x>", AuthorEmail: botEmail}
+	if _, err := committerOfThePackage(refused); err == nil {
+		t.Error("a committer was made for an author that Git would change")
+	}
+	committer, err := committerOfThePackage(commit.Options{Layout: where})
+	if err != nil || committer == nil {
+		t.Errorf("the committer = %v, %v, want one that can commit, with the defaults of the agent", committer, err)
 	}
 }
 
