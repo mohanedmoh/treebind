@@ -802,3 +802,107 @@ func TestTheScanIntervalIsFromTheEndOfAScanAndAPullIsFromTheEndOfAPull(t *testin
 	// the interval after the end of the first, 110.
 	wantTurns(t, r, "pull@0", "scan@10", "scan@74", "pull@110")
 }
+
+// beats records what the loop says to Beat, and when, so that a test can tell that every wait was beaten
+// for before it began, with its own length.
+type beats struct {
+	got []time.Duration
+}
+
+func (b *beats) beat(d time.Duration) { b.got = append(b.got, d) }
+
+// atWait is the onWait of a clock that checks, at the start of each wait, that the loop has beaten for it:
+// as many beats as waits including this one, and the last of them is the length of this wait.
+func (b *beats) atWait(t *testing.T, waits func() int) func(d time.Duration) {
+	return func(d time.Duration) {
+		t.Helper()
+		if n := waits(); len(b.got) != n || b.got[n-1] != d {
+			t.Errorf("a wait of %v began with the beats %v: the loop has to beat for a wait, with its length, before it begins", d, b.got)
+		}
+	}
+}
+
+func TestRunBeatsBeforeEveryWaitWithItsLength(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &beats{}
+	clock := &recordingClock{}
+	clock.onWait = b.atWait(t, func() int { return len(clock.waits) })
+	pull, _ := script(cancel, true, true, false, true, false)
+
+	err := Run(ctx, Options{
+		Interval: interval, Phase: 7 * time.Second, MaxWait: ten, Clock: clock,
+		Random: func() float64 { return 0.5 }, Pull: pull, Beat: b.beat,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The wait of the phase, and the waits that grow after a failure and go back after a success.
+	want := []time.Duration{7 * time.Second, 45 * time.Second, 75 * time.Second, interval, 45 * time.Second}
+	if !slices.Equal(b.got, want) {
+		t.Errorf("beats = %v, want %v: one for each wait, which is how long it is until the loop beats again", b.got, want)
+	}
+}
+
+func TestRunWorksWithoutABeat(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pull, pulls := script(cancel, false, false)
+	if err := Run(ctx, Options{Interval: interval, Clock: &recordingClock{}, Pull: pull}); err != nil {
+		t.Fatal(err)
+	}
+	if *pulls != 2 {
+		t.Errorf("pulls = %d, want 2", *pulls)
+	}
+}
+
+func TestWithScansTheLoopBeatsBeforeEveryWaitWithItsLength(t *testing.T) {
+	r, ctx := newTurns(8)
+	o := r.options()
+	o.Interval, o.Phase, o.ScanInterval = interval, 7*time.Second, 10*time.Second
+	b := &beats{}
+	o.Beat = b.beat
+	r.clock.hook = func(d time.Duration) bool {
+		b.atWait(t, func() int { return len(r.clock.waits) })(d)
+		return true
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	wantTurns(t, r, "scan@0", "pull@7", "scan@10", "scan@20", "scan@30", "pull@37", "scan@40", "scan@50")
+	if !slices.Equal(b.got, r.clock.waits) {
+		t.Errorf("beats = %v, waits = %v, want the same: a beat for each wait", b.got, r.clock.waits)
+	}
+	if b.got[0] != 0 || b.got[1] != 7*time.Second {
+		t.Errorf("beats = %v, want to begin with 0 for the first scan, which is at once, and 7s for the pull", b.got)
+	}
+}
+
+func TestAnEventThatCutsAWaitShortIsFollowedByABeatForTheWaitThatReplacesIt(t *testing.T) {
+	r, ctx := newTurns(2)
+	o := r.options()
+	wake := make(chan struct{}, 1)
+	o.Wake = wake
+	b := &beats{}
+	o.Beat = b.beat
+	r.clock.hook = func(d time.Duration) bool {
+		b.atWait(t, func() int { return len(r.clock.waits) })(d)
+		if len(r.clock.waits) == 2 { // the wait after the first scan, which an event cuts short
+			wake <- struct{}{}
+			return false
+		}
+		return true
+	}
+
+	if err := Run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	wantTurns(t, r, "scan@0", "scan@2")
+	// Nothing before the first scan, the scan interval that the event cut short, and the gap that replaced it:
+	// the promise of the wait that did not end is not the one that holds.
+	if want := []time.Duration{0, 30 * time.Second, 2 * time.Second}; !slices.Equal(b.got, want) {
+		t.Errorf("beats = %v, want %v", b.got, want)
+	}
+}

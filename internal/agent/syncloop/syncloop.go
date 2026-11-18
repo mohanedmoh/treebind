@@ -111,6 +111,12 @@ type Options struct {
 	// Wake delivers a signal when something may have changed, which calls for a scan sooner than the
 	// interval. It can be nil, and the loop does without it when it is closed.
 	Wake <-chan struct{}
+
+	// Beat is called before each wait with how long the wait is, so that whatever watches the loop knows
+	// how long it is until the loop is heard from again (docs/adr/0030). It is called again, with a new
+	// length, when an event ends a wait sooner and the loop waits for the rest. It can be nil. The turns
+	// themselves, a pull and a scan, say how long they take in the calls that they make.
+	Beat func(wait time.Duration)
 }
 
 // Run pulls until ctx is done, which is when it returns nil. It returns an error only for options that
@@ -131,6 +137,9 @@ func Run(ctx context.Context, o Options) error {
 	if o.Random == nil {
 		o.Random = rand.Float64
 	}
+	if o.Beat == nil {
+		o.Beat = func(time.Duration) {}
+	}
 	if o.Scan != nil {
 		return runWithScans(ctx, o)
 	}
@@ -138,6 +147,7 @@ func Run(ctx context.Context, o Options) error {
 	wait := o.Phase
 	failures := 0
 	for {
+		o.Beat(wait)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -234,10 +244,12 @@ func runWithScans(ctx context.Context, o Options) error {
 		if scanAt.Before(due) {
 			due = scanAt
 		}
+		wait := max(due.Sub(now), 0)
+		o.Beat(wait)
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-clock.After(max(due.Sub(now), 0)):
+		case <-clock.After(wait):
 		case _, open := <-wake:
 			if !open {
 				wake = nil

@@ -1179,3 +1179,66 @@ func TestSlotNames(t *testing.T) {
 		})
 	}
 }
+
+// beatLog is the calls of a Config's Beat, which Acquire makes from its own goroutine.
+type beatLog struct {
+	mu    sync.Mutex
+	waits []time.Duration
+}
+
+func (b *beatLog) beat(wait time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.waits = append(b.waits, wait)
+}
+
+func (b *beatLog) snapshot() []time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]time.Duration(nil), b.waits...)
+}
+
+func TestAcquireBeatsBeforeEachWaitForALockThatAnotherAgentHolds(t *testing.T) {
+	dir := lockDir(t)
+	holder := mustAcquire(t, testConfig(dir, "holder", newFakeClock(epochStart)))
+	t.Cleanup(func() { _ = holder.Release() })
+
+	readerClock := newFakeClock(epochStart)
+	log := &beatLog{}
+	cfg := testConfig(dir, "reader", readerClock)
+	cfg.Beat = log.beat
+	reader := acquireAsync(t.Context(), cfg)
+
+	for i := range 6 {
+		if !readerClock.waitParked(t, reader.done) {
+			t.Fatalf("the reader stopped waiting after %d intervals: %v", i, reader.err)
+		}
+		// The reader is in its wait, and what a watcher of it was told has to be in before that: one beat for
+		// each wait it has begun, each the length of the interval, which is how long until it looks again.
+		got := log.snapshot()
+		if len(got) != i+1 {
+			t.Fatalf("after %d intervals the reader is in wait number %d and has beaten %d times: %v", i, i+1, len(got), got)
+		}
+		for _, wait := range got {
+			if wait != testInterval {
+				t.Fatalf("beats = %v, want every one the interval %v", got, testInterval)
+			}
+		}
+		// The holder is alive, and renews at each interval of the reader, so that the reader keeps waiting.
+		if err := holder.Check(); err != nil {
+			t.Fatalf("the holder's check failed after %d intervals: %v", i, err)
+		}
+		readerClock.step(t, reader.done)
+	}
+}
+
+func TestAcquireOfAFreeLockMakesNoWaitAndSoNoBeat(t *testing.T) {
+	log := &beatLog{}
+	cfg := testConfig(lockDir(t), "alone", newFakeClock(epochStart))
+	cfg.Beat = log.beat
+	l := mustAcquire(t, cfg)
+	t.Cleanup(func() { _ = l.Release() })
+	if got := log.snapshot(); len(got) != 0 {
+		t.Errorf("a free lock was taken with the beats %v, want none: it did not wait", got)
+	}
+}
