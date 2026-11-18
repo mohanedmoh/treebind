@@ -236,17 +236,52 @@ spec:
                 description: commit controls the commits created from local edits.
                 properties:
                   authorEmail:
-                    description: authorEmail is the email recorded as the author of
-                      every commit.
+                    description: |-
+                      authorEmail is the email recorded as the author of every commit. It is one bare address, such as
+                      bot@example.org, with no name and no comment.
+                    maxLength: 254
+                    minLength: 1
                     type: string
+                    x-kubernetes-validations:
+                    - message: authorEmail must be an address of the form name@host,
+                        with no space
+                      rule: self.matches(r'^[^@\s]+@[^@\s]+$')
+                    - message: 'authorEmail must be a bare address: no name, no comment,
+                        no ''<'' or ''>'' and no control character'
+                      rule: '!self.matches(r''[<>()\x00-\x1f\x7f]'')'
+                    - message: 'authorEmail must not start or end with one of . ,
+                        : ; " '' \, which Git drops'
+                      rule: '!self.matches(r''^[.,:;\x22\x27\x5c]|[.,:;\x22\x27\x5c]$'')'
                   authorName:
-                    description: authorName is the name recorded as the author of
-                      every commit.
+                    description: |-
+                      authorName is the name recorded as the author of every commit. Git drops a newline, '<' and '>' anywhere in a
+                      name, and a space, a control character and any of . , : ; " ' \ from its ends, so a name with one of them is
+                      refused: the commits would say another name than the one written here.
+                    maxLength: 256
+                    minLength: 1
                     type: string
+                    x-kubernetes-validations:
+                    - message: authorName must not contain '<', '>' or a control character
+                        such as a newline
+                      rule: '!self.matches(r''[<>\x00-\x1f\x7f]'')'
+                    - message: 'authorName must not start or end with a space or one
+                        of . , : ; " '' \, which Git drops'
+                      rule: '!self.matches(r''^[\x00-\x20.,:;\x22\x27\x5c]|[\x00-\x20.,:;\x22\x27\x5c]$'')'
                   messageTemplate:
-                    description: messageTemplate is the commit message, as a Go text/template.
+                    description: |-
+                      messageTemplate is the commit message, as a Go text/template, with {{.Count}} for the number of files in
+                      the commit. Only the built-in functions of the package are there, so a template cannot run a program or read
+                      a file. The whitespace around the message is trimmed, and the first line is the subject.
+                    maxLength: 4096
+                    minLength: 1
                     type: string
+                    x-kubernetes-validations:
+                    - message: messageTemplate must not contain a NUL
+                      rule: '!self.matches(r''\x00'')'
                 type: object
+                x-kubernetes-validations:
+                - message: authorName and authorEmail must be set together
+                  rule: has(self.authorName) == has(self.authorEmail)
               paths:
                 description: paths limits which files are synced.
                 properties:

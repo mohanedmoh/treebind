@@ -305,6 +305,8 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 		return corev1.PodTemplateSpec{}, err
 	}
 	env = append(env, paths...)
+	// Who commits, and with what message, when spec.commit says (docs/adr/0031).
+	env = append(env, commitEnv(treebind.Spec.Commit)...)
 	if auth := treebind.Spec.Repository.Auth; auth != nil {
 		if ref := auth.SSHKeySecretRef; ref != nil {
 			env = append(env, corev1.EnvVar{Name: agentconfig.EnvSSHKeyFile, Value: path.Join(sshMountPath, ref.Key)})
@@ -405,6 +407,30 @@ func pathsEnv(paths *treebindv1alpha1.PathsSpec) ([]corev1.EnvVar, error) {
 		env = append(env, corev1.EnvVar{Name: list.name, Value: value})
 	}
 	return env, nil
+}
+
+// commitEnv returns the variables of the settings of spec.commit that the spec has (docs/adr/0031). One that
+// is empty is left out, so that a pod template that has none does not change, and its pod is not replaced, when
+// the operator learns to pass them on, and the agent has a default for each. The kubelet expands $(NAME) and $$
+// in the value of a variable (#179), and a name or a message template may hold a '$', so each '$' is written as
+// '$$', which the kubelet turns back into one: the value that the agent reads is the one of the spec, as it is
+// written. It is the same for every '$', in front of a '(' or not, so there is no case to tell apart.
+func commitEnv(commit *treebindv1alpha1.CommitSpec) []corev1.EnvVar {
+	if commit == nil {
+		return nil
+	}
+	var env []corev1.EnvVar
+	for _, setting := range []struct{ name, value string }{
+		{agentconfig.EnvCommitAuthorName, commit.AuthorName},
+		{agentconfig.EnvCommitAuthorEmail, commit.AuthorEmail},
+		{agentconfig.EnvCommitMessageTemplate, commit.MessageTemplate},
+	} {
+		if setting.value == "" {
+			continue
+		}
+		env = append(env, corev1.EnvVar{Name: setting.name, Value: strings.ReplaceAll(setting.value, "$", "$$")})
+	}
+	return env
 }
 
 // templateHash returns the SHA-256 of the JSON encoding of the pod template.
