@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/heartbeat"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
@@ -91,11 +92,17 @@ func (a *agent) takeLock(ctx context.Context, p *progress) bool {
 		a.logChanges("writer lock", []preflight.Result{*p.lock}, nil)
 		return false
 	}
-	cfg := lock.Config{Dir: where.LockDir, Holder: a.holder, TTL: a.LockTTL, Clock: a.LockClock}
+	cfg := lock.Config{
+		Dir: where.LockDir, Holder: a.holder, TTL: a.LockTTL, Clock: a.LockClock,
+		// Another agent may hold the lock for as long as it likes, and waiting for it is not a stuck loop. Each
+		// wait of a look at the lock is promised with the look that follows it, which reads the volume.
+		Beat: func(wait time.Duration) { a.beat(wait + heartbeat.Work) },
+	}
 
 	wait := a.RetryMin
 	var logged []string
 	for {
+		a.working()
 		held, err := a.AcquireLock(ctx, cfg)
 		if ctx.Err() != nil {
 			// A lock that was made in the instant of the stop is given up at once, so that the agent
@@ -111,6 +118,7 @@ func (a *agent) takeLock(ctx context.Context, p *progress) bool {
 		}
 		if err != nil {
 			result = *lockFailed(err)
+			a.beat(wait)
 		}
 		p.lock = &result
 		a.publish(p)

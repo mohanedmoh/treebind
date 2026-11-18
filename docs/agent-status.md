@@ -69,7 +69,7 @@ fails three times in a row counts as failed. Neither needs a token and neither s
 | Probe | Path | Answers 200 | Answers 503 |
 | :-- | :-- | :-- | :-- |
 | Readiness | `/readyz` | A pull has passed since the agent started | No pull has passed yet |
-| Liveness | `/healthz` | The agent is running | Never, for now |
+| Liveness | `/healthz` | The loop of the agent has been heard from within what it promised | It has not |
 
 **Ready means the agent has synced.** The first pull that ends `Passed` makes it ready: the checkout was at the tip of the
 branch (`UpToDate`), was brought to it (`Advanced`), or has commits that the repository does not have yet (`Ahead`). The
@@ -84,12 +84,23 @@ volume are as they were, and a Git host that is down for an hour should not turn
 not ready. The `Pull` check says what the last pull found. A container that restarts starts not ready, because nothing in its
 memory says that the one before it synced, and is ready again after its first pull.
 
+**Alive means the loop is not stuck.** The loop of the agent beats, and each beat says how long it is until the next:
+the length of the wait before a pull, a scan or a retry; the timeout of a Git command while one runs; and 5 minutes for the
+code between them. `/healthz` answers 503 when the loop has been silent for longer than it promised and a grace of 30
+seconds, and the kubelet restarts the container, 20 to 30 seconds later. A long interval, a long wait after failed pulls, a
+fetch of a large repository, and a wait for the writer lock that another agent holds are all promised, so none of them is
+taken for a stuck loop. A pull that fails, or a volume check that fails, is not either: the loop goes on, and the report
+says what failed. An agent that has nothing more to do (no lock, checkout or pulls to run) is alive for good. The log
+says `the loop of the agent did not beat within what it promised`, with how late it is, at most once a minute.
+[ADR 0030](adr/0030-the-agent-is-ready-after-its-first-pull-and-stays-ready-while-it-runs.md) has the reasons.
+
 | What you see | What it means | What to check |
 | :-- | :-- | :-- |
 | The pod is `0/1`, and `Ready` is `False` with `SyncPodNotReady`, for less than one interval after it started | The first pull is not due yet | Wait |
 | The same, for longer | No pull has passed | The `Pull` check: its reason says what is in the way, and [pulling](pull.md) says what to do |
 | The same, with `BranchGone` | The repository has no such branch, or no commit at all yet | Put a commit on the branch, or set `spec.repository.branch` to one that exists |
 | The same, and the `Pull` check is `Skipped` with `NotChecked` | The volume, the lock or the checkout has not passed | The check that failed, in the same report |
+| The container restarts, and `kubectl describe pod` shows `Liveness probe failed: HTTP probe failed with statuscode: 503` | The loop was stuck: a step took longer than it promised, most often a call on a volume that does not answer | The log of the container before the restart (`kubectl logs --previous`), for the line about the loop and how late it was, and the volume |
 
 While the pod is not ready, `kubectl describe pod` shows the event `Readiness probe failed: HTTP probe failed with
 statuscode: 503`. That is the probe doing its work and not a fault of its own. A repository that has no commit yet says

@@ -31,6 +31,7 @@ import (
 
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/gittest"
+	"github.com/mohanedmoh/treebind/internal/agent/heartbeat"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
@@ -312,6 +313,7 @@ func agentThatLostTheLock(t *testing.T) *agent {
 	}
 	a := &agent{
 		lost:    make(chan error, 1),
+		beats:   heartbeat.New(nil),
 		Options: Options{Now: time.Now, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
 	}
 	a.held.Store(held)

@@ -172,6 +172,8 @@ func (s *scans) close() {
 // that it found settles, which is when the loop is to scan again if that is soonest. It reports nothing of a
 // scan that was cut short by a stop.
 func (s *scans) once(ctx context.Context, now time.Time) time.Duration {
+	// The walk of the directories for the watches that they lack is code between Git commands.
+	s.a.working()
 	if s.watcher != nil && (s.refreshedAt.IsZero() || now.Sub(s.refreshedAt) >= s.interval) {
 		// What a rename of a directory can do to a watch is put right once in a scan interval, which is as late
 		// as a missed event is found. A scan that an event called for does not walk every directory: that
