@@ -149,8 +149,8 @@ func (h *Held) Kill() {
 	}
 }
 
-// HeldMerge is a stand-in for the git binary that holds the merge of an update in the middle of its
-// writes, and that a test kills there. It runs the real Git, with a filter or a hook added to the merge
+// HeldMerge is a stand-in for the git binary that holds the merge of an update, or the checkout of a resolution, in the
+// middle of its writes, and that a test kills there. It runs the real Git, with a filter or a hook added to the merge
 // that waits at the point that the test names. A Runner that is given Binary as its git runs it as it
 // runs any other, and what is added comes after the settings that take filters and hooks out.
 type HeldMerge struct {
@@ -177,7 +177,25 @@ while IFS= read -r line; do printf '%s\n' "$line"; done`)
 	if err := os.WriteFile(attributes, []byte("* filter=hold\n"), 0o644); err != nil {
 		f.T.Fatal(err)
 	}
-	return f.holdMerge(dir, file, "core.attributesFile", attributes, "-c", "filter.hold.smudge="+smudge+" %f")
+	return f.holdMerge("merge", dir, file, "core.attributesFile", attributes, "-c", "filter.hold.smudge="+smudge+" %f")
+}
+
+// HoldCheckout is HoldMerge for the checkout that moves a checkout to the commit of a resolution, which writes the files the same
+// way: it holds every checkout it runs in the middle of the files it writes.
+func (f *Fixture) HoldCheckout(file string) *HeldMerge {
+	f.T.Helper()
+	dir := filepath.Join(f.root, "hold-checkout")
+	smudge := filepath.Join(dir, "smudge")
+	attributes := filepath.Join(dir, "attributes")
+	f.script(smudge, `if [ "$1" = "$HOLD_NAME" ]; then
+  echo waiting > "$HOLD_FLAG"
+  read nothing < "$HOLD_FIFO"
+fi
+while IFS= read -r line; do printf '%s\n' "$line"; done`)
+	if err := os.WriteFile(attributes, []byte("* filter=hold\n"), 0o644); err != nil {
+		f.T.Fatal(err)
+	}
+	return f.holdMerge("checkout", dir, file, "core.attributesFile", attributes, "-c", "filter.hold.smudge="+smudge+" %f")
 }
 
 // HoldMergeAtRef returns a stand-in that holds every merge it runs at the update of the ref, after it has
@@ -194,13 +212,13 @@ func (f *Fixture) HoldMergeAtRef(ref string) *HeldMerge {
   done
 fi
 exit 0`)
-	return f.holdMerge(dir, ref, "core.hooksPath", filepath.Join(dir, "hooks"))
+	return f.holdMerge("merge", dir, ref, "core.hooksPath", filepath.Join(dir, "hooks"))
 }
 
-// holdMerge makes the stand-in. The arguments of the merge are rewritten, with what a shell has built in:
+// holdMerge makes the stand-in for the subcommand. The arguments of the command are rewritten, with what a shell has built in:
 // the setting that takes something away, which is named, is given the file that has what is to be held, and
 // what follows it is put in front of the arguments.
-func (f *Fixture) holdMerge(dir, name, setting, value string, more ...string) *HeldMerge {
+func (f *Fixture) holdMerge(subcommand, dir, name, setting, value string, more ...string) *HeldMerge {
 	h := &HeldMerge{t: f.T, Binary: filepath.Join(dir, "git"), flag: filepath.Join(dir, "flag"), pidOf: filepath.Join(dir, "pid")}
 	fifo := filepath.Join(dir, "fifo")
 	_ = os.Remove(fifo)
@@ -214,7 +232,7 @@ func (f *Fixture) holdMerge(dir, name, setting, value string, more ...string) *H
 	}
 	f.script(h.Binary, `merging=
 for arg in "$@"; do
-  if [ "$arg" = merge ]; then merging=yes; fi
+  if [ "$arg" = `+subcommand+` ]; then merging=yes; fi
 done
 if [ -z "$merging" ]; then exec '`+f.git+`' "$@"; fi
 echo $$ > '`+h.pidOf+`'
