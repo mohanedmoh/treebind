@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
+	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
 )
 
 // existingSubPath is the target.subPath the immutability tests create with and
@@ -173,6 +174,7 @@ var _ = Describe("Treebind schema", func() {
 		Expect(got.Spec.Sync.Interval).To(HaveValue(Equal(metav1.Duration{Duration: 30 * time.Second})))
 		Expect(got.Spec.Sync.SettleTime).To(HaveValue(Equal(metav1.Duration{Duration: 5 * time.Second})))
 		Expect(got.Spec.Sync.ConflictPolicy).To(Equal(treebindv1alpha1.ConflictPolicyFollowRemote))
+		Expect(string(got.Spec.Sync.ConflictPolicy)).To(Equal(agentconfig.DefaultConflictPolicy))
 	})
 
 	It("defaults the placement to standalone and leaves the agent unset", func() {

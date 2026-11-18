@@ -371,11 +371,19 @@ func TestTemplateHash(t *testing.T) {
 			wantChange: true,
 		},
 		{
-			name: "settings the pod does not read leave it alone",
+			name: "the default conflict policy, said out, leaves it alone",
+			mutate: func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowRemote
+			},
+			image: testImage,
+		},
+		{
+			name: "followLocal changes it",
 			mutate: func(tb *treebindv1alpha1.Treebind) {
 				tb.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowLocal
 			},
-			image: testImage,
+			image:      testImage,
+			wantChange: true,
 		},
 		{
 			name: "a settle time changes it",
@@ -420,6 +428,26 @@ func TestTemplateHashFollowsTheLists(t *testing.T) {
 	if hashes[0] != hashes[len(hashes)-1] {
 		t.Errorf("a Treebind whose lists are taken away has the hash %s, and %s before it had any",
 			hashes[len(hashes)-1], hashes[0])
+	}
+}
+
+func TestTemplateHashFollowsTheConflictPolicyThroughFollowLocalOnly(t *testing.T) {
+	// The default is not a state of the pod: "" and followRemote are the template of the operator before.
+	hashOf := func(policy treebindv1alpha1.ConflictPolicy) string {
+		treebind := newTreebind(testTreebindName)
+		treebind.Spec.Sync.ConflictPolicy = policy
+		return mustDesiredStatefulSet(t, treebind, testImage).Annotations[templateHashAnnotation]
+	}
+	unset, remote, local := hashOf(""), hashOf(treebindv1alpha1.ConflictPolicyFollowRemote), hashOf(treebindv1alpha1.ConflictPolicyFollowLocal)
+
+	if unset != remote {
+		t.Errorf("a Treebind that says followRemote has the hash %s, and %s when it says nothing: the pod would be replaced for the default", remote, unset)
+	}
+	if local == remote {
+		t.Error("followLocal leaves the hash as it was, so the pod is not replaced and keeps the old policy")
+	}
+	if again := hashOf(treebindv1alpha1.ConflictPolicyFollowRemote); again != unset {
+		t.Errorf("going back to followRemote gives the hash %s, and %s before: the pod would not be put back", again, unset)
 	}
 }
 
