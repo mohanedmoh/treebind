@@ -234,10 +234,10 @@ func (p *Puller) undo(ctx context.Context, j journal) (string, *Error) {
 		commitName(j.From), short(j.To), len(restore), len(remove))
 	if len(kept) > 0 {
 		note += fmt.Sprintf("; %d file(s) are left as they are, because they are neither as the update nor as the commit before has them, "+
-			"and the next pull is Blocked by them: %s", len(kept), nameSome(kept))
+			"and the next pull is Blocked by them: %s", len(kept), NameSome(kept))
 	}
 	if len(unsure) > 0 {
-		note += fmt.Sprintf("; %d file(s) could not be compared and are left as they are: %s", len(unsure), nameSome(unsure))
+		note += fmt.Sprintf("; %d file(s) could not be compared and are left as they are: %s", len(unsure), NameSome(unsure))
 	}
 	return note + p.journalRemoved(), nil
 }
@@ -246,8 +246,8 @@ func (p *Puller) undo(ctx context.Context, j journal) (string, *Error) {
 const checkoutBatch = 500
 
 // chunks splits the names into batches.
-func chunks(names []string, size int) func(yield func([]string) bool) {
-	return func(yield func([]string) bool) {
+func chunks[T any](names []T, size int) func(yield func([]T) bool) {
+	return func(yield func([]T) bool) {
 		for len(names) > 0 {
 			n := min(size, len(names))
 			if !yield(names[:n]) {
@@ -258,8 +258,9 @@ func chunks(names []string, size int) func(yield func([]string) bool) {
 	}
 }
 
-// nameSome names the first few of the files, and how many more there are.
-func nameSome(names []string) string {
+// NameSome names the first few of the files, and how many more there are, for a message. The agent says the files of a
+// resolution that were left out with it.
+func NameSome(names []string) string {
 	shown := names[:min(len(names), maxNamed)]
 	text := strings.Join(shown, ", ")
 	if more := len(names) - len(shown); more > 0 {
@@ -288,7 +289,12 @@ func (p *Puller) touched(ctx context.Context, j journal) ([]touch, error) {
 		}
 		return files, nil
 	}
-	out, err := p.git.Run(ctx, "diff-tree", "-r", "--no-renames", "-z", "--raw", "--no-abbrev", j.From, j.To)
+	return p.rawDiff(ctx, j.From, j.To)
+}
+
+// rawDiff lists what differs between two trees, a file at a time: a rename is a delete and an add.
+func (p *Puller) rawDiff(ctx context.Context, from, to string) ([]touch, error) {
+	out, err := p.git.Run(ctx, "diff-tree", "-r", "--no-renames", "-z", "--raw", "--no-abbrev", from, to)
 	if err != nil {
 		return nil, err
 	}

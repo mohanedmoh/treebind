@@ -38,17 +38,17 @@ type recoveryRef struct {
 	n            uint64
 }
 
-// recoveryRefs lists the agent's refs in the namespace, the oldest first. A ref with another name
+// refsIn lists the agent's refs in a namespace of numbered refs, the oldest first. A ref with another name
 // there is somebody's, and is not listed.
-func (p *Puller) recoveryRefs(ctx context.Context) ([]recoveryRef, error) {
-	out, err := p.git.Run(ctx, "for-each-ref", "--format=%(objectname) %(refname)", recoveryPrefix)
+func (p *Puller) refsIn(ctx context.Context, prefix string) ([]recoveryRef, error) {
+	out, err := p.git.Run(ctx, "for-each-ref", "--format=%(objectname) %(refname)", prefix)
 	if err != nil {
 		return nil, err
 	}
 	var refs []recoveryRef
 	for line := range strings.Lines(string(out.Stdout)) {
 		commit, name, _ := strings.Cut(strings.TrimSpace(line), " ")
-		if n, err := strconv.ParseUint(strings.TrimPrefix(name, recoveryPrefix), 10, 32); err == nil {
+		if n, err := strconv.ParseUint(strings.TrimPrefix(name, prefix), 10, 32); err == nil {
 			refs = append(refs, recoveryRef{name: name, commit: commit, n: n})
 		}
 	}
@@ -63,9 +63,15 @@ func (p *Puller) recoveryRefs(ctx context.Context) ([]recoveryRef, error) {
 // write, so it is made after the fence and before the update. A failure of any of it is a failure of the pull:
 // an update is not applied that cannot be undone.
 func (p *Puller) keepRecovery(ctx context.Context, from string) (string, []recoveryRef, error) {
-	refs, err := p.recoveryRefs(ctx)
+	return p.keepRef(ctx, recoveryPrefix, "recovery", from, "the update")
+}
+
+// keepRef is keepRecovery for a namespace: it makes the numbered ref that keeps the commit, and what is then not done
+// is called what, in the message of the failure.
+func (p *Puller) keepRef(ctx context.Context, prefix, kind, from, what string) (string, []recoveryRef, error) {
+	refs, err := p.refsIn(ctx, prefix)
 	if err != nil {
-		return "", nil, p.fail(ReasonPullFailed, "the recovery refs cannot be looked at, and the update was not applied: %v", err)
+		return "", nil, p.fail(ReasonPullFailed, "the %s refs cannot be looked at, and %s was not applied: %v", kind, what, err)
 	}
 	if last := len(refs) - 1; last >= 0 && refs[last].commit == from {
 		return refs[last].name, refs, nil
@@ -74,10 +80,10 @@ func (p *Puller) keepRecovery(ctx context.Context, from string) (string, []recov
 	if last := len(refs) - 1; last >= 0 {
 		next = refs[last].n + 1
 	}
-	name := fmt.Sprintf("%s%08d", recoveryPrefix, next)
+	name := fmt.Sprintf("%s%08d", prefix, next)
 	// The empty old value makes Git refuse a ref that is already there.
 	if _, err := p.git.Run(ctx, "update-ref", name, from, ""); err != nil {
-		return "", nil, p.fail(ReasonPullFailed, "the recovery ref %s cannot be written, and the update was not applied: %v", name, err)
+		return "", nil, p.fail(ReasonPullFailed, "the %s ref %s cannot be written, and %s was not applied: %v", kind, name, what, err)
 	}
 	return name, append(refs, recoveryRef{name: name, commit: from, n: next}), nil
 }
@@ -86,9 +92,14 @@ func (p *Puller) keepRecovery(ctx context.Context, from string) (string, []recov
 // returns what it could not do, for the result, and not an error: the ref that keeps the commit is made, and
 // an update that was applied is not a failure because an old ref stays. The next update tries again.
 func (p *Puller) tidyRecovery(ctx context.Context, refs []recoveryRef) string {
-	for _, old := range refs[:max(0, len(refs)-p.o.RecoveryRefs)] {
+	return p.tidyRefs(ctx, refs, p.o.RecoveryRefs, "recovery")
+}
+
+// tidyRefs removes the refs of a namespace past the number to keep, the oldest first.
+func (p *Puller) tidyRefs(ctx context.Context, refs []recoveryRef, keep int, kind string) string {
+	for _, old := range refs[:max(0, len(refs)-keep)] {
 		if _, err := p.git.Run(ctx, "update-ref", "-d", old.name, old.commit); err != nil {
-			return fmt.Sprintf("the old recovery ref %s cannot be removed: %v", old.name, err)
+			return fmt.Sprintf("the old %s ref %s cannot be removed: %v", kind, old.name, err)
 		}
 	}
 	return ""

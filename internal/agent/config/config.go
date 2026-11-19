@@ -111,6 +111,12 @@ const (
 	DirectionBidirectional = "bidirectional"
 )
 
+// The conflict policies, as the CRD names them (docs/adr/0034). followRemote is the default of the CRD and of the agent.
+const (
+	ConflictFollowRemote = "followRemote"
+	ConflictFollowLocal  = "followLocal"
+)
+
 // Config is what the agent runs with.
 type Config struct {
 	// Namespace and Name identify the Treebind the agent works for.
@@ -364,6 +370,15 @@ func CheckMaxDeletions(raw string) (int, error) {
 func CheckSyncDirection(direction string) error {
 	if direction != DirectionPull && direction != DirectionBidirectional {
 		return fmt.Errorf("must be %s or %s", DirectionPull, DirectionBidirectional)
+	}
+	return nil
+}
+
+// CheckConflictPolicy returns the reason a value cannot be the conflict policy of a sync. They are the values that the
+// CRD admits for sync.conflictPolicy.
+func CheckConflictPolicy(policy string) error {
+	if policy != ConflictFollowRemote && policy != ConflictFollowLocal {
+		return fmt.Errorf("must be %s or %s", ConflictFollowRemote, ConflictFollowLocal)
 	}
 	return nil
 }
