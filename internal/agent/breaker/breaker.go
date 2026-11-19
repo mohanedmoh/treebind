@@ -78,8 +78,8 @@ type HeldError struct {
 
 // Error says what is held and what waits, without a time.
 func (e *HeldError) Error() string {
-	return fmt.Sprintf("the agent made %s in the last hour, which is its limit (spec.commit.maxPerHour is %d), so no commit is made until "+
-		"one of them is more than an hour old; the changes stay on the volume. A loop, an application that answers what a pull "+
+	return fmt.Sprintf("the agent made %s in the last hour and its limit is %d (spec.commit.maxPerHour), so no commit is made until "+
+		"enough of them are more than an hour old; the changes stay on the volume. A loop, an application that answers what a pull "+
 		"brings or two Treebinds that undo each other's files, is what this is for, and the limit can be raised when the "+
 		"commits are expected", plural(e.Count, "commit", "commits"), e.Limit)
 }

@@ -157,7 +157,7 @@ func TestTheBreakerCountsInTheStateDirectoryAndIsFencedByTheLockThatTheAgentHold
 
 func TestACommitThatTheBreakerHeldIsAFailedCommitWithItsReasonAndNotAPassedOne(t *testing.T) {
 	w := newWorld()
-	const words = "the agent made 60 commits in the last hour, which is its limit"
+	const words = "the agent made 60 commits in the last hour and its limit is 60"
 	w.committer.answer = func(n int, _ []scan.Change) (commit.Result, error) {
 		if n == 1 {
 			return commit.Result{}, &commit.Error{Reason: breaker.ReasonTooManyCommits, Message: words}

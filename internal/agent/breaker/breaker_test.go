@@ -488,3 +488,18 @@ func TestAFileLargerThanTheAgentWritesIsAnErrorAndNotACountOfWhatFitsInTheFirstP
 		t.Errorf("Allow = %v, want an error that says that the file is larger than the agent writes, and not a hold", err)
 	}
 }
+
+func TestTheMessageOfAHoldIsTrueWhenThereAreMoreCommitsThanTheLimitAndSaysThatEnoughOfThemHaveToAge(t *testing.T) {
+	// A limit that was lowered after more commits were made than it allows: the count is not "the limit", and one commit growing
+	// old is not enough.
+	got := (&HeldError{Count: 5, Limit: 3}).Error()
+
+	for _, want := range []string{"5 commits", "its limit is 3", "enough of them are more than an hour old"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the message %q has no %q", got, want)
+		}
+	}
+	if strings.Contains(got, "which is its limit") {
+		t.Errorf("the message %q calls 5 commits the limit of 3", got)
+	}
+}
