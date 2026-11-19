@@ -33,6 +33,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
 )
 
@@ -80,6 +81,10 @@ const (
 	EnvCommitAuthorName      = "TREEBIND_COMMIT_AUTHOR_NAME"
 	EnvCommitAuthorEmail     = "TREEBIND_COMMIT_AUTHOR_EMAIL"
 	EnvCommitMessageTemplate = "TREEBIND_COMMIT_MESSAGE_TEMPLATE"
+	// EnvCommitMaxPerHour is the most commits that the agent makes in an hour, as a whole number: spec.commit.maxPerHour
+	// (docs/adr/0035). It is not set for the default of the CRD, so that a pod template that never had it does not change, and
+	// the agent has the default of the CRD for it.
+	EnvCommitMaxPerHour = "TREEBIND_COMMIT_MAX_PER_HOUR"
 
 	EnvStatusAddr     = "TREEBIND_STATUS_ADDR"
 	EnvStatusIssuer   = "TREEBIND_STATUS_ISSUER"
@@ -107,6 +112,12 @@ const (
 	// spec.sync.maxDeletions, which a test holds to what the API server does.
 	MinMaxDeletions = 1
 	MaxMaxDeletions = math.MaxInt32
+	// DefaultCommitMaxPerHour is the default of spec.commit.maxPerHour, which a test holds to the default that the API
+	// server fills in, and MinCommitMaxPerHour and MaxCommitMaxPerHour are the least and the most that the CRD admits. The
+	// breaker has the same three, and a test holds them to each other.
+	DefaultCommitMaxPerHour = breaker.DefaultLimit
+	MinCommitMaxPerHour     = breaker.MinLimit
+	MaxCommitMaxPerHour     = breaker.MaxLimit
 )
 
 // The directions of a sync, as the CRD names them.
@@ -161,6 +172,9 @@ type Config struct {
 	// written, and are empty when it does not say. They are not judged here: the commit package does that when
 	// it makes its committer, so that a wrong one is a failed check in the report and not an agent that exits.
 	CommitAuthorName, CommitAuthorEmail, CommitMessageTemplate string
+	// CommitMaxPerHour is the most commits that the agent makes in an hour, of the commit step and of the resolutions together
+	// (docs/adr/0035). It is the default when the Treebind does not say.
+	CommitMaxPerHour int
 
 	// StatusAddr is the address the status endpoint and the probes listen on.
 	StatusAddr string
@@ -181,6 +195,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	interval, intervalErr := CheckSyncInterval(get(EnvSyncInterval))
 	settleTime, settleTimeErr := CheckSettleTime(get(EnvSyncSettleTime))
 	maxDeletions, maxDeletionsErr := CheckMaxDeletions(get(EnvSyncMaxDeletions))
+	commitMaxPerHour, commitMaxPerHourErr := CheckCommitMaxPerHour(get(EnvCommitMaxPerHour))
 	include, includeErr := readPatterns(EnvPathsInclude, get(EnvPathsInclude))
 	exclude, excludeErr := readPatterns(EnvPathsExclude, get(EnvPathsExclude))
 	config := Config{
@@ -207,6 +222,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		CommitAuthorName:      getenv(EnvCommitAuthorName),
 		CommitAuthorEmail:     getenv(EnvCommitAuthorEmail),
 		CommitMessageTemplate: getenv(EnvCommitMessageTemplate),
+		CommitMaxPerHour:      commitMaxPerHour,
 		StatusAddr:            orDefault(get(EnvStatusAddr), DefaultStatusAddr),
 		StatusIssuer:          get(EnvStatusIssuer),
 		StatusAudience:        get(EnvStatusAudience),
@@ -222,6 +238,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	}
 	if maxDeletionsErr != nil {
 		err = errors.Join(fmt.Errorf("%s %w", EnvSyncMaxDeletions, maxDeletionsErr), err)
+	}
+	if commitMaxPerHourErr != nil {
+		err = errors.Join(fmt.Errorf("%s %w", EnvCommitMaxPerHour, commitMaxPerHourErr), err)
 	}
 	return config, errors.Join(err, includeErr, excludeErr)
 }
@@ -374,6 +393,30 @@ func CheckMaxDeletions(raw string) (int, error) {
 		return 0, errors.New("must be a whole number")
 	case value < MinMaxDeletions:
 		return 0, fmt.Errorf("must be at least %d", MinMaxDeletions)
+	}
+	return int(value), nil
+}
+
+// CheckCommitMaxPerHour returns the limit that a value stands for, DefaultCommitMaxPerHour when it is empty, or the reason it
+// cannot be one. The rules are the ones that the CRD puts on commit.maxPerHour: a whole number from MinCommitMaxPerHour to
+// MaxCommitMaxPerHour. A test holds the two together, because a value that the API server accepts and the agent refuses would
+// leave a sync pod that exits at start for ever.
+func CheckCommitMaxPerHour(raw string) (int, error) {
+	if raw == "" {
+		return DefaultCommitMaxPerHour, nil
+	}
+	// Digits and nothing else, as the operator writes the number: a sign, an exponent, a prefix or a separator is a value that it
+	// never makes. 31 bits is far more than the most, and a number that does not fit in them is too large.
+	value, err := strconv.ParseUint(raw, 10, 31)
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		return 0, fmt.Errorf("must be at most %d", MaxCommitMaxPerHour)
+	case err != nil:
+		return 0, errors.New("must be a whole number")
+	case value < MinCommitMaxPerHour:
+		return 0, fmt.Errorf("must be at least %d", MinCommitMaxPerHour)
+	case value > MaxCommitMaxPerHour:
+		return 0, fmt.Errorf("must be at most %d", MaxCommitMaxPerHour)
 	}
 	return int(value), nil
 }
