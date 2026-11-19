@@ -47,6 +47,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/commitmsg"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
@@ -72,6 +73,10 @@ const (
 	// undoTimeout is how long putting the index back may take after a commit that failed, when the agent was
 	// told to stop in the middle of it.
 	undoTimeout = 5 * time.Second
+
+	// countTimeout is how long telling the breaker of a commit may take, when the agent was told to stop in the middle of
+	// the commit: a short time is all it needs, and the commit is in the branch whether it is counted or not.
+	countTimeout = 5 * time.Second
 )
 
 // Outcome says what a call of Commit came to.
@@ -94,6 +99,9 @@ type Result struct {
 	Files int
 	// Gone is how many of the changes that were given were left out because the file was gone by then.
 	Gone int
+	// Warning says what did not work after a commit that did: it could not be counted by the breaker, so that the limit may be
+	// exceeded by it. It is empty when there is nothing to say.
+	Warning string
 }
 
 // Error is a commit that could not be made.
@@ -126,6 +134,9 @@ type Options struct {
 	// Fence is called immediately before the first write, and nothing is written when it returns an error. It is
 	// the check that the agent still holds the writer lock (docs/adr/0023). With none, nothing is checked.
 	Fence func(ctx context.Context) error
+	// Gate is the breaker that bounds the commits of an hour (docs/adr/0035). It is asked before anything is written, and
+	// told when a commit was made. With none, nothing is bounded.
+	Gate breaker.Gate
 }
 
 // Committer commits into one checkout. It is not safe for concurrent use: the agent commits one at a time,
@@ -172,6 +183,9 @@ func (c *Committer) Commit(ctx context.Context, changes []scan.Change) (Result, 
 	if len(list) == 0 {
 		return Result{Outcome: NothingToCommit, Gone: gone}, nil
 	}
+	if err := c.allow(ctx); err != nil {
+		return Result{}, err
+	}
 	if c.o.Fence != nil {
 		if err := c.o.Fence(ctx); err != nil {
 			return Result{}, c.fail(err, "nothing was committed, because the writer lock could not be checked: %v", err)
@@ -183,7 +197,40 @@ func (c *Committer) Commit(ctx context.Context, changes []scan.Change) (Result, 
 		return Result{}, c.fail(err, "the changes of the directory cannot be committed: %v", err)
 	}
 	result.Gone = gone
+	if result.Outcome == Committed {
+		result.Warning = c.count(ctx)
+	}
 	return result, nil
+}
+
+// allow asks the breaker whether a commit may be made. A hold is the reason TooManyCommits, with the words of the breaker, and
+// a count that cannot be made is a failed commit: what cannot be counted is not guessed.
+func (c *Committer) allow(ctx context.Context) error {
+	if c.o.Gate == nil {
+		return nil
+	}
+	err := c.o.Gate.Allow(ctx)
+	if err == nil {
+		return nil
+	}
+	if held, ok := errors.AsType[*breaker.HeldError](err); ok {
+		return &Error{Reason: breaker.ReasonTooManyCommits, Message: held.Error(), Err: err}
+	}
+	return c.fail(err, "nothing was committed, because the commits of the last hour cannot be counted: %v", err)
+}
+
+// count tells the breaker that a commit was made, and returns what to warn of when that did not work. The commit is in the
+// branch, so a stop that came in the middle of it does not cancel this: a short time is all it needs.
+func (c *Committer) count(ctx context.Context) string {
+	if c.o.Gate == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), countTimeout)
+	defer cancel()
+	if err := c.o.Gate.Made(ctx); err != nil {
+		return fmt.Sprintf("the commit was not counted against the limit of commits in an hour, so the limit may be exceeded by it: %v", err)
+	}
+	return ""
 }
 
 // pathsOf is the literal pathspecs of the changes, and how many were left out because the file is gone. A path
