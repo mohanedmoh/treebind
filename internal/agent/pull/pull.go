@@ -41,6 +41,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
@@ -107,6 +108,10 @@ const (
 	// ReasonRefused means the fence of the caller stopped the update. The error of the caller is
 	// underneath: a lost lock is lock.ErrLost.
 	ReasonRefused = "Refused"
+	// ReasonTooManyCommits means that a resolution would make a commit and the agent has made as many in the last hour as
+	// it may, so that the conflict was not resolved and nothing was written (docs/adr/0035). It is the reason of the commit
+	// step for the same cause.
+	ReasonTooManyCommits = breaker.ReasonTooManyCommits
 	// ReasonPullFailed means the agent could not pull for another reason: Git failed on the
 	// volume, or the checkout is not what a pull expects.
 	ReasonPullFailed = "PullFailed"
@@ -165,6 +170,10 @@ type Options struct {
 	// LocalRefs is how many of the refs that keep the commits of the checkout after a followRemote resolution are kept.
 	// DefaultLocalRefs when it is zero.
 	LocalRefs int
+
+	// Gate is the breaker that bounds the commits of an hour (docs/adr/0035). A resolution that makes a commit asks it
+	// before anything is written, and tells it when the checkout is at the commit. With none, nothing is bounded.
+	Gate breaker.Gate
 
 	// Drain is how long the merge that applies an update has to finish once the pull is told to stop. A
 	// merge that is stopped while it writes the files leaves them half written, with the index and the

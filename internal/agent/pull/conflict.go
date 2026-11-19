@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 )
@@ -54,6 +56,10 @@ const (
 	// is beside the recovery refs and works as they do: loose, numbered, local, and never pushed, because the push
 	// guard of the Runner refuses any destination that is not under refs/heads/.
 	localPrefix = "refs/treebind/local/"
+
+	// countTimeout is how long telling the breaker of a commit may take, when the agent was told to stop in the middle of the
+	// pull: the checkout is at the commit whether it is counted or not.
+	countTimeout = 5 * time.Second
 
 	// indexBatch is how many files one command puts in the index, so that the command line stays short.
 	indexBatch = 200
@@ -116,6 +122,15 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 	}
 	res := Resolution{Policy: p.o.Policy, LocalCommits: ours, RemoteCommits: theirs, Overridden: found.overridden}
 
+	// A resolution that makes a commit is bounded, and one that does not is not: the checkout moves to the tip and nothing is
+	// made that the repository would have to take. It is asked before anything is written, a ref for the commits of the checkout
+	// included, because one that is held at every interval would make a ref at each.
+	if (p.o.Policy == FollowLocal && !found.sameTree) || len(found.carry) > 0 {
+		if err := p.allowCommit(ctx); err != nil {
+			return Result{}, err
+		}
+	}
+
 	// The first write, and everything before it only read.
 	if p.o.Fence != nil {
 		if err := p.o.Fence(ctx); err != nil {
@@ -164,7 +179,40 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 		result.Warning = strings.Trim(result.Warning+"; "+warning, "; ")
 	}
 	result.Outcome, result.Resolution = Resolved, &res
+	if res.Commit != "" {
+		result.Warning = strings.Trim(result.Warning+"; "+p.countCommit(ctx), "; ")
+	}
 	return result, nil
+}
+
+// allowCommit asks the breaker whether a resolution may make a commit. A hold is the reason TooManyCommits, with the words of
+// the breaker, and a count that cannot be made is a failed pull: what cannot be counted is not guessed.
+func (p *Puller) allowCommit(ctx context.Context) error {
+	if p.o.Gate == nil {
+		return nil
+	}
+	err := p.o.Gate.Allow(ctx)
+	if err == nil {
+		return nil
+	}
+	if held, ok := errors.AsType[*breaker.HeldError](err); ok {
+		return &Error{Reason: ReasonTooManyCommits, Message: held.Error(), Err: err}
+	}
+	return p.fail(ReasonPullFailed, "nothing was written, because the commits of the last hour cannot be counted: %v", err)
+}
+
+// countCommit tells the breaker that the resolution made a commit, and returns what to warn of when that did not work. The
+// checkout is at the commit, so a stop that came in the middle of the pull does not cancel this: a short time is all it needs.
+func (p *Puller) countCommit(ctx context.Context) string {
+	if p.o.Gate == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), countTimeout)
+	defer cancel()
+	if err := p.o.Gate.Made(ctx); err != nil {
+		return fmt.Sprintf("the commit of the resolution was not counted against the limit of commits in an hour, so the limit may be exceeded by it: %v", err)
+	}
+	return ""
 }
 
 // comparison is what the two sides did since the commit they share.
