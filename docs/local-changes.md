@@ -108,13 +108,13 @@ It is after `Commit`, and it says what came of the last push, until the next one
 | :-- | :-- | :-- |
 | `Passed` | | The commits are in the repository. The message says how many and the two ids, for example `pushed 2 commits to the branch main: 1a2b3c4d5e6f..9f8e7d6c5b4a`, or that the branch is new |
 | `Passed` | | `nothing to push`: the repository has every commit of the checkout. Nothing is wrong |
-| `Failed` | `NonFastForward` | The repository has commits on the branch that the checkout lacks, so the push is not a fast-forward and is not forced. A pull brings them and says `Diverged` when the checkout has commits of its own. Put it right as [pulling](pull.md) says; the agent tries again after the interval |
+| `Failed` | `NonFastForward` | The repository has commits on the branch that the checkout lacks, so the push is not a fast-forward and is not forced. A pull brings them, and when the checkout has commits of its own it resolves the conflict by `spec.sync.conflictPolicy` ([conflicts](conflicts.md)), after which the push is a fast-forward and the agent tries it at the next scan. It stays `NonFastForward` only while the pull cannot resolve, and the `Pull` check says why |
 | `Failed` | `PushRejected` | The repository refused the push: a protected branch, a hook, a rule, a file that is too large, a secret that the host found. The message has what Git said and then the words of the host. Put right what it says, for example allow the deploy key to push to the branch; the agent tries again after the interval and does not force or push to another branch |
 | `Failed` | `PushFailed` | The push could not be made: the repository did not answer, the key was refused, the volume refused, or the writer lock could not be checked. The message says why. The agent tries again after a wait that grows to ten minutes |
 | `Failed` | `GitDirUnsafe` | The Git directory holds something that the agent did not put there. See [the Git directory](git-directory.md) |
 | `Skipped` | `NotChecked` | The checkout is not made yet, or the first scan is running |
 
-Until the conflict policies exist (the next change), a `NonFastForward` is for a person to put right.
+A `NonFastForward` is put right by the pull that follows ([conflicts](conflicts.md)), and the push is tried again at the scan after a resolution that made a commit, without waiting for the interval.
 
 The message of a scan that worked also says when the events cannot do all of their work:
 
@@ -129,6 +129,6 @@ The message of a scan that worked also says when the events cannot do all of the
 
 ## What it does not do yet
 
-It does not resolve conflicts, or push to another branch, in the way that a conflict policy will (the next change), and it
+It does not push to another branch or open a pull request, and it
 does not scan for secrets in the files it commits, apart from the names above. A scan interval that follows what the volume can do, and a way to set
 it, come with the volume probe.
