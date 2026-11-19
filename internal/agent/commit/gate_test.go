@@ -332,3 +332,20 @@ func TestAKillAfterTheCommitLeavesItUncountedAndTheNextPassCountsTheNextOneRight
 		t.Errorf("the file of the breaker holds %q, %v, want one time: the commit that was killed was not counted, and this one is", data, err)
 	}
 }
+
+func TestCountingACommitIsNotCancelledByAStopThatCameInTheMiddleOfIt(t *testing.T) {
+	// The stop comes after the command that made the commit and before the breaker is told: the context of the commit is done,
+	// and the commit is in the branch whether it is done or not.
+	var cancelled error
+	g := &gate{atTold: func(ctx context.Context) { cancelled = ctx.Err() }}
+	c := &Committer{o: Options{Gate: g}}
+	ctx, stop := context.WithCancel(t.Context())
+	stop()
+
+	if warning := c.count(ctx); warning != "" || g.told != 1 {
+		t.Fatalf("count = %q and the breaker was told %d times, want no warning and once", warning, g.told)
+	}
+	if cancelled != nil {
+		t.Errorf("the breaker was told with a context that is done: %v", cancelled)
+	}
+}

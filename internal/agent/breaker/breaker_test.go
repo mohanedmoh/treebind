@@ -384,3 +384,15 @@ func TestAFileThatCannotBePutInItsPlaceIsRemovedAndTheFileIsAsItWas(t *testing.T
 		t.Errorf("the state directory holds %d files, want only the file: the one written aside is removed when it cannot be used", len(entries))
 	}
 }
+
+func TestTheTimesAreCountedInOrderWhateverOrderTheFileHasThem(t *testing.T) {
+	// A file that was written by hand, or by a clock that went back, is not in order, and the wait is for the oldest commit.
+	w := newWorld(t)
+	w.seed(t, 120, 0, 60)
+
+	held := w.held(t)
+
+	if !held.Until.Equal(epoch.Add(time.Hour)) {
+		t.Errorf("Until = %v, want %v: an hour after the oldest commit, which is the one at the epoch", held.Until, epoch.Add(time.Hour))
+	}
+}

@@ -254,3 +254,20 @@ func TestABreakerThatCannotCountIsAFailedPullAndNotAHold(t *testing.T) {
 		t.Error("something was written although the commits could not be counted")
 	}
 }
+
+func TestCountingAResolutionIsNotCancelledByAStopThatCameInTheMiddleOfTheMove(t *testing.T) {
+	// The stop comes after the move and before the breaker is told: the context of the pull is done, and the checkout is at the
+	// commit whether it is done or not.
+	var cancelled error
+	g := &gate{atTold: func(ctx context.Context) { cancelled = ctx.Err() }}
+	p := &Puller{o: Options{Gate: g}}
+	ctx, stop := context.WithCancel(t.Context())
+	stop()
+
+	if warning := p.countCommit(ctx); warning != "" || g.told != 1 {
+		t.Fatalf("countCommit = %q and the breaker was told %d times, want no warning and once", warning, g.told)
+	}
+	if cancelled != nil {
+		t.Errorf("the breaker was told with a context that is done: %v", cancelled)
+	}
+}
