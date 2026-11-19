@@ -45,7 +45,7 @@ type world struct {
 	breaker *Breaker
 }
 
-func newWorld(t *testing.T, change ...func(*Options)) *world {
+func newWorld(t *testing.T) *world {
 	t.Helper()
 	w := &world{dir: t.TempDir(), clock: &clock{now: epoch}}
 	o := Options{
@@ -54,9 +54,6 @@ func newWorld(t *testing.T, change ...func(*Options)) *world {
 			w.fenced++
 			return w.fence
 		},
-	}
-	for _, c := range change {
-		c(&o)
 	}
 	b, err := New(o)
 	if err != nil {
@@ -200,7 +197,7 @@ func TestACheckReadsAndNeverWritesOrAsksTheFence(t *testing.T) {
 	w.seed(t, 0, 1, 2)
 	before := w.journal(t)
 
-	w.held(t)
+	_ = w.held(t)
 
 	if w.journal(t) != before || w.fenced != 0 {
 		t.Errorf("a check changed the file or asked the fence (%d times), want neither", w.fenced)

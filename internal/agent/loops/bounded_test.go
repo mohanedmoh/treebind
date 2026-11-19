@@ -122,14 +122,14 @@ func TestAHostThatGivesBackEachCommitWithAnotherFileIsHeldToTheLimitOfTheHourInT
 	run := func(t *testing.T, limit int) (*node, *hours) {
 		t.Helper()
 		f := gittest.New(t)
-		f.Publish(branchMain, map[string]string{"a.txt": "a\n"})
+		f.Publish(branchMain, map[string]string{fileA: "a\n"})
 		f.RewriteWhatIsPushed(true)
 		n := newNode(t, f, "A", subPath, pull.FollowLocal)
 		clock := &hours{now: time.Unix(1_800_000_000, 0)}
 		if limit > 0 {
 			n.bounded(limit, clock.Now)
 		}
-		n.write("a.txt", "a, changed\n")
+		n.write(fileA, "a, changed\n")
 		for range 16 {
 			n.commit()
 			n.push()
@@ -171,11 +171,11 @@ func TestTheFilesOfTheBreakerAreNoChangeOfTheApplicationInTheSyncedDirectory(t *
 	for _, sub := range layouts {
 		t.Run("sub path "+sub, func(t *testing.T) {
 			f := gittest.New(t)
-			f.Publish(branchMain, map[string]string{"a.txt": "a\n"})
+			f.Publish(branchMain, map[string]string{fileA: "a\n"})
 			n := newNode(t, f, "A", sub, pull.FollowRemote)
 			clock := &hours{now: time.Unix(1_800_000_000, 0)}
 			n.bounded(3, clock.Now)
-			n.write("a.txt", "a, changed\n")
+			n.write(fileA, "a, changed\n")
 
 			if !n.commit() {
 				t.Fatal("the commit was not made")

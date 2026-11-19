@@ -41,6 +41,7 @@ const (
 	fileB      = "b.txt"
 	fileC      = "dir/c.txt"
 	fileNew    = "new.txt"
+	fileLeft   = "left.txt"
 
 	botName  = "treebind-bot"
 	botEmail = "bot@example.org"
@@ -418,8 +419,8 @@ func TestNothingToCommitIsNotAnError(t *testing.T) {
 
 func TestWhatAKilledRunLeftStagedIsNotCommitted(t *testing.T) {
 	w := newWorld(t, "", base)
-	w.write("left.txt", "staged by a run that was killed\n")
-	w.git("add", "--", "left.txt")
+	w.write(fileLeft, "staged by a run that was killed\n")
+	w.git("add", "--", fileLeft)
 	w.write(fileNew, "new\n")
 	listed := []scan.Change{}
 	for _, c := range w.changes() {
@@ -433,7 +434,7 @@ func TestWhatAKilledRunLeftStagedIsNotCommitted(t *testing.T) {
 	}
 
 	w.wantCommitted("A " + fileNew)
-	if left := w.changes(); len(left) != 1 || left[0].Path != "left.txt" {
+	if left := w.changes(); len(left) != 1 || left[0].Path != fileLeft {
 		t.Errorf("a scan finds %+v, want left.txt as a change that is not committed", left)
 	}
 }
@@ -479,8 +480,8 @@ func TestTheCountIsTheNumberOfFilesThatAreInTheCommit(t *testing.T) {
 
 func TestTheWriterLockIsCheckedBeforeAnythingIsWrittenAndNothingIsWrittenWithoutIt(t *testing.T) {
 	w := newWorld(t, "", base)
-	w.write("left.txt", "staged\n")
-	w.git("add", "--", "left.txt")
+	w.write(fileLeft, "staged\n")
+	w.git("add", "--", fileLeft)
 	w.write(fileNew, "new\n")
 	before := w.head()
 	lost := errors.New("the writer lock is another agent's")
@@ -498,7 +499,7 @@ func TestTheWriterLockIsCheckedBeforeAnythingIsWrittenAndNothingIsWrittenWithout
 	if w.head() != before {
 		t.Error("a commit was made without the lock")
 	}
-	if staged := w.staged(); !slices.Equal(staged, []string{"left.txt"}) {
+	if staged := w.staged(); !slices.Equal(staged, []string{fileLeft}) {
 		t.Errorf("the index holds %q, want what it held before: nothing was written without the lock, not even a reset", staged)
 	}
 	if n := w.fenced.Load(); n != 1 {

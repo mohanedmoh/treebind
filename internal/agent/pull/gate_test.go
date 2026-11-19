@@ -182,8 +182,7 @@ func TestAResolutionIsToldToTheBreakerOnceTheCheckoutIsAtItAndNotWhenTheMoveFail
 			headWhenTold = w.head()
 			_, deadline = ctx.Deadline()
 		}
-		ctx, stop := context.WithCancel(context.Background())
-		defer stop()
+		ctx := t.Context()
 
 		got, err := w.puller.Pull(ctx)
 

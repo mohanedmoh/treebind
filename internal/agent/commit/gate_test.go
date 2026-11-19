@@ -61,8 +61,8 @@ func TestACommitThatTheBreakerHoldsIsNotMadeAndWritesNothing(t *testing.T) {
 	held := &breaker.HeldError{Count: 3, Limit: 3, Until: time.Unix(1_800_000_000, 0)}
 	g := &gate{allow: held}
 	w := newWorld(t, "", base, gated(g))
-	w.write("left.txt", "staged\n")
-	w.git("add", "--", "left.txt")
+	w.write(fileLeft, "staged\n")
+	w.git("add", "--", fileLeft)
 	w.write(fileNew, "new\n")
 	before := w.head()
 
@@ -78,7 +78,7 @@ func TestACommitThatTheBreakerHoldsIsNotMadeAndWritesNothing(t *testing.T) {
 	if w.head() != before {
 		t.Error("a commit was made although the breaker holds")
 	}
-	if staged := w.staged(); !slices.Equal(staged, []string{"left.txt"}) {
+	if staged := w.staged(); !slices.Equal(staged, []string{fileLeft}) {
 		t.Errorf("the index holds %q, want what it held before: a commit that is held writes nothing, not even a reset", staged)
 	}
 	if n := w.fenced.Load(); n != 0 {
@@ -132,8 +132,7 @@ func TestACommitThatWasMadeIsToldToTheBreakerOnceAfterItIsInTheBranchWithAContex
 			t.Errorf("the context that the breaker is told with is done: %v", ctx.Err())
 		}
 	}
-	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
+	ctx := t.Context()
 
 	got, err := w.committer.Commit(ctx, w.changes())
 

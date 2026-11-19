@@ -43,6 +43,7 @@ const (
 	problemScheme    = "must use ssh:// or https://"
 	problemControl   = "whitespace or control"
 	notADuration     = "soon"
+	notANumber       = "many"
 	justUnderASecond = "999ms"
 	problemLeast     = "must be at least 1s"
 	problemDuration  = "must be a duration"
@@ -661,7 +662,7 @@ func TestFromEnvReadsTheCapOnDeletionsAndLeavesItUnsetWhenThereIsNone(t *testing
 
 func TestFromEnvSaysABadCapOnDeletionsWithTheOtherProblems(t *testing.T) {
 	env := complete()
-	env[EnvSyncMaxDeletions] = "many"
+	env[EnvSyncMaxDeletions] = notANumber
 	env[EnvNamespace] = ""
 
 	_, err := fromMap(env)
@@ -692,7 +693,7 @@ func TestCheckMaxDeletions(t *testing.T) {
 		{"1e3", 0, problemMaxDeletionsInteger},
 		{"0x10", 0, problemMaxDeletionsInteger},
 		{"1_000", 0, problemMaxDeletionsInteger},
-		{"many", 0, problemMaxDeletionsInteger},
+		{notANumber, 0, problemMaxDeletionsInteger},
 		{"5 0", 0, problemMaxDeletionsInteger},
 	}
 	for _, tt := range tests {
@@ -773,7 +774,7 @@ func TestFromEnvReadsTheLimitOfCommitsInAnHourAndDefaultsToSixty(t *testing.T) {
 
 func TestFromEnvSaysABadLimitOfCommitsInAnHourWithTheOtherProblems(t *testing.T) {
 	env := complete()
-	env[EnvCommitMaxPerHour] = "many"
+	env[EnvCommitMaxPerHour] = notANumber
 	env[EnvNamespace] = ""
 
 	_, err := fromMap(env)
@@ -805,7 +806,7 @@ func TestCheckCommitMaxPerHour(t *testing.T) {
 		{"1e3", 0, problemCommitMaxPerHourInteger},
 		{"0x10", 0, problemCommitMaxPerHourInteger},
 		{"1_000", 0, problemCommitMaxPerHourInteger},
-		{"many", 0, problemCommitMaxPerHourInteger},
+		{notANumber, 0, problemCommitMaxPerHourInteger},
 		{"5 0", 0, problemCommitMaxPerHourInteger},
 	}
 	for _, tt := range tests {
