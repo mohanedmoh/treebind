@@ -21,7 +21,8 @@ limitations under the License.
 // hammering one Git host (R-19). It then applies the commits as a fast-forward, with Git's own
 // refusal to write over a file that has a local edit or an untracked file in the way, which is
 // what FR-2 asks for: nothing the application has changed and not yet committed is overwritten.
-// Commits on both sides are not merged here: that is the conflict policy of the Treebind.
+// Commits on both sides are resolved by the conflict policy of the Treebind when it has one, and are not touched
+// when it has none (docs/adr/0034).
 //
 // Before it applies an update the pull looks at what the update would remove from the directory, and
 // does not apply one that removes more than a cap, or every file of the branch, so that a branch that
@@ -74,6 +75,9 @@ const (
 	Ahead Outcome = "Ahead"
 	// Advanced means the checkout was fast-forwarded to a newer tip.
 	Advanced Outcome = "Advanced"
+	// Resolved means the checkout and the repository had each gained commits, and the conflict policy of the
+	// Treebind decided which of them wins. Result.Resolution says how (docs/adr/0034).
+	Resolved Outcome = "Resolved"
 )
 
 // The reasons of an Error. Each distinct cause has its own.
@@ -82,8 +86,8 @@ const (
 	// file is in the way of. Nothing was written, and the next pull tries again.
 	ReasonBlocked = "Blocked"
 	// ReasonDiverged means the checkout and the repository each have commits that the other
-	// lacks, so the update is not a fast-forward. Nothing was written. What wins is the conflict
-	// policy of the Treebind.
+	// lacks, so the update is not a fast-forward, and the Puller has no conflict policy to say what wins, as
+	// for a Treebind that only pulls. Nothing was written.
 	ReasonDiverged = "Diverged"
 	// ReasonBranchGone means the repository has no such branch any more.
 	ReasonBranchGone = "BranchGone"
@@ -154,6 +158,14 @@ type Options struct {
 	// are kept. DefaultRecoveryRefs when it is zero.
 	RecoveryRefs int
 
+	// Policy is the conflict policy: which side wins when the checkout and the repository each have commits that the other
+	// lacks. It is empty for a Treebind that only pulls, which has no commits of its own to put on the repository's, and
+	// for which such a divergence is a failure, ReasonDiverged (docs/adr/0034).
+	Policy Policy
+	// LocalRefs is how many of the refs that keep the commits of the checkout after a followRemote resolution are kept.
+	// DefaultLocalRefs when it is zero.
+	LocalRefs int
+
 	// Drain is how long the merge that applies an update has to finish once the pull is told to stop. A
 	// merge that is stopped while it writes the files leaves them half written, with the index and the
 	// branch at the commit it came from, and the next update is refused for them (docs/adr/0028).
@@ -176,6 +188,8 @@ type Result struct {
 	// Warning says what the pull could not do that does not fail it: an old recovery ref or the journal of
 	// the update that it could not remove. It is empty when there is nothing to say.
 	Warning string
+	// Resolution says how the conflict was resolved, and is nil unless the outcome is Resolved.
+	Resolution *Resolution
 	// Repaired says what the pull put right before it began, such as an update that was cut off or an index that
 	// could not be read (docs/adr/0028), in words for the check. It is empty when there was nothing to put right.
 	Repaired string
@@ -208,8 +222,13 @@ func New(o Options) (*Puller, error) {
 	if err := config.CheckBranch(o.Branch); err != nil {
 		return nil, fmt.Errorf("pull: the branch %q %w", o.Branch, err)
 	}
-	if o.MaxDeletions < 0 || o.RecoveryRefs < 0 || o.Drain < 0 {
-		return nil, errors.New("pull: MaxDeletions, RecoveryRefs and Drain must not be negative")
+	if o.MaxDeletions < 0 || o.RecoveryRefs < 0 || o.LocalRefs < 0 || o.Drain < 0 {
+		return nil, errors.New("pull: MaxDeletions, RecoveryRefs, LocalRefs and Drain must not be negative")
+	}
+	if o.Policy != "" {
+		if err := config.CheckConflictPolicy(string(o.Policy)); err != nil {
+			return nil, fmt.Errorf("pull: the conflict policy %q %w", o.Policy, err)
+		}
 	}
 	if o.FetchTimeout == 0 {
 		o.FetchTimeout = DefaultFetchTimeout
@@ -219,6 +238,9 @@ func New(o Options) (*Puller, error) {
 	}
 	if o.RecoveryRefs == 0 {
 		o.RecoveryRefs = DefaultRecoveryRefs
+	}
+	if o.LocalRefs == 0 {
+		o.LocalRefs = DefaultLocalRefs
 	}
 	if o.Drain == 0 {
 		o.Drain = DefaultDrain
@@ -284,10 +306,12 @@ func (p *Puller) update(ctx context.Context, head string) (Result, error) {
 		switch {
 		case ours > 0 && theirs == 0:
 			return Result{Outcome: Ahead, Branch: p.o.Branch, From: head, To: head}, nil
+		case ours > 0 && p.o.Policy != "":
+			return p.resolve(ctx, head, tip, ours, theirs)
 		case ours > 0:
 			return Result{}, p.fail(ReasonDiverged, "the checkout and the branch %s of the repository have gone different ways: "+
 				"the checkout has %d commit(s) that the repository does not, and the repository has %d that the checkout does not. "+
-				"Nothing was written. What wins is the conflict policy of the Treebind", p.o.Branch, ours, theirs)
+				"Nothing was written, because this Treebind has no conflict policy to say what wins", p.o.Branch, ours, theirs)
 		}
 	}
 	return p.fastForward(ctx, head, tip)
@@ -345,6 +369,23 @@ func (p *Puller) fetch(ctx context.Context) (string, error) {
 // fastForward applies the commits up to tip to the checkout, which is at from, or has no commit
 // when from is empty.
 func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, error) {
+	return p.apply(ctx, from, to, move{keep: true})
+}
+
+// move says how the checkout is brought to a commit.
+type move struct {
+	// switching brings the checkout to a commit that is not a descendant of the one it is at, which a merge does not,
+	// with the checkout that a switch of branches is, and that Git refuses for the same files.
+	switching bool
+	// keep makes the ref that keeps the commit the checkout was at, as an update does. A resolution does not: the
+	// commits of the checkout are kept by its own ref, or are in the history of what it makes.
+	keep bool
+}
+
+// apply brings the checkout, which is at from, or has no commit when from is empty, to the commit, with every check
+// that an update has: the state directory, the cap on deletions, the lock, the journal and Git's refusal to write
+// over a local edit.
+func (p *Puller) apply(ctx context.Context, from, to string, how move) (Result, error) {
 	if refused := checkout.CheckReserved(ctx, p.git, p.o.Layout, p.o.Branch, to); refused != nil {
 		if refused.Reason == ReasonReservedPath {
 			return Result{}, &Error{Reason: refused.Reason, Message: refused.Message, Err: refused.Err}
@@ -365,7 +406,7 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 	}
 	var recovery string
 	var refs []recoveryRef
-	if from != "" {
+	if from != "" && how.keep {
 		var err error
 		if recovery, refs, err = p.keepRecovery(ctx, from); err != nil {
 			return Result{}, err
@@ -392,7 +433,13 @@ func (p *Puller) fastForward(ctx context.Context, from, to string) (Result, erro
 	// local edit as it is. --no-overwrite-ignore: Git writes over an untracked file that a .gitignore
 	// hides, unless it is told not to, and a file that the application keeps out of the repository,
 	// a .env or a local config, is the application's all the same.
-	if _, err := p.git.RunTimeout(applying, p.o.FetchTimeout, "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to); err != nil {
+	args := []string{"merge", "--quiet", "--ff-only", "--no-overwrite-ignore", to}
+	if how.switching {
+		// A checkout of the branch at the commit, which writes the files the way a merge does, and is told the same:
+		// without --no-overwrite-ignore it writes over an ignored file that the application keeps, as reset does.
+		args = []string{"checkout", "--quiet", "--no-overwrite-ignore", "-B", p.o.Branch, to}
+	}
+	if _, err := p.git.RunTimeout(applying, p.o.FetchTimeout, args...); err != nil {
 		failure := p.mergeFailed(ctx, from, to, err)
 		if failure.Reason == ReasonBlocked {
 			// Git refused before it wrote a file. Any other failure may have left some written, and the journal stays
