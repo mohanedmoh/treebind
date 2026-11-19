@@ -33,10 +33,12 @@ import (
 )
 
 const (
-	branchMain = "main"
-	subPath    = "data"
-	botName    = "treebind-bot"
-	botEmail   = "treebind-bot@treebind.invalid"
+	branchMain     = "main"
+	subPath        = "data"
+	botName        = "treebind-bot"
+	fileA          = "a.txt"
+	fileAttributes = ".gitattributes"
+	botEmail       = "treebind-bot@treebind.invalid"
 )
 
 // node is one Treebind: a checkout on a claim of its own, and the real pull, scan, commit and push of the agent for it.

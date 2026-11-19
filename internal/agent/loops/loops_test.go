@@ -63,20 +63,20 @@ func TestFilesThatAPullWritesAreNotChangesOfTheApplicationAndStayNoneWhenTouched
 		// needsAttrSource is for a case that holds only on a Git that has GIT_ATTR_SOURCE.
 		needsAttrSource bool
 	}{
-		{name: "plain files", first: map[string]string{"a.txt": "a\n", "dir/b.txt": "b\n", "dir/sub/c.txt": "c\n"}},
-		{name: "eol=crlf", first: map[string]string{".gitattributes": "* text eol=crlf\n", "a.txt": "one\ntwo\n"}},
-		{name: "eol=lf", first: map[string]string{".gitattributes": "* text eol=lf\n", "a.txt": "one\r\ntwo\r\n"}},
+		{name: "plain files", first: map[string]string{fileA: "a\n", "dir/b.txt": "b\n", "dir/sub/c.txt": "c\n"}},
+		{name: "eol=crlf", first: map[string]string{fileAttributes: "* text eol=crlf\n", fileA: "one\ntwo\n"}},
+		{name: "eol=lf", first: map[string]string{fileAttributes: "* text eol=lf\n", fileA: "one\r\ntwo\r\n"}},
 		// A blob with both kinds of line ending, committed before the attribute was set. Written with eol=crlf it is a file that
 		// does not come back to the blob, and a Git that read the attribute would list it as changed at every scan that
 		// finds its stat different. The Runner reads the attributes from an empty tree (docs/adr/0013), a setting that
 		// Git 2.41 brought, so that older releases do list it: see the skip below.
-		{name: "eol=crlf and a file with both line endings", raw: map[string]string{"a.txt": "one\r\ntwo\n", ".gitattributes": "* text eol=crlf\n"},
+		{name: "eol=crlf and a file with both line endings", raw: map[string]string{fileA: "one\r\ntwo\n", fileAttributes: "* text eol=crlf\n"},
 			needsAttrSource: true},
-		{name: "text=auto", first: map[string]string{".gitattributes": "* text=auto\n", "a.txt": "one\r\ntwo\n"}},
-		{name: "ident", first: map[string]string{".gitattributes": "*.txt ident\n", "a.txt": "$Id$\nx\n"}},
-		{name: "a filter that is not there", first: map[string]string{".gitattributes": "*.txt filter=lfs\n", "a.txt": "x\n"}},
+		{name: "text=auto", first: map[string]string{fileAttributes: "* text=auto\n", fileA: "one\r\ntwo\n"}},
+		{name: "ident", first: map[string]string{fileAttributes: "*.txt ident\n", fileA: "$Id$\nx\n"}},
+		{name: "a filter that is not there", first: map[string]string{fileAttributes: "*.txt filter=lfs\n", fileA: "x\n"}},
 		{name: "names that Git quotes", first: map[string]string{"dir with space/f g.txt": "x\n", "u/ç.txt": "y\n", "back\\slash.txt": "z\n", "new\nline.txt": "q\n"}},
-		{name: "an executable file", first: map[string]string{"a.txt": "a\n"}, executable: map[string]string{"run.sh": "#!/bin/sh\n"}},
+		{name: "an executable file", first: map[string]string{fileA: "a\n"}, executable: map[string]string{"run.sh": "#!/bin/sh\n"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -129,22 +129,22 @@ func TestFilesThatAPullWritesAreNotChangesOfTheApplicationAndStayNoneWhenTouched
 // apart. Git compares the content, which is why the agent has no guard of its own against its own writes.
 func TestAnApplicationsRewriteRightAfterAPullIsStillAChange(t *testing.T) {
 	f := gittest.New(t)
-	f.Publish(branchMain, map[string]string{"a.txt": "aaaa\n"})
+	f.Publish(branchMain, map[string]string{fileA: "aaaa\n"})
 	n := newNode(t, f, "A", subPath, pull.FollowRemote)
 
 	for i := range 30 {
-		f.Publish(branchMain, map[string]string{"a.txt": fmt.Sprintf("v%03d\n", i)})
+		f.Publish(branchMain, map[string]string{fileA: fmt.Sprintf("v%03d\n", i)})
 		if got := n.pull(); got.Outcome != pull.Advanced {
 			t.Fatalf("pull %d = %+v, want Advanced", i, got)
 		}
-		n.write("a.txt", fmt.Sprintf("w%03d\n", i))
+		n.write(fileA, fmt.Sprintf("w%03d\n", i))
 
 		got := n.changes()
 
-		if len(got) != 1 || got[0].Path != "a.txt" || got[0].Kind != scan.Modified {
+		if len(got) != 1 || got[0].Path != fileA || got[0].Kind != scan.Modified {
 			t.Fatalf("after pull %d the scan lists %v, want a.txt as modified: it was rewritten with the same size, at once", i, got)
 		}
-		n.f.InCheckout(n.l, "checkout", "--", "a.txt")
+		n.f.InCheckout(n.l, "checkout", "--", fileA)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestTheStepsOfTheAgentMakeNoSignalForTheWatcherButTheFilesOfAPull(t *testin
 	for _, sub := range layouts {
 		t.Run("sub path "+sub, func(t *testing.T) {
 			f := gittest.New(t)
-			f.Publish(branchMain, map[string]string{"a.txt": "a\n", "d/b.txt": "b\n"})
+			f.Publish(branchMain, map[string]string{fileA: "a\n", "d/b.txt": "b\n"})
 			n := newNode(t, f, "A", sub, pull.FollowRemote)
 			w, err := watch.New(watch.Options{Root: n.l.WorkTree, Skip: n.filter.SkipsDir})
 			if err != nil {
@@ -184,7 +184,7 @@ func TestTheStepsOfTheAgentMakeNoSignalForTheWatcherButTheFilesOfAPull(t *testin
 			}
 			w.Refresh()
 			n.changes()
-			n.write("a.txt", "a, changed\n")
+			n.write(fileA, "a, changed\n")
 			if got := signals(); got == 0 {
 				t.Error("the application wrote a file and the watcher gave no signal")
 			}
@@ -215,9 +215,9 @@ func TestTheStepsOfTheAgentMakeNoSignalForTheWatcherButTheFilesOfAPull(t *testin
 // nothing to apply and nothing to resolve, and the scan has nothing to commit.
 func TestTheCommitThatWasPushedIsUpToDateAtTheNextPullAndMakesNothingMore(t *testing.T) {
 	f := gittest.New(t)
-	f.Publish(branchMain, map[string]string{"a.txt": "a\n"})
+	f.Publish(branchMain, map[string]string{fileA: "a\n"})
 	n := newNode(t, f, "A", subPath, pull.FollowLocal)
-	n.write("a.txt", "a, changed\n")
+	n.write(fileA, "a, changed\n")
 
 	if !n.commit() || n.push() != "Pushed" {
 		t.Fatal("the commit was not made and pushed")
