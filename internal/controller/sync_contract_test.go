@@ -83,6 +83,52 @@ func TestTheAgentIsToldTheCapOnDeletionsOnlyWhenTheSpecSaysOne(t *testing.T) {
 	}
 }
 
+func TestTheAgentIsToldTheConflictPolicyOnlyWhenItIsFollowLocal(t *testing.T) {
+	// followRemote is the default of the CRD and of the agent, so it is not passed: a pod template that never had the
+	// variable is not changed, and its pod is not replaced (docs/adr/0034).
+	for _, policy := range []treebindv1alpha1.ConflictPolicy{"", treebindv1alpha1.ConflictPolicyFollowRemote} {
+		treebind := newTreebind(testTreebindName)
+		treebind.Spec.Sync.ConflictPolicy = policy
+
+		config, env, err := agentConfigOf(t, treebind)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value, set := env[agentconfig.EnvSyncConflictPolicy]; set || config.ConflictPolicy != agentconfig.ConflictFollowRemote {
+			t.Errorf("for %q the pod has %s = %q and the agent reads %q, want the variable left out and followRemote",
+				policy, agentconfig.EnvSyncConflictPolicy, value, config.ConflictPolicy)
+		}
+	}
+
+	treebind := newTreebind(testTreebindName)
+	treebind.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowLocal
+	config, env, err := agentConfigOf(t, treebind)
+
+	if err != nil {
+		t.Fatalf("the agent refuses the environment of its own pod: %v", err)
+	}
+	// The name is written out, because it is what ADR 0034 tells a person.
+	if env["TREEBIND_SYNC_CONFLICT_POLICY"] != "followLocal" || config.ConflictPolicy != agentconfig.ConflictFollowLocal {
+		t.Errorf("TREEBIND_SYNC_CONFLICT_POLICY = %q and the agent reads %q, want followLocal on both sides",
+			env["TREEBIND_SYNC_CONFLICT_POLICY"], config.ConflictPolicy)
+	}
+}
+
+func TestTheNamesAndTheDefaultOfTheConflictPoliciesAreTheOnesOfTheAPI(t *testing.T) {
+	if string(treebindv1alpha1.ConflictPolicyFollowRemote) != agentconfig.ConflictFollowRemote ||
+		string(treebindv1alpha1.ConflictPolicyFollowLocal) != agentconfig.ConflictFollowLocal {
+		t.Errorf("the API names %q and %q, the agent %q and %q", treebindv1alpha1.ConflictPolicyFollowRemote,
+			treebindv1alpha1.ConflictPolicyFollowLocal, agentconfig.ConflictFollowRemote, agentconfig.ConflictFollowLocal)
+	}
+	// The default of the CRD is followRemote, a marker that a test with a real API server holds (treebind_schema_test.go),
+	// and the agent has no other default.
+	if agentconfig.DefaultConflictPolicy != string(treebindv1alpha1.ConflictPolicyFollowRemote) {
+		t.Errorf("the agent defaults to %q, want %q, the default of the CRD", agentconfig.DefaultConflictPolicy,
+			treebindv1alpha1.ConflictPolicyFollowRemote)
+	}
+}
+
 func TestTheAgentAcceptsEveryCapOnDeletionsTheOperatorCanPutInThePod(t *testing.T) {
 	for _, limit := range []int32{agentconfig.MinMaxDeletions, 2, 100, 101, 1000000, agentconfig.MaxMaxDeletions} {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {

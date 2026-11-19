@@ -293,6 +293,12 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	if limit := treebind.Spec.Sync.MaxDeletions; limit != nil {
 		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSyncMaxDeletions, Value: strconv.FormatInt(int64(*limit), 10)})
 	}
+	// Which side wins when the checkout and the repository each have commits that the other lacks, for followLocal
+	// only (docs/adr/0034). followRemote is the default of the CRD and of the agent, so it is left out, and a pod
+	// template that never had the variable does not change.
+	if treebind.Spec.Sync.ConflictPolicy == treebindv1alpha1.ConflictPolicyFollowLocal {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSyncConflictPolicy, Value: string(treebindv1alpha1.ConflictPolicyFollowLocal)})
+	}
 	env = append(env,
 		corev1.EnvVar{Name: agentconfig.EnvSyncDirection, Value: string(treebind.Spec.Sync.Direction)},
 		corev1.EnvVar{Name: agentconfig.EnvPodName, ValueFrom: &corev1.EnvVarSource{

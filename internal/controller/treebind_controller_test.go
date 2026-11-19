@@ -378,13 +378,21 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(statefulSet.Annotations[templateHashAnnotation]).NotTo(Equal(hash))
 			hash = statefulSet.Annotations[templateHashAnnotation]
 
-			// The pod does not read which side wins a conflict, yet.
+			// The default policy is not passed to the pod, so saying it changes nothing.
+			resource = get()
+			resource.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowRemote
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			reconcileOnce()
+
+			Expect(getStatefulSet().Annotations[templateHashAnnotation]).To(Equal(hash))
+
+			// Which side wins a conflict is read by the agent when it is followLocal.
 			resource = get()
 			resource.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowLocal
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			reconcileOnce()
 
-			Expect(getStatefulSet().Annotations[templateHashAnnotation]).To(Equal(hash))
+			Expect(getStatefulSet().Annotations[templateHashAnnotation]).NotTo(Equal(hash))
 		})
 
 		It("reports Ready only once the StatefulSet has a ready pod for the current template", func() {

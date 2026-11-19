@@ -76,6 +76,7 @@ func TestFromEnvReadsTheSettingsAndFillsTheDefaults(t *testing.T) {
 	want := Config{
 		Namespace: "apps", Name: "dashboards", MountPath: DefaultMountPath, RepoURL: repoURL,
 		SyncInterval: DefaultSyncInterval, SettleTime: DefaultSettleTime, SyncDirection: DirectionBidirectional, PodName: podName,
+		ConflictPolicy: DefaultConflictPolicy,
 		StatusAddr:     DefaultStatusAddr,
 		StatusIssuer:   issuer,
 		StatusAudience: audience,
@@ -705,5 +706,46 @@ func TestCheckMaxDeletions(t *testing.T) {
 func TestTheLeastAndTheMostOfTheCapOnDeletionsAreTheOnesOfTheAPI(t *testing.T) {
 	if MinMaxDeletions != 1 || MaxMaxDeletions != 1<<31-1 {
 		t.Errorf("least = %d, most = %d, want 1 and 2147483647, which the CRD puts on spec.sync.maxDeletions", MinMaxDeletions, MaxMaxDeletions)
+	}
+}
+
+func TestFromEnvReadsTheConflictPolicyAndDefaultsToFollowRemote(t *testing.T) {
+	config, err := fromMap(complete())
+	if err != nil || config.ConflictPolicy != ConflictFollowRemote || DefaultConflictPolicy != ConflictFollowRemote {
+		t.Fatalf("ConflictPolicy = %q, %v, want followRemote, the default of the CRD, when the operator does not set it", config.ConflictPolicy, err)
+	}
+
+	env := complete()
+	env[EnvSyncConflictPolicy] = " followLocal\n"
+	config, err = fromMap(env)
+
+	if err != nil || config.ConflictPolicy != ConflictFollowLocal {
+		t.Errorf("ConflictPolicy = %q, %v, want followLocal", config.ConflictPolicy, err)
+	}
+}
+
+func TestFromEnvSaysABadConflictPolicyWithTheOtherProblems(t *testing.T) {
+	env := complete()
+	env[EnvSyncConflictPolicy] = "merge"
+	env[EnvNamespace] = ""
+
+	_, err := fromMap(env)
+
+	if err == nil || !strings.Contains(err.Error(), EnvSyncConflictPolicy+" must be followRemote or followLocal") ||
+		!strings.Contains(err.Error(), EnvNamespace+" is not set") {
+		t.Errorf("error = %v, want both problems at once", err)
+	}
+}
+
+func TestCheckConflictPolicy(t *testing.T) {
+	for _, accepted := range []string{ConflictFollowRemote, ConflictFollowLocal, "followRemote", "followLocal"} {
+		if err := CheckConflictPolicy(accepted); err != nil {
+			t.Errorf("CheckConflictPolicy(%q) = %v, want it accepted", accepted, err)
+		}
+	}
+	for _, refused := range []string{"", "followremote", "FollowLocal", " followLocal", "followLocal ", "merge", "local"} {
+		if err := CheckConflictPolicy(refused); err == nil {
+			t.Errorf("CheckConflictPolicy(%q) was accepted", refused)
+		}
 	}
 }

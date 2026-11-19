@@ -64,6 +64,10 @@ const (
 	// number. It is not set when the Treebind does not say, and the pull has a cap of its own then
 	// (docs/adr/0027).
 	EnvSyncMaxDeletions = "TREEBIND_SYNC_MAX_DELETIONS"
+	// EnvSyncConflictPolicy is which side wins when the checkout and the repository each have commits that the other
+	// lacks: followRemote or followLocal (docs/adr/0034). It is not set for followRemote, the default of the CRD, so that
+	// a pod template that never had it does not change, and the agent has the default of the CRD for it.
+	EnvSyncConflictPolicy = "TREEBIND_SYNC_CONFLICT_POLICY"
 	// EnvPodName is the name of the sync pod. The writer lock names its holder with it.
 	EnvPodName = "TREEBIND_POD_NAME"
 	// EnvPathsInclude and EnvPathsExclude are the patterns of spec.paths, each list as a JSON
@@ -115,6 +119,8 @@ const (
 const (
 	ConflictFollowRemote = "followRemote"
 	ConflictFollowLocal  = "followLocal"
+	// DefaultConflictPolicy is the policy of a Treebind that does not say, which a test holds to the default of the CRD.
+	DefaultConflictPolicy = ConflictFollowRemote
 )
 
 // Config is what the agent runs with.
@@ -138,6 +144,9 @@ type Config struct {
 	// and pushes the application's edits: pull, or bidirectional.
 	SyncInterval  time.Duration
 	SyncDirection string
+	// ConflictPolicy says which side wins when the checkout and the repository each gained commits: followRemote, which
+	// is the default, or followLocal. Only a bidirectional sync has commits of its own to resolve.
+	ConflictPolicy string
 	// SettleTime is how long a file has to be quiet before the agent commits it.
 	SettleTime time.Duration
 	// MaxDeletions is the most files that one update may remove from the directory, or zero when the
@@ -188,6 +197,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		SyncInterval:   interval,
 		SettleTime:     settleTime,
 		SyncDirection:  get(EnvSyncDirection),
+		ConflictPolicy: orDefault(get(EnvSyncConflictPolicy), DefaultConflictPolicy),
 		MaxDeletions:   maxDeletions,
 		PodName:        get(EnvPodName),
 		PathsInclude:   include,
@@ -243,6 +253,9 @@ func (c Config) validate() error {
 		if err := CheckSyncDirection(c.SyncDirection); err != nil {
 			problems = append(problems, fmt.Errorf("%s %w", EnvSyncDirection, err))
 		}
+	}
+	if err := CheckConflictPolicy(c.ConflictPolicy); err != nil {
+		problems = append(problems, fmt.Errorf("%s %w", EnvSyncConflictPolicy, err))
 	}
 
 	if !cleanAbsolute(c.MountPath) {
