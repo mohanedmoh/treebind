@@ -219,3 +219,21 @@ func TestABreakerThatCannotCountIsAFailedCommitAndNotAHold(t *testing.T) {
 		t.Error("something was written although the commits could not be counted")
 	}
 }
+
+// The marker that a CI reads to leave a commit alone is a part of the template, as it is for a person (docs/echo-loops.md):
+// there is no field for it, and the commit has it as it is written.
+func TestATemplateMayCarryTheMarkerOfACIThatSkipsTheCommit(t *testing.T) {
+	for _, marker := range []string{"[skip ci]", "[ci skip]", "[skip actions]"} {
+		t.Run(marker, func(t *testing.T) {
+			template := "treebind: sync {{.Count}} file(s) " + marker
+			w := newWorld(t, "", base, func(o *Options) { o.MessageTemplate = template })
+			w.write(fileNew, "new\n")
+
+			w.commit()
+
+			if got, want := w.git("log", "-1", "--format=%B"), "treebind: sync 1 file(s) "+marker; got != want {
+				t.Errorf("the message is %q, want %q", got, want)
+			}
+		})
+	}
+}

@@ -18,6 +18,8 @@ package loops
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -161,4 +163,41 @@ func TestAHostThatGivesBackEachCommitWithAnotherFileIsHeldToTheLimitOfTheHourInT
 			t.Error("no resolution was made an hour later: what was held is not resolved when the hour allows it")
 		}
 	})
+}
+
+// The file of the breaker is in the state directory, which is in the synced directory when the whole claim is synced, and is no
+// change of the application there: the scan leaves the state directory out, and the file that is written aside is as well.
+func TestTheFilesOfTheBreakerAreNoChangeOfTheApplicationInTheSyncedDirectory(t *testing.T) {
+	for _, sub := range layouts {
+		t.Run("sub path "+sub, func(t *testing.T) {
+			f := gittest.New(t)
+			f.Publish(branchMain, map[string]string{"a.txt": "a\n"})
+			n := newNode(t, f, "A", sub, pull.FollowRemote)
+			clock := &hours{now: time.Unix(1_800_000_000, 0)}
+			n.bounded(3, clock.Now)
+			n.write("a.txt", "a, changed\n")
+
+			if !n.commit() {
+				t.Fatal("the commit was not made")
+			}
+			if _, err := os.Stat(filepath.Join(n.l.StateDir, "commit-times")); err != nil {
+				t.Fatalf("the breaker has written no file in the state directory: %v", err)
+			}
+			if got := n.changes(); len(got) != 0 {
+				t.Errorf("the scan lists %v after the commit, want nothing: the file of the breaker is not the application's", got)
+			}
+			// A kill between the file written aside and its rename leaves this.
+			if err := os.WriteFile(filepath.Join(n.l.StateDir, "commit-times.tmp"), []byte("1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := n.changes(); len(got) != 0 {
+				t.Errorf("the scan lists %v with a file left aside by a killed agent, want nothing", got)
+			}
+			// The commit was not pushed, so the checkout is ahead; the pull passes, which it would not if the file made the Git directory
+			// unsafe or the state directory hold more than the agent put there.
+			if got := n.pull(); got.Outcome != pull.Ahead {
+				t.Errorf("the pull = %+v, want Ahead: the commit is not pushed, and the file of the breaker is no reason for a pull to fail", got)
+			}
+		})
+	}
 }
