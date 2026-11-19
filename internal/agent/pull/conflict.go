@@ -122,10 +122,12 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 	}
 	res := Resolution{Policy: p.o.Policy, LocalCommits: ours, RemoteCommits: theirs, Overridden: found.overridden}
 
-	// A resolution that makes a commit is bounded, and one that does not is not: the checkout moves to the tip and nothing is
-	// made that the repository would have to take. It is asked before anything is written, a ref for the commits of the checkout
+	// A resolution makes a commit when the volume wins and the trees differ, and when the repository wins and the volume has files
+	// to put on its tip. It is bounded when it does, and not when it does not: the checkout moves to the tip and nothing is made
+	// that the repository would have to take. It is asked before anything is written, a ref for the commits of the checkout
 	// included, because one that is held at every interval would make a ref at each.
-	if (p.o.Policy == FollowLocal && !found.sameTree) || len(found.carry) > 0 {
+	makesCommit := (p.o.Policy == FollowLocal && !found.sameTree) || len(found.carry) > 0
+	if makesCommit {
 		if err := p.allowCommit(ctx); err != nil {
 			return Result{}, err
 		}
@@ -149,7 +151,7 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 	}
 
 	target := tip
-	if (p.o.Policy == FollowLocal && !found.sameTree) || len(found.carry) > 0 {
+	if makesCommit {
 		commit, dropped, err := p.commitOf(ctx, head, tip, winner, found.carry, res)
 		if err != nil {
 			return Result{}, err
