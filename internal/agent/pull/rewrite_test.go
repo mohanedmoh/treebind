@@ -18,28 +18,11 @@ package pull
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/mohanedmoh/treebind/internal/agent/push"
 )
-
-// rewritingHook is a hook of the repository that replaces each commit that is pushed to the branch with another that has
-// the same tree and is made by someone else, on top of the tip that the branch had, as a host does that squashes or
-// rebases what it is sent. It uses what a shell has built in and Git, which the tests run in the image of the agent too.
-const rewritingHook = `#!/bin/sh
-while read old new ref; do
-  [ "$ref" = refs/heads/main ] || continue
-  [ "$(git log -1 --format=%an "$new")" = rewriter ] && continue
-  tree=$(git rev-parse "$new^{tree}")
-  case "$old" in 0*) parent="" ;; *) parent="-p $old" ;; esac
-  twin=$(GIT_AUTHOR_NAME=rewriter GIT_AUTHOR_EMAIL=r@example.com GIT_COMMITTER_NAME=rewriter GIT_COMMITTER_EMAIL=r@example.com \
-    git commit-tree "$tree" $parent -m "rewritten $new")
-  git update-ref refs/heads/main "$twin"
-done
-`
 
 // A host that gives back what it was sent as another commit with the same files made a loop of the agent with followLocal:
 // the checkout and the repository each had a commit that the other lacked, the merge that the policy made was pushed, the
@@ -48,9 +31,7 @@ func TestAHostThatRewritesWhatItIsSentDoesNotMakeAResolutionAtEveryPull(t *testi
 	for _, policy := range []Policy{FollowRemote, FollowLocal} {
 		t.Run(string(policy), func(t *testing.T) {
 			w := newWorld(t, subPath, resolving(policy))
-			if err := os.WriteFile(filepath.Join(w.f.Bare, "hooks", "post-receive"), []byte(rewritingHook), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			w.f.RewriteWhatIsPushed(false)
 			pusher, err := push.New(push.Options{Layout: w.l, URL: w.f.URL, Branch: branchMain, Git: w.f.GitOptions(), Timeout: time.Minute})
 			if err != nil {
 				t.Fatal(err)

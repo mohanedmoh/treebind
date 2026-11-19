@@ -18,6 +18,7 @@ package loops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/gittest"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
@@ -304,6 +306,9 @@ func TestTwoTreebindsThatEditAtRandomEndAtOneTreeAndThenDoNothing(t *testing.T) 
 func (n *node) pullOutcome() string {
 	n.t.Helper()
 	got, err := n.puller.Pull(context.Background())
+	if failure, ok := errors.AsType[*pull.Error](err); ok && failure.Reason == breaker.ReasonTooManyCommits {
+		n.held++
+	}
 	if err != nil {
 		return "failed: " + err.Error()
 	}

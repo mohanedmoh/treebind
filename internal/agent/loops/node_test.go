@@ -18,9 +18,11 @@ package loops
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
@@ -53,9 +55,11 @@ type node struct {
 	committer *commit.Committer
 	pusher    *push.Pusher
 	filter    *paths.Filter
+	policy    pull.Policy
 
-	// What the node has done, for the tests that ask whether it has stopped.
-	commits, pushes, resolved, advanced int
+	// What the node has done, for the tests that ask whether it has stopped, and how many times the breaker held a commit or a
+	// resolution.
+	commits, pushes, resolved, advanced, held int
 }
 
 // newNode makes the checkout of the branch of the repository of f on a new claim, with the policy for conflicts.
@@ -71,25 +75,42 @@ func newNode(t *testing.T, f *gittest.Fixture, name string, sub string, policy p
 	if _, err := checkout.Open(context.Background(), f.CheckoutOptions(l, branchMain)); err != nil {
 		t.Fatalf("the checkout of %s was not made: %v", name, err)
 	}
-	n := &node{t: t, f: f, name: name, l: l}
-	signed := f.GitOptions()
-	signed.Identity = git.Identity{Name: botName, Email: botEmail}
-	if n.puller, err = pull.New(pull.Options{Layout: l, URL: f.URL, Branch: branchMain, Git: signed, Policy: policy}); err != nil {
-		t.Fatal(err)
-	}
+	n := &node{t: t, f: f, name: name, l: l, policy: policy}
 	if n.filter, err = paths.NewFilter(nil, nil, l.NeverSynced(), paths.Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if n.scanner, err = scan.New(scan.Options{Layout: l, Git: f.GitOptions(), Filter: n.filter}); err != nil {
 		t.Fatal(err)
 	}
-	if n.committer, err = commit.New(commit.Options{Layout: l, Git: f.GitOptions()}); err != nil {
-		t.Fatal(err)
-	}
 	if n.pusher, err = push.New(push.Options{Layout: l, URL: f.URL, Branch: branchMain, Git: f.GitOptions(), Timeout: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
+	n.gate(nil)
 	return n
+}
+
+// gate makes the puller and the committer of the node with a breaker, or with none when it is nil.
+func (n *node) gate(gate breaker.Gate) {
+	n.t.Helper()
+	signed := n.f.GitOptions()
+	signed.Identity = git.Identity{Name: botName, Email: botEmail}
+	var err error
+	if n.puller, err = pull.New(pull.Options{Layout: n.l, URL: n.f.URL, Branch: branchMain, Git: signed, Policy: n.policy, Gate: gate}); err != nil {
+		n.t.Fatal(err)
+	}
+	if n.committer, err = commit.New(commit.Options{Layout: n.l, Git: n.f.GitOptions(), Gate: gate}); err != nil {
+		n.t.Fatal(err)
+	}
+}
+
+// bounded gives the node a breaker with the limit, in the state directory of its claim, that tells the time by now.
+func (n *node) bounded(limit int, now func() time.Time) {
+	n.t.Helper()
+	gate, err := breaker.New(breaker.Options{Dir: n.l.StateDir, Limit: limit, Now: now})
+	if err != nil {
+		n.t.Fatal(err)
+	}
+	n.gate(gate)
 }
 
 // write is what the application does: it puts a file in the synced directory.
@@ -132,6 +153,10 @@ func (n *node) commit() bool {
 		return false
 	}
 	got, err := n.committer.Commit(context.Background(), changes)
+	if failure, ok := errors.AsType[*commit.Error](err); ok && failure.Reason == breaker.ReasonTooManyCommits {
+		n.held++
+		return false
+	}
 	if err != nil {
 		n.t.Fatalf("%s: the commit failed: %v", n.name, err)
 	}
