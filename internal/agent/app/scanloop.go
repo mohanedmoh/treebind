@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
@@ -133,7 +134,7 @@ type scans struct {
 
 // startScans makes what scans, and puts the first state of the Changes check in the report. It returns nil,
 // after saying so in the check, when the scanner cannot be made: the pulls go on without it.
-func (a *agent) startScans(p *progress, done checkedOut) *scans {
+func (a *agent) startScans(p *progress, done checkedOut, gate breaker.Gate) *scans {
 	p.changes = notTried(CheckChanges, "running: the result of the first scan is here when it ends")
 	s := &scans{a: a, p: p, tracker: settle.New(a.Config.SettleTime), interval: a.ScanInterval}
 	if s.interval <= 0 {
@@ -163,7 +164,7 @@ func (a *agent) startScans(p *progress, done checkedOut) *scans {
 		committer, err := a.NewCommitter(commit.Options{
 			Layout: l, Git: done.options.Git, Fence: a.fence,
 			AuthorName: a.Config.CommitAuthorName, AuthorEmail: a.Config.CommitAuthorEmail,
-			MessageTemplate: a.Config.CommitMessageTemplate,
+			MessageTemplate: a.Config.CommitMessageTemplate, Gate: gate,
 		})
 		if err != nil {
 			// A wrong author or template is a failed check, and the scans and the pulls go on: the files wait for a
@@ -407,6 +408,9 @@ func commitResult(result commit.Result, err error, cleared []string) preflight.R
 			checked.Message = fmt.Sprintf("committed %s as %s", plural(result.Files, "file", "files"), shortOf(result.Commit))
 		default:
 			checked.Message = "the files that had settled came to nothing to commit: they were changed back, or are gone"
+		}
+		if result.Warning != "" {
+			checked.Message += "; " + result.Warning
 		}
 		if result.Gone > 0 {
 			if result.Gone == 1 {

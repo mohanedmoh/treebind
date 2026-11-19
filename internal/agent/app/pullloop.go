@@ -23,9 +23,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/commitmsg"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
+	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/syncloop"
@@ -53,6 +55,7 @@ type Puller interface {
 func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 	interval := a.Config.SyncInterval
 	phase := syncloop.Phase(a.Config.Namespace, a.Config.Name, interval)
+	var gate breaker.Gate
 	options := pull.Options{
 		Layout: done.options.Layout, URL: done.options.URL, Branch: done.made.Branch, Git: done.options.Git,
 		// The lock is checked immediately before an update is written. The cap on deletions is the
@@ -69,6 +72,12 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 			options.Policy = pull.Policy(config.DefaultConflictPolicy)
 		}
 		options.Git.Identity = a.commitIdentity()
+		// The commits of the resolutions and the commits of the commit step are counted against one limit, in one file
+		// (docs/adr/0035).
+		gate = a.newBreaker(done.options.Layout)
+		if gate != nil {
+			options.Gate = gate
+		}
 	}
 	l := &pulls{a: a, p: p, options: options}
 	if a.Config.SyncDirection == config.DirectionBidirectional {
@@ -80,7 +89,7 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 	loop := syncloop.Options{Interval: interval, Phase: phase, Clock: a.SyncClock, Random: a.SyncRandom, Pull: l.once, Beat: a.beat}
 	if a.scansFollow() {
 		// The scans are turns of the same loop, and never run beside a pull (docs/adr/0029).
-		if s := a.startScans(p, done); s != nil {
+		if s := a.startScans(p, done, gate); s != nil {
 			defer s.close()
 			loop.Scan, loop.ScanInterval, loop.ScanGap, loop.Wake = s.once, a.ScanInterval, a.ScanGap, s.wake()
 			// What a resolution made is pushed at the next scan, and not after the interval of a push that was refused.
@@ -267,6 +276,23 @@ func conflictResult(result pull.Result) preflight.Result {
 			len(res.Dropped), lostIn, pull.NameSome(res.Dropped))
 	}
 	return preflight.Result{Check: CheckConflict, Outcome: preflight.Passed, Reason: pull.ReasonConflictResolved, Message: shortened(b.String())}
+}
+
+// newBreaker makes the breaker that bounds the commits of the agent in an hour, which counts in the state directory of the
+// layout with the limit of the settings, behind the writer-lock fence, and by the clock of the loop when it says what time it
+// is, which is the system's in the agent. It is nil when it cannot be made, and then nothing is bounded: the settings that the
+// agent starts with are judged before, and what is left is a directory that is not there.
+func (a *agent) newBreaker(l layout.Layout) breaker.Gate {
+	now := time.Now
+	if wall, ok := a.SyncClock.(syncloop.WallClock); ok {
+		now = wall.Now
+	}
+	made, err := breaker.New(breaker.Options{Dir: l.StateDir, Limit: a.Config.CommitMaxPerHour, Now: now, Fence: a.fence})
+	if err != nil {
+		a.Logger.Error("the commits of the agent are not bounded, because the breaker cannot be made", "error", err)
+		return nil
+	}
+	return made
 }
 
 // commitIdentity is the author of the commits that the agent makes: the one of spec.commit, or the default when there
