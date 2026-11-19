@@ -176,8 +176,8 @@ func TestPushesAfterTheCommitInTheSameScanAndSaysSoInTheReport(t *testing.T) {
 	if want := "pushed 1 commit to the branch " + testBranch + ": " + shortOf(tipBefore) + ".." + shortOf(tipAfter); got.Message != want {
 		t.Errorf("message = %q, want %q", got.Message, want)
 	}
-	if names := checkNames(t, r); !strings.HasSuffix(names, ",Changes,Commit,Push") {
-		t.Errorf("checks = %s, want the push after the commit", names)
+	if names := checkNames(t, r); !strings.HasSuffix(names, ",Changes,Commit,Push,Conflict") {
+		t.Errorf("checks = %s, want the push after the commit, and the conflict after the push", names)
 	}
 }
 

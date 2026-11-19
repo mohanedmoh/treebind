@@ -272,8 +272,8 @@ func TestScansABidirectionalTreebindAfterTheCheckoutAndSaysInTheReportWhatItFoun
 	if strings.Contains(got.Message, "does not commit") {
 		t.Errorf("message = %q, want it not to say that the agent does not commit: it does", got.Message)
 	}
-	if names := checkNames(t, r); names != "Mount,Writable,Checkout,Pull,Changes,Commit" {
-		t.Errorf("checks = %s, want the changes after the pull, and the commit after the changes", names)
+	if names := checkNames(t, r); names != "Mount,Writable,Checkout,Pull,Changes,Commit,Conflict" {
+		t.Errorf("checks = %s, want the changes after the pull, the commit after the changes, and the conflict after the commit", names)
 	}
 }
 

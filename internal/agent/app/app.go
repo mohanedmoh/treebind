@@ -320,6 +320,8 @@ type progress struct {
 	// changes is the scan for local changes, which only a Treebind that syncs in both directions has, commit is
 	// what came of the last commit of the files that the scans found settled, and push of the last push.
 	changes, commit, push *preflight.Result
+	// conflict is what the last resolution of a conflict did, which only a Treebind that syncs in both directions has.
+	conflict *preflight.Result
 }
 
 // prepare checks the volume, and once it is in order takes the writer lock, which is held
@@ -341,6 +343,9 @@ func (a *agent) prepare(ctx context.Context) {
 	}
 	if a.pushesFollow() {
 		p.push = notTried(CheckPush, "not tried, because the checkout is not made yet")
+	}
+	if a.pullsFollow() && a.Config.SyncDirection == config.DirectionBidirectional {
+		p.conflict = notTried(CheckConflict, "not tried, because the checkout is not made yet")
 	}
 	if a.AcquireLock != nil {
 		if !a.takeLock(ctx, p) {
@@ -435,6 +440,12 @@ func (a *agent) waitingForTheVolume(volume []preflight.Result, failed bool) *pro
 			p.push = notTried(CheckPush, later)
 		}
 	}
+	if a.pullsFollow() && a.Config.SyncDirection == config.DirectionBidirectional {
+		p.conflict = notTried(CheckConflict, "not tried, because the checkout is not made yet")
+		if failed {
+			p.conflict = notTried(CheckConflict, later)
+		}
+	}
 	return p
 }
 
@@ -451,7 +462,7 @@ func notTried(check, message string) *preflight.Result {
 // the steps that there are.
 func (a *agent) publish(p *progress) {
 	results := append([]preflight.Result(nil), p.volume...)
-	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling, p.changes, p.commit, p.push} {
+	for _, step := range []*preflight.Result{p.lock, p.checkout, p.pulling, p.changes, p.commit, p.push, p.conflict} {
 		if step != nil {
 			results = append(results, *step)
 		}

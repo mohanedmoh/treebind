@@ -93,8 +93,8 @@ func TestCommitsTheFilesThatHaveSettledAndSaysSoInTheReport(t *testing.T) {
 	if want := "committed 1 file as " + shortOf(testCommit); got.Message != want {
 		t.Errorf("message = %q, want %q", got.Message, want)
 	}
-	if names := checkNames(t, r); !strings.HasSuffix(names, ",Changes,Commit") {
-		t.Errorf("checks = %s, want the commit after the changes", names)
+	if names := checkNames(t, r); !strings.HasSuffix(names, ",Changes,Commit,Conflict") {
+		t.Errorf("checks = %s, want the commit after the changes, and the conflict after the commit", names)
 	}
 }
 

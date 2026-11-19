@@ -259,6 +259,16 @@ func (s *scans) once(ctx context.Context, now time.Time) time.Duration {
 	return seen.Next
 }
 
+// pushSoon says that a resolution made a commit that waits for a push, and that the wait of a push that was refused is
+// over: the refusal was for a repository that had moved, which is what the resolution put right. It is called in the
+// turn of the pull, and the push is of the next scan, which is never beside the pull.
+func (s *scans) pushSoon() {
+	if s.pusher == nil {
+		return
+	}
+	s.pushPending, s.pushAfter, s.pushFailures = true, time.Time{}, 0
+}
+
 // pushStep pushes the commits of the checkout when some may wait and the wait after a failed try is over, and puts
 // what came of it in the Push check. It reports nothing of a push that was cut short by a stop. A try that failed
 // is tried again after the wait of a failed pull when the repository did not answer, and after the interval

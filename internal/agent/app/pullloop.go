@@ -20,8 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/commitmsg"
+	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/syncloop"
@@ -30,6 +34,12 @@ import (
 // CheckPull is the name of the check that says how the last pull went. It is in the report after the
 // checkout.
 const CheckPull = "Pull"
+
+// CheckConflict is the name of the check that says what the last resolution of a conflict between the checkout and the
+// repository did (docs/adr/0034). It is in the report after the push, for a Treebind that syncs in both directions, and
+// is skipped until a conflict is found. It never changes what the agent says about being ready, and the Conflict
+// condition of the Treebind is written from it by the issue that owns the condition (#74).
+const CheckConflict = "Conflict"
 
 // Puller pulls into the checkout once. The Puller of package pull is one.
 type Puller interface {
@@ -50,7 +60,20 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 		// own (docs/adr/0026, docs/adr/0027).
 		Fence: a.fence, MaxDeletions: a.Config.MaxDeletions,
 	}
+	if a.Config.SyncDirection == config.DirectionBidirectional {
+		// A Treebind that commits has commits of its own to resolve a conflict with, and one that only pulls has none and
+		// keeps saying Diverged (docs/adr/0034). The commit of a resolution has the author of the agent's other commits.
+		options.Policy = pull.Policy(a.Config.ConflictPolicy)
+		if options.Policy == "" {
+			// Settings that were not read from the environment, which has the default of the CRD in it.
+			options.Policy = pull.Policy(config.DefaultConflictPolicy)
+		}
+		options.Git.Identity = a.commitIdentity()
+	}
 	l := &pulls{a: a, p: p, options: options}
+	if a.Config.SyncDirection == config.DirectionBidirectional {
+		p.conflict = notTried(CheckConflict, "no conflict has been resolved since the agent started")
+	}
 
 	p.pulling = notTried(CheckPull, fmt.Sprintf("waiting: the first pull is due in %s", phase.Round(time.Second)))
 	a.publish(p)
@@ -60,6 +83,8 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 		if s := a.startScans(p, done); s != nil {
 			defer s.close()
 			loop.Scan, loop.ScanInterval, loop.ScanGap, loop.Wake = s.once, a.ScanInterval, a.ScanGap, s.wake()
+			// What a resolution made is pushed at the next scan, and not after the interval of a push that was refused.
+			l.resolved = s.pushSoon
 		}
 	}
 	err := syncloop.Run(ctx, loop)
@@ -80,8 +105,11 @@ type pulls struct {
 	p       *progress
 	options pull.Options
 	// puller is made at the first pull, and again at the next when it could not be made.
-	puller Puller
-	logged []string
+	puller                 Puller
+	logged, loggedConflict []string
+	// resolved is called when a pull resolved a conflict by making a commit, and is nil when there are no scans, so that
+	// nothing is pushed.
+	resolved func()
 }
 
 // once runs one pull and puts what came of it in the report. It says whether the pull failed in the
@@ -123,8 +151,20 @@ func (l *pulls) report(ctx context.Context, result pull.Result, err error, clear
 		checked.Message += "; " + note
 	}
 	l.p.pulling = &checked
+	if err == nil && result.Outcome == pull.Resolved && result.Resolution != nil {
+		conflict := conflictResult(result)
+		l.p.conflict = &conflict
+		// A commit waits for a push, and a resolution that made none leaves the wait of a push that failed as it was: asking
+		// the Git host again at once for nothing new is what the wait is there against (R-19).
+		if l.resolved != nil && result.Resolution.Commit != "" {
+			l.resolved()
+		}
+	}
 	l.a.publish(l.p)
 	l.logged = l.a.logChanges("pull", []preflight.Result{checked}, l.logged)
+	if l.p.conflict != nil && l.p.conflict.Reason == pull.ReasonConflictResolved {
+		l.loggedConflict = l.a.logChanges("conflict", []preflight.Result{*l.p.conflict}, l.loggedConflict)
+	}
 	// The report says that the pull passed before the probe says that the agent is ready.
 	if checked.Outcome == preflight.Passed {
 		l.a.becomeReady("the first pull passed, and the agent reports itself ready")
@@ -157,6 +197,12 @@ func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 		if result.Warning != "" {
 			message += "; " + result.Warning
 		}
+	case pull.Resolved:
+		message = fmt.Sprintf("resolved a conflict on the branch %s by %s: the checkout moved from %s to %s; the Conflict check says how",
+			result.Branch, policyOf(result), shortOf(result.From), shortOf(result.To))
+		if result.Warning != "" {
+			message += "; " + result.Warning
+		}
 	case pull.Ahead:
 		message = fmt.Sprintf("the checkout is ahead of the branch %s (%s): it has commits that the repository does not have yet, "+
 			"and there is nothing to pull", result.Branch, shortOf(result.To))
@@ -182,4 +228,57 @@ func backsOff(reason string) bool {
 		return true
 	}
 	return false
+}
+
+// policyOf is the policy that a resolution applied.
+func policyOf(result pull.Result) pull.Policy {
+	if result.Resolution == nil {
+		return ""
+	}
+	return result.Resolution.Policy
+}
+
+// conflictResult is the result of the Conflict check for a pull that resolved a conflict: which policy, how many commits
+// each side had, how many files had the winner's version and how many were kept from the other side, the commit that
+// was made, and where the commits of the checkout are kept.
+func conflictResult(result pull.Result) preflight.Result {
+	res := result.Resolution
+	// The side that lost is the application with followRemote and the repository with followLocal, and the files that could
+	// not be put on the winner's tree are in its commits.
+	winner, loser, kept, lostIn := "repository's", "application", "the commit", "the checkout"
+	if res.Policy == pull.FollowLocal {
+		winner, loser, kept, lostIn = "volume's", "repository", "the merge commit", "the repository"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "resolved a conflict by %s: the checkout had %s and the branch %s of the repository had %s that the checkout did not; ",
+		res.Policy, plural(res.LocalCommits, "commit", "commits"), result.Branch, plural(res.RemoteCommits, "commit", "commits"))
+	fmt.Fprintf(&b, "for %d file(s) that both changed the %s version was taken, and %d file(s) that only the %s changed were kept",
+		res.Overridden, winner, res.Carried, loser)
+	if res.Commit != "" {
+		fmt.Fprintf(&b, " in %s %s", kept, shortOf(res.Commit))
+	} else {
+		b.WriteString(", and the checkout was moved to the tip of the branch, so no commit was made")
+	}
+	if res.Local != "" {
+		fmt.Fprintf(&b, "; the commits of the checkout are kept as %s", res.Local)
+	}
+	if len(res.Dropped) > 0 {
+		fmt.Fprintf(&b, "; %d file(s) could not be put on the winner's version and are only in the commits of %s: %s",
+			len(res.Dropped), lostIn, pull.NameSome(res.Dropped))
+	}
+	return preflight.Result{Check: CheckConflict, Outcome: preflight.Passed, Reason: pull.ReasonConflictResolved, Message: shortened(b.String())}
+}
+
+// commitIdentity is the author of the commits that the agent makes: the one of spec.commit, or the default when there
+// is none. It is the zero identity when what is set is not one that Git keeps as it is written, which the Commit check
+// says, and a resolution is refused for it.
+func (a *agent) commitIdentity() git.Identity {
+	name, email := a.Config.CommitAuthorName, a.Config.CommitAuthorEmail
+	if name == "" && email == "" {
+		name, email = commitmsg.DefaultAuthorName, commitmsg.DefaultAuthorEmail
+	}
+	if name == "" || email == "" || commitmsg.ValidateAuthor(name, email) != nil {
+		return git.Identity{}
+	}
+	return git.Identity{Name: name, Email: email}
 }

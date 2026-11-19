@@ -72,7 +72,7 @@ fails three times in a row counts as failed. Neither needs a token and neither s
 | Liveness | `/healthz` | The loop of the agent has been heard from within what it promised | It has not |
 
 **Ready means the agent has synced.** The first pull that ends `Passed` makes it ready: the checkout was at the tip of the
-branch (`UpToDate`), was brought to it (`Advanced`), or has commits that the repository does not have yet (`Ahead`). For a
+branch (`UpToDate`), was brought to it (`Advanced`), has commits that the repository does not have yet (`Ahead`), or had a conflict with it that the policy resolved (`Resolved`). For a
 Treebind that syncs in both directions the first push that works makes it ready as well, whichever of the two comes first,
 so a Treebind on an empty repository is ready as soon as its first commit is pushed, and does not wait for a second pull. A
 push that is rejected, that fails or that finds nothing to push does not make it ready. The `Pull` and `Push` checks in the
@@ -142,6 +142,7 @@ The report lists the agent's checks, in the order the agent runs them, each with
 | `Changes` | The last scan of your directory for what the application changed: how many files, how many have settled, what is left out, and what the events of the file system cannot do. Only for a Treebind that syncs in both directions. It is skipped until the first scan | [Local changes](local-changes.md) |
 | `Commit` | The last commit of the files that the scans found settled: how many and the short id, that there was nothing to commit, or why it failed (`CommitFailed`). Only for a Treebind that syncs in both directions. It is skipped until a file settles | [Local changes](local-changes.md) |
 | `Push` | The last push of the commits of the checkout: how many and the two ids, that there is nothing to push, or why it failed (`NonFastForward`, `PushRejected` with the words of the host, `PushFailed`). Only for a Treebind that syncs in both directions. It is skipped until the first scan | [Local changes](local-changes.md) |
+| `Conflict` | What the last resolution of a conflict between your directory and the repository did: the policy, how many commits each side had, how many files had the winner's version, how many were kept from the other side, the commit that was made and, for `followRemote`, the ref that keeps the commits of the directory. It is `Passed` with the reason `ConflictResolved`, and stays so until the next resolution. Only for a Treebind that syncs in both directions. It is skipped, saying that no conflict has been resolved since the agent started, until a conflict has been resolved; a resolution that could not be made is a failed `Pull`, whose message says that the conflict was not resolved. It does not change `Ready` | [Conflicts](conflicts.md) |
 
 A check that cannot be tried because one before it failed, or that waits, is `Skipped`, with the reason
 `NotChecked` and the check that failed in the message. The operator does not show the checks as
