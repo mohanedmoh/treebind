@@ -246,6 +246,18 @@ type CommitSpec struct {
 	// +kubebuilder:validation:MaxLength=4096
 	// +kubebuilder:validation:XValidation:rule="!self.matches(r'\\x00')",message="messageTemplate must not contain a NUL"
 	MessageTemplate string `json:"messageTemplate,omitempty"`
+
+	// maxPerHour is the most commits that the agent makes in an hour, the commits of the files that the application
+	// changed and the commits that resolving a conflict makes, counted together. At the limit the agent makes no
+	// more commits until one of the commits of the hour is an hour old: the changes stay on the volume, and the
+	// Commit check says TooManyCommits. It is what stops a loop that the agent cannot tell from the application's own
+	// work, such as an application that answers what a pull brings, from making commits for ever. Raise it when the
+	// application really writes that often.
+	// +optional
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
+	MaxPerHour *int32 `json:"maxPerHour,omitempty"`
 }
 
 // PathsSpec limits which files of the synced directory the agent commits. The files of the

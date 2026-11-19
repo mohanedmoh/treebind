@@ -267,6 +267,19 @@ spec:
                     - message: 'authorName must not start or end with a space or one
                         of . , : ; " '' \, which Git drops'
                       rule: '!self.matches(r''^[\x00-\x20.,:;\x22\x27\x5c]|[\x00-\x20.,:;\x22\x27\x5c]$'')'
+                  maxPerHour:
+                    default: 60
+                    description: |-
+                      maxPerHour is the most commits that the agent makes in an hour, the commits of the files that the application
+                      changed and the commits that resolving a conflict makes, counted together. At the limit the agent makes no
+                      more commits until one of the commits of the hour is an hour old: the changes stay on the volume, and the
+                      Commit check says TooManyCommits. It is what stops a loop that the agent cannot tell from the application's own
+                      work, such as an application that answers what a pull brings, from making commits for ever. Raise it when the
+                      application really writes that often.
+                    format: int32
+                    maximum: 10000
+                    minimum: 1
+                    type: integer
                   messageTemplate:
                     description: |-
                       messageTemplate is the commit message, as a Go text/template, with {{.Count}} for the number of files in
