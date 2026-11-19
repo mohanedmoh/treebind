@@ -19,9 +19,10 @@ kubectl describe treebind <name>
 - **It never writes over your application's edits.** An update that would change a file that has a local edit,
   or that would put a file where the application made one of its own, is not applied at all. A file that a
   `.gitignore` hides is the application's too. Every other local edit stays as it is.
-- **It applies only a fast-forward.** When the repository and your directory each have commits that the other
-  lacks, nothing is written, and the check says so. What wins is the conflict policy of the Treebind, which
-  comes later.
+- **It applies a fast-forward, and resolves a conflict by the policy.** When the repository and your directory each have
+  commits that the other lacks, a `bidirectional` Treebind resolves it with `spec.sync.conflictPolicy` (see
+  [conflicts](conflicts.md)): `followRemote`, the default, makes the repository win, and `followLocal` makes your directory
+  win. A `pull` Treebind has no commits of its own, and says `Diverged` and writes nothing.
 - **It applies the deletions of the branch, up to a cap.** A file that the branch removed is removed from your
   directory. An update that would remove more than 100 files from it, or every file of the branch, is not
   applied, and the check says `TooManyDeletions`. See [the deletion guard](deletion-guard.md).
@@ -50,6 +51,7 @@ kubectl describe treebind <name>
 | `Passed`, at the tip | Your directory has what the branch has | Nothing |
 | `Passed`, advanced | The agent brought in new commits. The message names the recovery ref that keeps the commit your directory was at | Nothing |
 | `Passed`, ahead | Your directory has commits that the repository does not have yet | Nothing: a `bidirectional` Treebind pushes them ([local changes](local-changes.md)) |
+| `Passed`, resolved | Your directory and the repository had each gained commits, and the policy decided. The message says which, and the check `Conflict` says how | Nothing, or read [conflicts](conflicts.md) to get back a file that lost |
 | `Skipped` `NotChecked` | The volume, the lock or the checkout has not passed, or the first pull is not due yet | Read the check that failed |
 
 ## When it does not work
@@ -60,7 +62,7 @@ with no restart.
 | Reason | What it means | What to do | The next pull |
 | :-- | :-- | :-- | :-- |
 | `Blocked` | A file that the update changes has a local edit, or an untracked file is in its way. The message names some of them. Nothing was written | Commit, revert or remove the files. The next pull goes on | At the interval |
-| `Diverged` | Your directory and the branch each have commits that the other lacks. The message says how many. Nothing was written. A branch that was force-pushed looks like this | Nothing is lost. Decide which side is right | At the interval |
+| `Diverged` | Your directory and the branch each have commits that the other lacks, and the Treebind only pulls, so it has no policy to say which side wins. The message says how many. Nothing was written. A branch that was force-pushed looks like this | Nothing is lost. Decide which side is right | At the interval |
 | `BranchGone` | The repository has no such branch any more | Put the branch back, or set `spec.repository.branch` to one it has | At the interval |
 | `ReservedPath` | The update brings a file named `.treebind` into a directory that holds the agent's state | Use a `subPath`, or rename the file | At the interval |
 | `GitDirUnsafe` | The Git directory holds something the agent did not put there | See [the Git directory](git-directory.md) | At the interval |
@@ -76,6 +78,9 @@ with no restart.
 - **Commits on the branch that remove files remove them from your directory**, up to 100 files in one update.
   The commit your directory was at is kept, and [the deletion guard](deletion-guard.md) says how to get files
   back from it.
+- **A conflict is resolved by an update, so it is refused for what an update is refused for.** A file that has a local edit and
+  that the resolution would change, an untracked file in its way, too many deletions and a lost lock are `Blocked`,
+  `TooManyDeletions` and `Refused` for a resolution as they are for an update, and nothing is written.
 - **A pull that is `Blocked`, `Diverged` or `TooManyDeletions` is tried again at every interval**, and is logged
   once. It costs one question to the repository while the tip does not change.
 - **Changing `spec.sync.interval` replaces the sync pod.** The new pod uses the new interval.
