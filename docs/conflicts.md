@@ -23,6 +23,11 @@ The agent compares what each side changed since the commit they share, a file at
 | `followRemote`, the default | The repository | The repository's tip, with the files that only your directory changed put on it, in one commit on top of the tip | Those files, as a fast-forward. The history of the repository stays a line |
 | `followLocal` | Your directory | A commit with two parents, your directory's last commit and the repository's tip, in which a file that both changed has your version | The merge, as a fast-forward. The history of the repository is in it, and nothing is forced or rewritten |
 
+When your directory and the branch hold the same files, there is nothing to decide: with either policy the checkout moves to the
+branch's tip with no commit, and your commits are kept under `refs/treebind/local/<number>`, as with `followRemote`. Nothing is
+pushed. A host that gives back what it is sent as another commit with the same files would otherwise make a merge at every pull
+([echo loops](echo-loops.md)).
+
 ## Getting back a version that lost
 
 With `followRemote` the commits that your directory had are kept before anything moves, under
@@ -34,7 +39,8 @@ git --git-dir=<mount>/.treebind/git show refs/treebind/local/00000001:dashboards
 ```
 
 With `followLocal` your commits are in the history of the branch, and the repository's version of a file that lost is in
-the commits that came from it.
+the commits that came from it, except when both sides held the same files: the commits are then in the ref, as with
+`followRemote`.
 
 ## What the report says
 

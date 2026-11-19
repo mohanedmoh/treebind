@@ -61,6 +61,9 @@ spec:
   commit, and `treebind: sync {{.Count}} file(s)` when the spec says none. Only the built-in functions are there,
   so a template cannot run a program or read a file. The blank lines inside the message are kept, and the first
   line is the subject. A template can be at most 4096 characters, and what it renders at most 64 KiB.
+- **The most commits in an hour** is `spec.commit.maxPerHour`, from 1 to 10000, and 60 when the spec says none. It counts the
+  commits of the commit step and of the resolutions of [conflicts](conflicts.md) together, and is what ends a loop that the
+  agent cannot tell from your application's own writes ([echo loops](echo-loops.md)).
 - **A `$` in a name or a template** is what you wrote. The operator takes care of the way the kubelet rewrites
   `$(NAME)` and `$$` in an environment variable.
 - **A name or a template that is wrong** and that the API server could not tell, such as a template that names a
@@ -85,6 +88,7 @@ It is after `Changes`, and it says what came of the last commit, until the next 
 | `Passed` | | The files that had settled are committed. The message says how many and the short id of the commit, for example `committed 2 files as 1a2b3c4d5e6f`. It also says when files that had settled were gone before the commit, and which lock files of a stopped Git were removed first |
 | `Passed` | | `the files that had settled came to nothing to commit`: they were changed back, or are gone. Nothing was committed, and nothing is wrong |
 | `Failed` | `CommitFailed` | The commit could not be made, and the message says why: what Git said, that the writer lock could not be checked, that the volume refused a write, or that the author or the template of the spec cannot be used. The files are still there, and the agent tries again at the next scan. A failure of the first kinds goes away from the report when the scans find no change at all; a wrong author or template stays until you put it right in the spec, and the files that settle are not committed until then |
+| `Failed` | `TooManyCommits` | The agent made as many commits in the last hour as `spec.commit.maxPerHour` allows, 60 by default, so it makes none until one of them is an hour old. The changes stay on the volume, and the next scan tries again. See [echo loops](echo-loops.md) |
 | `Failed` | `GitDirUnsafe` | The Git directory holds something that the agent did not put there. See [the Git directory](git-directory.md) |
 | `Skipped` | `NotChecked` | No file has settled yet, or the checkout is not made, or the scan cannot be set up |
 
