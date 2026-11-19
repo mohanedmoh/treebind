@@ -122,6 +122,8 @@ type Options struct {
 // one loop.
 type Breaker struct {
 	o Options
+	// rename puts the file that was written aside in its place. It is os.Rename, and a test gives another to fail.
+	rename func(oldpath, newpath string) error
 }
 
 // New returns a Breaker. It refuses what cannot work: no directory, and a limit that is not one that the API admits.
@@ -138,7 +140,7 @@ func New(o Options) (*Breaker, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Breaker{o: o}, nil
+	return &Breaker{o: o, rename: os.Rename}, nil
 }
 
 // Limit is how many commits there may be in an hour.
@@ -236,7 +238,7 @@ func (b *Breaker) write(times []time.Time) (err error) {
 	if err != nil {
 		return fmt.Errorf("the times of the commits cannot be written: %w", err)
 	}
-	if err = os.Rename(aside, b.path()); err != nil {
+	if err = b.rename(aside, b.path()); err != nil {
 		return fmt.Errorf("the times of the commits cannot be written: %w", err)
 	}
 	return nil

@@ -364,3 +364,23 @@ func TestTheMessageOfAHoldSaysTheLimitAndWhatWaitsAndHasNoTime(t *testing.T) {
 		t.Errorf("the message %q has no \"1 commit\" for a count of one", one.Error())
 	}
 }
+
+func TestAFileThatCannotBePutInItsPlaceIsRemovedAndTheFileIsAsItWas(t *testing.T) {
+	// The write and the sync worked and the rename did not, which is the one step that cannot be made to fail with the files.
+	w := newWorld(t)
+	w.seed(t, 0)
+	before := w.journal(t)
+	w.breaker.rename = func(string, string) error { return errors.New("the volume went away") }
+
+	err := w.breaker.Made(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "the volume went away") {
+		t.Fatalf("Made = %v, want the words of the volume", err)
+	}
+	if w.journal(t) != before {
+		t.Errorf("the file is %q after a rename that failed, want %q", w.journal(t), before)
+	}
+	if entries, _ := os.ReadDir(w.dir); len(entries) != 1 {
+		t.Errorf("the state directory holds %d files, want only the file: the one written aside is removed when it cannot be used", len(entries))
+	}
+}
