@@ -19,6 +19,9 @@ package pull
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -255,19 +258,58 @@ func TestABreakerThatCannotCountIsAFailedPullAndNotAHold(t *testing.T) {
 	}
 }
 
-func TestCountingAResolutionIsNotCancelledByAStopThatCameInTheMiddleOfTheMove(t *testing.T) {
-	// The stop comes after the move and before the breaker is told: the context of the pull is done, and the checkout is at the
-	// commit whether it is done or not.
-	var cancelled error
-	g := &gate{atTold: func(ctx context.Context) { cancelled = ctx.Err() }}
-	p := &Puller{o: Options{Gate: g}}
-	ctx, stop := context.WithCancel(t.Context())
-	stop()
-
-	if warning := p.countCommit(ctx); warning != "" || g.told != 1 {
-		t.Fatalf("countCommit = %q and the breaker was told %d times, want no warning and once", warning, g.told)
+// failsOnTreeIds is a stand-in for git that fails the command that asks for the tree of a commit, which is how two commits are
+// told to hold the same files, and is the real one for every other.
+func failsOnTreeIds(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(gittest.TempDir(t), "git")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *'^{tree}'*) echo 'broken on purpose' >&2; exit 3 ;; esac\nexec '%s' \"$@\"\n", gittest.Binary(t))
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if cancelled != nil {
-		t.Errorf("the breaker was told with a context that is done: %v", cancelled)
+	return binary
+}
+
+func TestOnlyAResolutionWhereTheVolumeWinsLooksAtTheTreesOfTheTwoSides(t *testing.T) {
+	// With followRemote the checkout moves to the tip whether the trees are the same or not, so it does not ask: a resolution
+	// that is retried at every interval does not pay a command for what it never uses.
+	for _, policy := range []Policy{FollowRemote, FollowLocal} {
+		t.Run(string(policy), func(t *testing.T) {
+			binary := failsOnTreeIds(t)
+			w := newWorld(t, subPath, resolving(policy), func(o *Options) { o.Git.Git = binary })
+			w.local(t, map[string]string{fileA: mine})
+			w.f.Publish(branchMain, map[string]string{fileA: aChanged})
+
+			got, err := w.pull(t)
+
+			if policy == FollowRemote && (err != nil || got.Outcome != Resolved) {
+				t.Errorf("the pull = %+v, %v, want followRemote to resolve without asking for the trees", got, err)
+			}
+			if policy == FollowLocal {
+				wantReason(t, err, ReasonPullFailed)
+			}
+		})
+	}
+}
+
+func TestAFollowRemoteResolutionWhoseFilesCannotAllBePutOnTheTipIsHeldAtTheLimitThoughItMakesNoCommit(t *testing.T) {
+	// Whether every file of the checkout can be put on the tip is only known once the tree is built, which writes the index, and the
+	// breaker is asked before anything is written, so that a commit that is held costs the volume nothing at every interval. The
+	// price is this case, which is held for as long as the limit is reached, and is documented (docs/adr/0035).
+	var fenced atomic.Int32
+	g := &gate{allow: held}
+	w := newWorld(t, subPath, resolving(FollowRemote), gated(g, &fenced))
+	local := w.local(t, map[string]string{nested: mine})
+	w.f.Publish(branchMain, map[string]string{"x": aFile})
+
+	_, err := w.pull(t)
+
+	wantReason(t, err, ReasonTooManyCommits)
+	if w.head() != local || fenced.Load() != 0 {
+		t.Error("something was written for a resolution that was held")
+	}
+	g.allow = nil
+	if got, err := w.pull(t); err != nil || got.Outcome != Resolved || got.Resolution.Commit != "" || len(got.Resolution.Dropped) != 1 {
+		t.Errorf("the pull after the hold = %+v, %v, want the resolution with no commit, and the file that cannot be put on the tip named", got, err)
 	}
 }

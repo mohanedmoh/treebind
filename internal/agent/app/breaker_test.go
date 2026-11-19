@@ -21,6 +21,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +207,62 @@ func TestAResolutionThatTheBreakerHeldIsAFailedPullThatDoesNotMakeTheWaitGrow(t 
 	}
 	if failed {
 		t.Error("the wait before the next pull grows for a resolution that was held: the repository answered, and asking it again sooner or later costs the same one question")
+	}
+}
+
+func TestAnAgentThatCannotMakeItsBreakerBoundsNothingByFailingEveryCommitAndResolutionAndSaysWhy(t *testing.T) {
+	// The limit is out of what the API admits, which the settings of the pod never are: the agent does not run without a bound
+	// that it cannot make, so the commit step and the resolutions fail with the cause and write nothing.
+	w := newWorld()
+	takePuller, pullOptions := pullOptionsOf()
+	start(t, w.with(takePuller, func(o *Options) {
+		o.Config.CommitMaxPerHour = breaker.MaxLimit + 1
+		o.Config.SyncInterval = testInterval
+	}))
+
+	puller := w.untilPulled(t, pullOptions)
+	committer := <-w.commitOpt
+
+	for name, gate := range map[string]breaker.Gate{"the committer": committer.Gate, "the puller": puller.Gate} {
+		if gate == nil {
+			t.Fatalf("%s has no breaker: it would commit without a limit", name)
+		}
+		err := gate.Allow(context.Background())
+		if _, held := errors.AsType[*breaker.HeldError](err); err == nil || held || !strings.Contains(err.Error(), "10001") {
+			t.Errorf("%s: Allow = %v, want an error that is not a hold and that names the limit that cannot be used", name, err)
+		}
+		if err := gate.Made(context.Background()); err != nil {
+			t.Errorf("%s: Made = %v, want nothing to say: no commit was made", name, err)
+		}
+	}
+}
+
+func TestTheBreakerCountsByTheClockOfTheLoopWhenItSaysWhatTimeItIs(t *testing.T) {
+	// The clock of the loop is what a test moves, and the times in the file are of it: a breaker that read the time of the system
+	// would count in another hour than the loop lives in.
+	root, _ := claimWithState(t)
+	w := newWorld()
+	start(t, w.with(func(o *Options) {
+		takesTheLock(root, nil)(o)
+		o.Config.SyncInterval, o.Config.SettleTime = time.Hour, settleFor
+		o.Config.SyncDirection = config.DirectionBidirectional
+		o.LockClock = newFakeClock()
+	}))
+	gate := (<-w.commitOpt).Gate
+
+	if err := gate.Made(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, ".treebind", "commit-times"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counted, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		t.Fatalf("the file holds %q: %v", data, err)
+	}
+	if now := w.clock.Now().Unix(); counted < wallStart.Unix() || counted > now {
+		t.Errorf("the commit was counted at %d, want a time of the clock of the loop, from %d to %d", counted, wallStart.Unix(), now)
 	}
 }

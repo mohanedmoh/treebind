@@ -333,19 +333,23 @@ func TestAKillAfterTheCommitLeavesItUncountedAndTheNextPassCountsTheNextOneRight
 	}
 }
 
-func TestCountingACommitIsNotCancelledByAStopThatCameInTheMiddleOfIt(t *testing.T) {
-	// The stop comes after the command that made the commit and before the breaker is told: the context of the commit is done,
-	// and the commit is in the branch whether it is done or not.
-	var cancelled error
-	g := &gate{atTold: func(ctx context.Context) { cancelled = ctx.Err() }}
-	c := &Committer{o: Options{Gate: g}}
-	ctx, stop := context.WithCancel(t.Context())
-	stop()
+func TestACommitThatCouldNotBeCountedSaysSoEvenWhenGitFailsAfterItAndTheIdCannotBeRead(t *testing.T) {
+	// Two things go wrong after a commit that was made: the breaker cannot count it, and Git cannot say its id. The step is a
+	// failure for the second, as it was before, and the first is in what it says, and not lost.
+	g := &gate{made: errors.New("the file of times is on a volume that is full")}
+	binary, _ := killedAfter(t, "commit", false)
+	w := newWorld(t, "", base, gated(g), func(o *Options) { o.Git.Git = binary })
+	w.write(fileNew, "new\n")
 
-	if warning := c.count(ctx); warning != "" || g.told != 1 {
-		t.Fatalf("count = %q and the breaker was told %d times, want no warning and once", warning, g.told)
+	_, err := w.committer.Commit(context.Background(), w.changes())
+
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Reason != ReasonCommitFailed {
+		t.Fatalf("error = %v, want a CommitFailed", err)
 	}
-	if cancelled != nil {
-		t.Errorf("the breaker was told with a context that is done: %v", cancelled)
+	for _, want := range []string{"not counted", "volume that is full"} {
+		if !strings.Contains(failure.Message, want) {
+			t.Errorf("message = %q, want it to have %q", failure.Message, want)
+		}
 	}
 }

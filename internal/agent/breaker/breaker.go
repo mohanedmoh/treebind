@@ -35,7 +35,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,7 +61,7 @@ const (
 	// each line. A file of this name with ".tmp" is where the new one is written before it is put in its place.
 	journalFile = "commit-times"
 
-	// maxJournalBytes is the most of the file that is read. The most it holds is a line for each of the commits that the limit
+	// maxJournalBytes is the largest file that is read. The most it holds is a line for each of the commits that the limit
 	// allows, which is far under this, and a file that is larger is not one that the agent wrote.
 	maxJournalBytes = 1 << 20
 )
@@ -103,6 +102,35 @@ type Gate interface {
 }
 
 var _ Gate = (*Breaker)(nil)
+
+// Refusing is a Gate for an agent that could not make its Breaker: it allows no commit, and says why with the error that it was
+// given. What cannot be bounded is not run without a bound, and the step that asks fails with the cause, as it does for a file
+// of times that cannot be read. No commit is made, so there is none to tell of.
+func Refusing(err error) Gate { return refusing{err} }
+
+type refusing struct{ err error }
+
+func (r refusing) Allow(context.Context) error { return r.err }
+func (refusing) Made(context.Context) error    { return nil }
+
+// CountTimeout is how long telling the gate of a commit may take after a stop came in the middle of the step that made it: a short
+// time is all it needs.
+const CountTimeout = 5 * time.Second
+
+// Tell says to the gate that a commit was made, and returns what to warn of when that did not work, in words that are the same for
+// every step that makes commits. The commit is in the branch whether it is counted or not, so a stop that came in the middle of
+// the step does not cancel this, and it has CountTimeout. With no gate there is nothing to tell.
+func Tell(ctx context.Context, gate Gate) string {
+	if gate == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CountTimeout)
+	defer cancel()
+	if err := gate.Made(ctx); err != nil {
+		return fmt.Sprintf("the commit was not counted against the limit of commits in an hour, so the limit may be exceeded by it: %v", err)
+	}
+	return ""
+}
 
 // Options say where the commits are counted and how many there may be.
 type Options struct {
@@ -191,8 +219,15 @@ func (b *Breaker) read(now time.Time) ([]time.Time, error) {
 		return nil, fmt.Errorf("the times of the commits cannot be read: %w", err)
 	}
 	defer func() { _ = f.Close() }()
+	// A file that is larger than the agent ever writes is not read in part: the start of it would be counted as the whole.
+	if info, err := f.Stat(); err != nil {
+		return nil, fmt.Errorf("the times of the commits cannot be read: %w", err)
+	} else if info.Size() > maxJournalBytes {
+		return nil, fmt.Errorf("the file of the times of the commits is larger than the agent writes (%d bytes, at most %d): it is not one that "+
+			"the agent wrote, and the commits cannot be counted from it", info.Size(), maxJournalBytes)
+	}
 	var times []time.Time
-	scanner := bufio.NewScanner(io.LimitReader(f, maxJournalBytes))
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		seconds, err := strconv.ParseInt(strings.TrimSpace(scanner.Text()), 10, 64)
 		if err != nil {

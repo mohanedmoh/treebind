@@ -75,9 +75,7 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 		// The commits of the resolutions and the commits of the commit step are counted against one limit, in one file
 		// (docs/adr/0035).
 		gate = a.newBreaker(done.options.Layout)
-		if gate != nil {
-			options.Gate = gate
-		}
+		options.Gate = gate
 	}
 	l := &pulls{a: a, p: p, options: options}
 	if a.Config.SyncDirection == config.DirectionBidirectional {
@@ -280,8 +278,8 @@ func conflictResult(result pull.Result) preflight.Result {
 
 // newBreaker makes the breaker that bounds the commits of the agent in an hour, which counts in the state directory of the
 // layout with the limit of the settings, behind the writer-lock fence, and by the clock of the loop when it says what time it
-// is, which is the system's in the agent. It is nil when it cannot be made, and then nothing is bounded: the settings that the
-// agent starts with are judged before, and what is left is a directory that is not there.
+// is, which is the system's in the agent. It is never nil: when it cannot be made, which the settings that the agent starts with
+// do not allow, it is a gate that fails every commit and every resolution with the cause, and not one that bounds nothing.
 func (a *agent) newBreaker(l layout.Layout) breaker.Gate {
 	now := time.Now
 	if wall, ok := a.SyncClock.(syncloop.WallClock); ok {
@@ -289,8 +287,8 @@ func (a *agent) newBreaker(l layout.Layout) breaker.Gate {
 	}
 	made, err := breaker.New(breaker.Options{Dir: l.StateDir, Limit: a.Config.CommitMaxPerHour, Now: now, Fence: a.fence})
 	if err != nil {
-		a.Logger.Error("the commits of the agent are not bounded, because the breaker cannot be made", "error", err)
-		return nil
+		a.Logger.Error("the agent makes no commit, because the breaker that bounds them cannot be made", "error", err)
+		return breaker.Refusing(fmt.Errorf("the commits of the last hour cannot be bounded, because the breaker cannot be made: %w", err))
 	}
 	return made
 }

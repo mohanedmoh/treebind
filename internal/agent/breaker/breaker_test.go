@@ -396,3 +396,95 @@ func TestTheTimesAreCountedInOrderWhateverOrderTheFileHasThem(t *testing.T) {
 		t.Errorf("Until = %v, want %v: an hour after the oldest commit, which is the one at the epoch", held.Until, epoch.Add(time.Hour))
 	}
 }
+
+func TestARefusingGateAllowsNothingWithTheErrorItWasGivenAndHasNothingToCount(t *testing.T) {
+	cause := errors.New("the limit cannot be used")
+	gate := Refusing(cause)
+
+	if err := gate.Allow(context.Background()); !errors.Is(err, cause) {
+		t.Errorf("Allow = %v, want the error that it was given", err)
+	}
+	if _, held := errors.AsType[*HeldError](gate.Allow(context.Background())); held {
+		t.Error("Allow is a hold: a gate that cannot count is not one that reached the limit")
+	}
+	if err := gate.Made(context.Background()); err != nil {
+		t.Errorf("Made = %v, want nil: no commit was allowed, so none is made", err)
+	}
+}
+
+func TestTellingTheGateIsNotCancelledByAStopThatCameInTheMiddleOfTheStepAndIsBoundedInTime(t *testing.T) {
+	// The stop comes after the command that made the commit and before the gate is told: the context of the step is done, and the
+	// commit is in the branch whether it is done or not.
+	var cancelled error
+	var deadline time.Time
+	gate := &told{at: func(ctx context.Context) {
+		cancelled = ctx.Err()
+		deadline, _ = ctx.Deadline()
+	}}
+	ctx, stop := context.WithCancel(t.Context())
+	stop()
+
+	if warning := Tell(ctx, gate); warning != "" || gate.n != 1 {
+		t.Fatalf("Tell = %q and the gate was told %d times, want no warning and once", warning, gate.n)
+	}
+	if cancelled != nil {
+		t.Errorf("the gate was told with a context that is done: %v", cancelled)
+	}
+	if left := time.Until(deadline); left <= 0 || left > CountTimeout {
+		t.Errorf("the context has %v left, want up to %v: telling the gate has a time of its own", left, CountTimeout)
+	}
+}
+
+func TestTellingTheGateSaysWhatToWarnOfWhenItCannotCountAndNothingWithNoGate(t *testing.T) {
+	gate := &told{err: errors.New("the volume is full")}
+
+	got := Tell(t.Context(), gate)
+
+	for _, want := range []string{"not counted", "limit may be exceeded", "the volume is full"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning = %q, want it to have %q", got, want)
+		}
+	}
+	if got := Tell(t.Context(), nil); got != "" {
+		t.Errorf("Tell with no gate = %q, want nothing", got)
+	}
+}
+
+// told is a gate that notes that it was told, with the context it was told with.
+type told struct {
+	n   int
+	err error
+	at  func(ctx context.Context)
+}
+
+func (*told) Allow(context.Context) error { return nil }
+
+func (g *told) Made(ctx context.Context) error {
+	g.n++
+	if g.at != nil {
+		g.at(ctx)
+	}
+	return g.err
+}
+
+func TestAFileLargerThanTheAgentWritesIsAnErrorAndNotACountOfWhatFitsInTheFirstPart(t *testing.T) {
+	// A file that holds more than the limit allows is not one that the agent wrote, and reading the start of it as the whole would
+	// count fewer commits than were made, and give a loop a new budget.
+	w := newWorld(t)
+	var b strings.Builder
+	for b.Len() <= 2<<20 {
+		b.WriteString(strconv.FormatInt(epoch.Unix(), 10) + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(w.dir, journalFile), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := w.breaker.Allow(context.Background())
+
+	if err == nil {
+		t.Fatal("Allow = nil, want an error")
+	}
+	if _, held := errors.AsType[*HeldError](err); held || !strings.Contains(err.Error(), "larger") {
+		t.Errorf("Allow = %v, want an error that says that the file is larger than the agent writes, and not a hold", err)
+	}
+}

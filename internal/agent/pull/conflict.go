@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
@@ -56,10 +55,6 @@ const (
 	// is beside the recovery refs and works as they do: loose, numbered, local, and never pushed, because the push
 	// guard of the Runner refuses any destination that is not under refs/heads/.
 	localPrefix = "refs/treebind/local/"
-
-	// countTimeout is how long telling the breaker of a commit may take, when the agent was told to stop in the middle of the
-	// pull: the checkout is at the commit whether it is counted or not.
-	countTimeout = 5 * time.Second
 
 	// indexBatch is how many files one command puts in the index, so that the command line stays short.
 	indexBatch = 200
@@ -182,7 +177,7 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 	}
 	result.Outcome, result.Resolution = Resolved, &res
 	if res.Commit != "" {
-		result.Warning = strings.Trim(result.Warning+"; "+p.countCommit(ctx), "; ")
+		result.Warning = strings.Trim(result.Warning+"; "+breaker.Tell(ctx, p.o.Gate), "; ")
 	}
 	return result, nil
 }
@@ -203,20 +198,6 @@ func (p *Puller) allowCommit(ctx context.Context) error {
 	return p.fail(ReasonPullFailed, "nothing was written, because the commits of the last hour cannot be counted: %v", err)
 }
 
-// countCommit tells the breaker that the resolution made a commit, and returns what to warn of when that did not work. The
-// checkout is at the commit, so a stop that came in the middle of the pull does not cancel this: a short time is all it needs.
-func (p *Puller) countCommit(ctx context.Context) string {
-	if p.o.Gate == nil {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), countTimeout)
-	defer cancel()
-	if err := p.o.Gate.Made(ctx); err != nil {
-		return fmt.Sprintf("the commit of the resolution was not counted against the limit of commits in an hour, so the limit may be exceeded by it: %v", err)
-	}
-	return ""
-}
-
 // comparison is what the two sides did since the commit they share.
 type comparison struct {
 	// carry are the changes of the side that lost to files that the winner did not change.
@@ -224,7 +205,7 @@ type comparison struct {
 	// overridden is how many files both sides changed differently.
 	overridden int
 	// sameTree says that the checkout and the repository hold the same files, as one tree: there is nothing that a policy
-	// has to decide, and no commit to make, whichever side wins.
+	// has to decide, and no commit to make. It is only looked at with followLocal, where it changes what is done.
 	sameTree bool
 }
 
@@ -254,11 +235,16 @@ func (p *Puller) compare(ctx context.Context, head, tip, winner, loser string) (
 	for _, change := range won {
 		byPath[change.path] = change
 	}
-	same, err := p.sameTree(ctx, head, tip)
-	if err != nil {
-		return comparison{}, err
+	// Only a resolution where the volume wins has a use for it: the repository's tip is what the checkout moves to with followRemote
+	// whether the trees are the same or not, and a command that is never used is paid at every interval that a resolution is retried.
+	found := comparison{}
+	if p.o.Policy == FollowLocal {
+		same, err := p.sameTree(ctx, head, tip)
+		if err != nil {
+			return comparison{}, err
+		}
+		found.sameTree = same
 	}
-	found := comparison{sameTree: same}
 	for _, change := range lost {
 		other, both := byPath[change.path]
 		switch {

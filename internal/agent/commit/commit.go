@@ -73,10 +73,6 @@ const (
 	// undoTimeout is how long putting the index back may take after a commit that failed, when the agent was
 	// told to stop in the middle of it.
 	undoTimeout = 5 * time.Second
-
-	// countTimeout is how long telling the breaker of a commit may take, when the agent was told to stop in the middle of
-	// the commit: a short time is all it needs, and the commit is in the branch whether it is counted or not.
-	countTimeout = 5 * time.Second
 )
 
 // Outcome says what a call of Commit came to.
@@ -216,20 +212,6 @@ func (c *Committer) allow(ctx context.Context) error {
 	return c.fail(err, "nothing was committed, because the commits of the last hour cannot be counted: %v", err)
 }
 
-// count tells the breaker that a commit was made, and returns what to warn of when that did not work. The commit is in the
-// branch, so a stop that came in the middle of it does not cancel this: a short time is all it needs.
-func (c *Committer) count(ctx context.Context) string {
-	if c.o.Gate == nil {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), countTimeout)
-	defer cancel()
-	if err := c.o.Gate.Made(ctx); err != nil {
-		return fmt.Sprintf("the commit was not counted against the limit of commits in an hour, so the limit may be exceeded by it: %v", err)
-	}
-	return ""
-}
-
 // pathsOf is the literal pathspecs of the changes, and how many were left out because the file is gone. A path
 // that is not a clean path of the synced directory is refused, because it is not what a scan lists.
 func (c *Committer) pathsOf(changes []scan.Change) (list []string, gone int, err error) {
@@ -279,9 +261,14 @@ func (c *Committer) write(ctx context.Context, list []string) (Result, error) {
 		return Result{}, err
 	}
 	// The commit is in the branch, and what Git does after it, reading its id, cannot take it out: it is counted before that.
-	warning := c.count(ctx)
+	warning := breaker.Tell(ctx, c.o.Gate)
 	head, err := c.git.Run(ctx, "rev-parse", "--verify", "HEAD")
 	if err != nil {
+		// The commit is in the branch, and the step is a failure for what could not be read, as it always was. What could not be
+		// counted is in what it says, and not lost.
+		if warning != "" {
+			err = fmt.Errorf("%w; %s", err, warning)
+		}
 		return Result{}, err
 	}
 	return Result{Outcome: Committed, Commit: strings.TrimSpace(string(head.Stdout)), Files: files, Warning: warning}, nil
