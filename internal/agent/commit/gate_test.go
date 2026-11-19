@@ -19,6 +19,7 @@ package commit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/mohanedmoh/treebind/internal/agent/breaker"
+	"github.com/mohanedmoh/treebind/internal/agent/gittest"
 )
 
 // A commit is bounded by the breaker (docs/adr/0035): it asks before anything is written, and says that a commit was made
@@ -235,5 +237,99 @@ func TestATemplateMayCarryTheMarkerOfACIThatSkipsTheCommit(t *testing.T) {
 				t.Errorf("the message is %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// A stand-in for git that runs what it is asked, and then, at the subcommand that the step is, is the end of what Git can do: the
+// command has run, and every command from then on fails without running, so that nothing the agent would do to clean up after
+// itself hides what is left. With lost the command reports a failure as well, which is what an agent that is killed just after
+// it is told, and without it the command reports what it did.
+func killedAfter(t *testing.T, sub string, lost bool) (binary string, dead func() bool) {
+	t.Helper()
+	dir := gittest.TempDir(t)
+	binary = filepath.Join(dir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+D='%s'
+if [ -e "$D/dead" ]; then echo 'the agent was killed' >&2; exit 137; fi
+hit=
+for arg in "$@"; do
+  if [ "$arg" = '%s' ]; then hit=yes; fi
+done
+'%s' "$@"
+rc=$?
+if [ -n "$hit" ]; then : > "$D/dead"; if [ -n '%s' ]; then exit 137; fi; fi
+exit $rc
+`, dir, sub, gittest.Binary(t), map[bool]string{true: "lost", false: ""}[lost])
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return binary, func() bool { return gittest.Exists(filepath.Join(dir, "dead")) }
+}
+
+func TestACommitThatWasMadeIsCountedEvenWhenGitFailsAfterItAndTheIdCannotBeRead(t *testing.T) {
+	// The commit is in the branch when the command that made it has run, and what Git does after it cannot take it out.
+	g := &gate{}
+	binary, dead := killedAfter(t, "commit", false)
+	w := newWorld(t, "", base, gated(g), func(o *Options) { o.Git.Git = binary })
+	w.write(fileNew, "new\n")
+	before := w.head()
+
+	_, err := w.committer.Commit(context.Background(), w.changes())
+
+	if err == nil || !dead() {
+		t.Fatalf("Commit = %v, dead = %t, want it to fail after the commit was made", err, dead())
+	}
+	if w.head() == before {
+		t.Fatal("HEAD did not move: the step is not the one that this test is for")
+	}
+	if g.told != 1 {
+		t.Errorf("the breaker was told of %d commits, want 1: the commit is in the branch, and counting it does not need Git", g.told)
+	}
+}
+
+func TestAKillAfterTheCommitLeavesItUncountedAndTheNextPassCountsTheNextOneRight(t *testing.T) {
+	// The agent is killed just after the commit, before it can tell the breaker: the file does not have it, so that the limit
+	// is exceeded by one at most, and the next commit is counted as it would be.
+	dir := t.TempDir()
+	clock := time.Unix(1_800_000_000, 0)
+	counting := func() *breaker.Breaker {
+		b, err := breaker.New(breaker.Options{Dir: dir, Limit: 2, Now: func() time.Time { return clock }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	binary, dead := killedAfter(t, "commit", true)
+	killedRun := newWorld(t, "", base, func(o *Options) { o.Git.Git, o.Gate = binary, counting() })
+	killedRun.write(fileNew, "new\n")
+	listed := killedRun.changes()
+	// The breaker is told after the command that made the commit, and the stand-in ends the agent at that command.
+	if _, err := killedRun.committer.Commit(context.Background(), listed); err == nil || !dead() {
+		t.Fatalf("Commit = %v, dead = %t, want the agent killed at the commit", err, dead())
+	}
+	if killedRun.head() == "" || len(killedRun.staged()) != 0 {
+		t.Errorf("HEAD = %q and the index holds %q, want the commit made and nothing staged", killedRun.head(), killedRun.staged())
+	}
+	if changes := killedRun.changes(); len(changes) != 0 {
+		t.Errorf("the scan lists %v after the kill, want nothing: the commit holds the file", changes)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "commit-times")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the file of the breaker is there after a kill that came before it was told: %v", err)
+	}
+
+	// The next pass is a new agent, with Git that works, and a breaker that reads the same file.
+	fresh, err := New(Options{
+		Layout: killedRun.l, Git: killedRun.f.GitOptions(), AuthorName: botName, AuthorEmail: botEmail, Gate: counting(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	killedRun.write(fileB, "b, again\n")
+	got, err := fresh.Commit(context.Background(), killedRun.changes())
+	if err != nil || got.Outcome != Committed || got.Warning != "" {
+		t.Fatalf("the commit of the next pass = %+v, %v, want it made and counted", got, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "commit-times")); err != nil || strings.Count(string(data), "\n") != 1 {
+		t.Errorf("the file of the breaker holds %q, %v, want one time: the commit that was killed was not counted, and this one is", data, err)
 	}
 }

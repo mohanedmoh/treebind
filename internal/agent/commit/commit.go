@@ -197,9 +197,6 @@ func (c *Committer) Commit(ctx context.Context, changes []scan.Change) (Result, 
 		return Result{}, c.fail(err, "the changes of the directory cannot be committed: %v", err)
 	}
 	result.Gone = gone
-	if result.Outcome == Committed {
-		result.Warning = c.count(ctx)
-	}
 	return result, nil
 }
 
@@ -281,11 +278,13 @@ func (c *Committer) write(ctx context.Context, list []string) (Result, error) {
 	if _, err := c.git.Run(ctx, "commit", "--quiet", "--cleanup=verbatim", "--message="+message); err != nil {
 		return Result{}, err
 	}
+	// The commit is in the branch, and what Git does after it, reading its id, cannot take it out: it is counted before that.
+	warning := c.count(ctx)
 	head, err := c.git.Run(ctx, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Outcome: Committed, Commit: strings.TrimSpace(string(head.Stdout)), Files: files}, nil
+	return Result{Outcome: Committed, Commit: strings.TrimSpace(string(head.Stdout)), Files: files, Warning: warning}, nil
 }
 
 // stage gives Git the paths in a file of the state directory, which is removed when Git has read it.
