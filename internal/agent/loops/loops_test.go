@@ -35,7 +35,7 @@ import (
 var layouts = []string{subPath, ""}
 
 // requireAttrSource skips a test that holds only on a Git that reads the attributes from a tree, as the Runner asks it to:
-// GIT_ATTR_SOURCE is from Git 2.40, which the image of the agent has and an older Git on a developer's machine may not.
+// GIT_ATTR_SOURCE is from Git 2.41 (its source has it from the tag v2.41.0 and not at v2.40.1), which the image of the agent has and an older Git on a developer's machine may not.
 func requireAttrSource(t *testing.T, f *gittest.Fixture) {
 	t.Helper()
 	out := f.Plain(f.Claim, "--version")
@@ -43,8 +43,8 @@ func requireAttrSource(t *testing.T, f *gittest.Fixture) {
 	if _, err := fmt.Sscanf(strings.TrimPrefix(strings.TrimSpace(out), "git version "), "%d.%d", &major, &minor); err != nil {
 		t.Fatalf("the version of Git is not understood: %q", out)
 	}
-	if major < 2 || (major == 2 && minor < 40) {
-		t.Skipf("Git %d.%d does not read GIT_ATTR_SOURCE, which came with 2.40: the attributes of the work tree apply to it", major, minor)
+	if major < 2 || (major == 2 && minor < 41) {
+		t.Skipf("Git %d.%d does not read GIT_ATTR_SOURCE, which came with 2.41: the attributes of the work tree apply to it", major, minor)
 	}
 }
 
@@ -69,7 +69,7 @@ func TestFilesThatAPullWritesAreNotChangesOfTheApplicationAndStayNoneWhenTouched
 		// A blob with both kinds of line ending, committed before the attribute was set. Written with eol=crlf it is a file that
 		// does not come back to the blob, and a Git that read the attribute would list it as changed at every scan that
 		// finds its stat different. The Runner reads the attributes from an empty tree (docs/adr/0013), a setting that
-		// Git 2.40 brought, so that older releases do list it: see the skip below.
+		// Git 2.41 brought, so that older releases do list it: see the skip below.
 		{name: "eol=crlf and a file with both line endings", raw: map[string]string{"a.txt": "one\r\ntwo\n", ".gitattributes": "* text eol=crlf\n"},
 			needsAttrSource: true},
 		{name: "text=auto", first: map[string]string{".gitattributes": "* text=auto\n", "a.txt": "one\r\ntwo\n"}},
