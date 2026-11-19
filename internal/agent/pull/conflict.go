@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 )
@@ -116,6 +117,17 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 	}
 	res := Resolution{Policy: p.o.Policy, LocalCommits: ours, RemoteCommits: theirs, Overridden: found.overridden}
 
+	// A resolution makes a commit when the volume wins and the trees differ, and when the repository wins and the volume has files
+	// to put on its tip. It is bounded when it does, and not when it does not: the checkout moves to the tip and nothing is made
+	// that the repository would have to take. It is asked before anything is written, a ref for the commits of the checkout
+	// included, because one that is held at every interval would make a ref at each.
+	makesCommit := (p.o.Policy == FollowLocal && !found.sameTree) || len(found.carry) > 0
+	if makesCommit {
+		if err := p.allowCommit(ctx); err != nil {
+			return Result{}, err
+		}
+	}
+
 	// The first write, and everything before it only read.
 	if p.o.Fence != nil {
 		if err := p.o.Fence(ctx); err != nil {
@@ -134,7 +146,7 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 	}
 
 	target := tip
-	if (p.o.Policy == FollowLocal && !found.sameTree) || len(found.carry) > 0 {
+	if makesCommit {
 		commit, dropped, err := p.commitOf(ctx, head, tip, winner, found.carry, res)
 		if err != nil {
 			return Result{}, err
@@ -164,7 +176,26 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 		result.Warning = strings.Trim(result.Warning+"; "+warning, "; ")
 	}
 	result.Outcome, result.Resolution = Resolved, &res
+	if res.Commit != "" {
+		result.Warning = strings.Trim(result.Warning+"; "+breaker.Tell(ctx, p.o.Gate), "; ")
+	}
 	return result, nil
+}
+
+// allowCommit asks the breaker whether a resolution may make a commit. A hold is the reason TooManyCommits, with the words of
+// the breaker, and a count that cannot be made is a failed pull: what cannot be counted is not guessed.
+func (p *Puller) allowCommit(ctx context.Context) error {
+	if p.o.Gate == nil {
+		return nil
+	}
+	err := p.o.Gate.Allow(ctx)
+	if err == nil {
+		return nil
+	}
+	if held, ok := errors.AsType[*breaker.HeldError](err); ok {
+		return &Error{Reason: ReasonTooManyCommits, Message: held.Error(), Err: err}
+	}
+	return p.fail(ReasonPullFailed, "nothing was written, because the commits of the last hour cannot be counted: %v", err)
 }
 
 // comparison is what the two sides did since the commit they share.
@@ -174,7 +205,7 @@ type comparison struct {
 	// overridden is how many files both sides changed differently.
 	overridden int
 	// sameTree says that the checkout and the repository hold the same files, as one tree: there is nothing that a policy
-	// has to decide, and no commit to make, whichever side wins.
+	// has to decide, and no commit to make. It is only looked at with followLocal, where it changes what is done.
 	sameTree bool
 }
 
@@ -204,11 +235,16 @@ func (p *Puller) compare(ctx context.Context, head, tip, winner, loser string) (
 	for _, change := range won {
 		byPath[change.path] = change
 	}
-	same, err := p.sameTree(ctx, head, tip)
-	if err != nil {
-		return comparison{}, err
+	// Only a resolution where the volume wins has a use for it: the repository's tip is what the checkout moves to with followRemote
+	// whether the trees are the same or not, and a command that is never used is paid at every interval that a resolution is retried.
+	found := comparison{}
+	if p.o.Policy == FollowLocal {
+		same, err := p.sameTree(ctx, head, tip)
+		if err != nil {
+			return comparison{}, err
+		}
+		found.sameTree = same
 	}
-	found := comparison{sameTree: same}
 	for _, change := range lost {
 		other, both := byPath[change.path]
 		switch {

@@ -210,6 +210,46 @@ func (f *Fixture) PublishRaw(branch string, files map[string]string) string {
 	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
 }
 
+// rewritingHook is a hook of the repository that replaces each commit that is pushed to the main branch with another that has
+// the same tree and is made by someone else, on top of the tip that the branch had, as a host does that squashes or rebases
+// what it is sent. With a bump, the tree of the new commit also has a file bump.txt that is another at every push, as a host
+// does that adds something of its own to each commit. It uses what a shell has built in and Git, because the tests run in the
+// image of the agent too, which has no cat, rm or mktemp.
+const rewritingHook = `#!/bin/sh
+while read old new ref; do
+  [ "$ref" = refs/heads/main ] || continue
+  [ "$(git log -1 --format=%%an "$new")" = rewriter ] && continue
+  case "$old" in 0*) parent="" ;; *) parent="-p $old" ;; esac
+  tree=$(git rev-parse "$new^{tree}")
+  %s
+  twin=$(GIT_AUTHOR_NAME=rewriter GIT_AUTHOR_EMAIL=r@example.com GIT_COMMITTER_NAME=rewriter GIT_COMMITTER_EMAIL=r@example.com \
+    git commit-tree "$tree" $parent -m "rewritten $new")
+  git update-ref refs/heads/main "$twin"
+done
+`
+
+// bumpedTree is the part of the hook that gives the tree a file that is another at every push.
+const bumpedTree = `n=0; if [ -f "$GIT_DIR/bumps" ]; then read n < "$GIT_DIR/bumps"; fi; n=$((n+1)); echo $n > "$GIT_DIR/bumps"
+  export GIT_INDEX_FILE="$GIT_DIR/bump-index"
+  git read-tree "$new"
+  git update-index --add --cacheinfo "100644,$(echo "bump $n" | git hash-object -w --stdin),bump.txt"
+  tree=$(git write-tree)
+  unset GIT_INDEX_FILE`
+
+// RewriteWhatIsPushed makes the repository give back each commit that is pushed to main as another commit with the same files,
+// on top of the old tip. With bump the files are not the same: bump.txt is another at every push.
+func (f *Fixture) RewriteWhatIsPushed(bump bool) {
+	f.T.Helper()
+	body := ""
+	if bump {
+		body = bumpedTree
+	}
+	hook := filepath.Join(f.Bare, "hooks", "post-receive")
+	if err := os.WriteFile(hook, []byte(fmt.Sprintf(rewritingHook, body)), 0o755); err != nil {
+		f.T.Fatal(err)
+	}
+}
+
 // PublishLink commits a link in the scratch repository, with the target, and pushes it as Publish does.
 func (f *Fixture) PublishLink(branch, name, target string) string {
 	f.T.Helper()

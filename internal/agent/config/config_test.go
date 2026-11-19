@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 )
 
 const (
@@ -41,6 +43,7 @@ const (
 	problemScheme    = "must use ssh:// or https://"
 	problemControl   = "whitespace or control"
 	notADuration     = "soon"
+	notANumber       = "many"
 	justUnderASecond = "999ms"
 	problemLeast     = "must be at least 1s"
 	problemDuration  = "must be a duration"
@@ -48,6 +51,10 @@ const (
 	problemMaxDeletionsLeast   = "must be at least 1"
 	problemMaxDeletionsMost    = "must be at most 2147483647"
 	problemMaxDeletionsInteger = "must be a whole number"
+
+	problemCommitMaxPerHourLeast   = "must be at least 1"
+	problemCommitMaxPerHourMost    = "must be at most 10000"
+	problemCommitMaxPerHourInteger = "must be a whole number"
 )
 
 func complete() map[string]string {
@@ -76,7 +83,7 @@ func TestFromEnvReadsTheSettingsAndFillsTheDefaults(t *testing.T) {
 	want := Config{
 		Namespace: "apps", Name: "dashboards", MountPath: DefaultMountPath, RepoURL: repoURL,
 		SyncInterval: DefaultSyncInterval, SettleTime: DefaultSettleTime, SyncDirection: DirectionBidirectional, PodName: podName,
-		ConflictPolicy: DefaultConflictPolicy,
+		ConflictPolicy: DefaultConflictPolicy, CommitMaxPerHour: DefaultCommitMaxPerHour,
 		StatusAddr:     DefaultStatusAddr,
 		StatusIssuer:   issuer,
 		StatusAudience: audience,
@@ -655,7 +662,7 @@ func TestFromEnvReadsTheCapOnDeletionsAndLeavesItUnsetWhenThereIsNone(t *testing
 
 func TestFromEnvSaysABadCapOnDeletionsWithTheOtherProblems(t *testing.T) {
 	env := complete()
-	env[EnvSyncMaxDeletions] = "many"
+	env[EnvSyncMaxDeletions] = notANumber
 	env[EnvNamespace] = ""
 
 	_, err := fromMap(env)
@@ -686,7 +693,7 @@ func TestCheckMaxDeletions(t *testing.T) {
 		{"1e3", 0, problemMaxDeletionsInteger},
 		{"0x10", 0, problemMaxDeletionsInteger},
 		{"1_000", 0, problemMaxDeletionsInteger},
-		{"many", 0, problemMaxDeletionsInteger},
+		{notANumber, 0, problemMaxDeletionsInteger},
 		{"5 0", 0, problemMaxDeletionsInteger},
 	}
 	for _, tt := range tests {
@@ -747,5 +754,81 @@ func TestCheckConflictPolicy(t *testing.T) {
 		if err := CheckConflictPolicy(refused); err == nil {
 			t.Errorf("CheckConflictPolicy(%q) was accepted", refused)
 		}
+	}
+}
+
+func TestFromEnvReadsTheLimitOfCommitsInAnHourAndDefaultsToSixty(t *testing.T) {
+	config, err := fromMap(complete())
+	if err != nil || config.CommitMaxPerHour != 60 || DefaultCommitMaxPerHour != 60 {
+		t.Fatalf("CommitMaxPerHour = %d, %v, want 60, the default of the CRD, when the operator does not set it", config.CommitMaxPerHour, err)
+	}
+
+	env := complete()
+	env[EnvCommitMaxPerHour] = " 12\n"
+	config, err = fromMap(env)
+
+	if err != nil || config.CommitMaxPerHour != 12 {
+		t.Errorf("CommitMaxPerHour = %d, %v, want 12", config.CommitMaxPerHour, err)
+	}
+}
+
+func TestFromEnvSaysABadLimitOfCommitsInAnHourWithTheOtherProblems(t *testing.T) {
+	env := complete()
+	env[EnvCommitMaxPerHour] = notANumber
+	env[EnvNamespace] = ""
+
+	_, err := fromMap(env)
+
+	if err == nil || !strings.Contains(err.Error(), EnvCommitMaxPerHour+" "+problemCommitMaxPerHourInteger) ||
+		!strings.Contains(err.Error(), EnvNamespace+" is not set") {
+		t.Errorf("error = %v, want both problems at once", err)
+	}
+}
+
+func TestCheckCommitMaxPerHour(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want int
+		err  string
+	}{
+		{"", DefaultCommitMaxPerHour, ""},
+		{"1", 1, ""},
+		{"60", 60, ""},
+		{"0100", 100, ""},
+		{"10000", 10000, ""},
+		{"0", 0, problemCommitMaxPerHourLeast},
+		{"00", 0, problemCommitMaxPerHourLeast},
+		{"10001", 0, problemCommitMaxPerHourMost},
+		{"99999999999999999999", 0, problemCommitMaxPerHourMost},
+		{"-1", 0, problemCommitMaxPerHourInteger},
+		{"+5", 0, problemCommitMaxPerHourInteger},
+		{"1.5", 0, problemCommitMaxPerHourInteger},
+		{"1e3", 0, problemCommitMaxPerHourInteger},
+		{"0x10", 0, problemCommitMaxPerHourInteger},
+		{"1_000", 0, problemCommitMaxPerHourInteger},
+		{notANumber, 0, problemCommitMaxPerHourInteger},
+		{"5 0", 0, problemCommitMaxPerHourInteger},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := CheckCommitMaxPerHour(tt.raw)
+
+			switch {
+			case tt.err == "" && (err != nil || got != tt.want):
+				t.Errorf("CheckCommitMaxPerHour(%q) = %v, %v, want %v", tt.raw, got, err, tt.want)
+			case tt.err != "" && (err == nil || !strings.Contains(err.Error(), tt.err)):
+				t.Errorf("CheckCommitMaxPerHour(%q) = %v, %v, want a problem that says %q", tt.raw, got, err, tt.err)
+			}
+		})
+	}
+}
+
+func TestTheLeastTheMostAndTheDefaultOfTheLimitOfCommitsAreTheOnesOfTheAPIAndTheBreaker(t *testing.T) {
+	if MinCommitMaxPerHour != 1 || MaxCommitMaxPerHour != 10000 || DefaultCommitMaxPerHour != 60 {
+		t.Errorf("least = %d, most = %d, default = %d, want 1, 10000 and 60, which the CRD puts on spec.commit.maxPerHour",
+			MinCommitMaxPerHour, MaxCommitMaxPerHour, DefaultCommitMaxPerHour)
+	}
+	if MinCommitMaxPerHour != breaker.MinLimit || MaxCommitMaxPerHour != breaker.MaxLimit || DefaultCommitMaxPerHour != breaker.DefaultLimit {
+		t.Errorf("the breaker takes from %d to %d and defaults to %d, want the same as the settings", breaker.MinLimit, breaker.MaxLimit, breaker.DefaultLimit)
 	}
 }

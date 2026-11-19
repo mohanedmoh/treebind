@@ -793,6 +793,7 @@ func TestOnlyAPullThatTheRepositoryOrTheVolumeCouldNotAnswerMakesTheNextWaitGrow
 		pull.ReasonRefused:          true,
 		pull.ReasonBlocked:          false,
 		pull.ReasonTooManyDeletions: false,
+		pull.ReasonTooManyCommits:   false,
 		pull.ReasonDiverged:         false,
 		pull.ReasonBranchGone:       false,
 		pull.ReasonReservedPath:     false,

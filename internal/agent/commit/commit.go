@@ -47,6 +47,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/commitmsg"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
@@ -94,6 +95,9 @@ type Result struct {
 	Files int
 	// Gone is how many of the changes that were given were left out because the file was gone by then.
 	Gone int
+	// Warning says what did not work after a commit that did: it could not be counted by the breaker, so that the limit may be
+	// exceeded by it. It is empty when there is nothing to say.
+	Warning string
 }
 
 // Error is a commit that could not be made.
@@ -126,6 +130,9 @@ type Options struct {
 	// Fence is called immediately before the first write, and nothing is written when it returns an error. It is
 	// the check that the agent still holds the writer lock (docs/adr/0023). With none, nothing is checked.
 	Fence func(ctx context.Context) error
+	// Gate is the breaker that bounds the commits of an hour (docs/adr/0035). It is asked before anything is written, and
+	// told when a commit was made. With none, nothing is bounded.
+	Gate breaker.Gate
 }
 
 // Committer commits into one checkout. It is not safe for concurrent use: the agent commits one at a time,
@@ -172,6 +179,9 @@ func (c *Committer) Commit(ctx context.Context, changes []scan.Change) (Result, 
 	if len(list) == 0 {
 		return Result{Outcome: NothingToCommit, Gone: gone}, nil
 	}
+	if err := c.allow(ctx); err != nil {
+		return Result{}, err
+	}
 	if c.o.Fence != nil {
 		if err := c.o.Fence(ctx); err != nil {
 			return Result{}, c.fail(err, "nothing was committed, because the writer lock could not be checked: %v", err)
@@ -184,6 +194,22 @@ func (c *Committer) Commit(ctx context.Context, changes []scan.Change) (Result, 
 	}
 	result.Gone = gone
 	return result, nil
+}
+
+// allow asks the breaker whether a commit may be made. A hold is the reason TooManyCommits, with the words of the breaker, and
+// a count that cannot be made is a failed commit: what cannot be counted is not guessed.
+func (c *Committer) allow(ctx context.Context) error {
+	if c.o.Gate == nil {
+		return nil
+	}
+	err := c.o.Gate.Allow(ctx)
+	if err == nil {
+		return nil
+	}
+	if held, ok := errors.AsType[*breaker.HeldError](err); ok {
+		return &Error{Reason: breaker.ReasonTooManyCommits, Message: held.Error(), Err: err}
+	}
+	return c.fail(err, "nothing was committed, because the commits of the last hour cannot be counted: %v", err)
 }
 
 // pathsOf is the literal pathspecs of the changes, and how many were left out because the file is gone. A path
@@ -234,11 +260,18 @@ func (c *Committer) write(ctx context.Context, list []string) (Result, error) {
 	if _, err := c.git.Run(ctx, "commit", "--quiet", "--cleanup=verbatim", "--message="+message); err != nil {
 		return Result{}, err
 	}
+	// The commit is in the branch, and what Git does after it, reading its id, cannot take it out: it is counted before that.
+	warning := breaker.Tell(ctx, c.o.Gate)
 	head, err := c.git.Run(ctx, "rev-parse", "--verify", "HEAD")
 	if err != nil {
+		// The commit is in the branch, and the step is a failure for what could not be read, as it always was. What could not be
+		// counted is in what it says, and not lost.
+		if warning != "" {
+			err = fmt.Errorf("%w; %s", err, warning)
+		}
 		return Result{}, err
 	}
-	return Result{Outcome: Committed, Commit: strings.TrimSpace(string(head.Stdout)), Files: files}, nil
+	return Result{Outcome: Committed, Commit: strings.TrimSpace(string(head.Stdout)), Files: files, Warning: warning}, nil
 }
 
 // stage gives Git the paths in a file of the state directory, which is removed when Git has read it.

@@ -18,12 +18,14 @@ package pull
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/gittest"
 )
@@ -129,6 +131,43 @@ type cutScenario struct {
 	tip    string
 	// final is what the directory holds when the resolution is done.
 	final map[string]string
+	// gate, when it is set, is the breaker that the Pullers of the scenario have, and journal the file where it counts.
+	gate    breaker.Gate
+	journal string
+}
+
+// counting gives the scenario a breaker that counts in a file of its own, as the agent's does in the state directory, with a
+// limit that no test of a kill reaches.
+func (c *cutScenario) counting(t *testing.T) {
+	t.Helper()
+	dir := gittest.TempDir(t)
+	made, err := breaker.New(breaker.Options{Dir: dir, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.gate, c.journal = made, filepath.Join(dir, "commit-times")
+}
+
+// counted is how many commits the breaker has been told of.
+func (c *cutScenario) counted(t *testing.T) int {
+	t.Helper()
+	data, err := os.ReadFile(c.journal)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "\n")
+}
+
+// gated gives a Puller the breaker of the scenario, when it has one.
+func (c *cutScenario) gated() func(*Options) {
+	return func(o *Options) {
+		if c.gate != nil {
+			o.Gate = c.gate
+		}
+	}
 }
 
 func newCutScenario(t *testing.T, policy Policy) *cutScenario {
@@ -151,7 +190,7 @@ func (c *cutScenario) restart(t *testing.T) {
 	if _, err := git.RemoveStaleLocks(c.l.GitDir); err != nil {
 		t.Fatal(err)
 	}
-	c.puller = puller(t, c.f, c.l, resolving(c.policy))
+	c.puller = puller(t, c.f, c.l, resolving(c.policy), c.gated())
 }
 
 // wantResolvedAfter fails the test unless the checkout is as a resolution makes it, with a clean index, no journal and
@@ -219,14 +258,20 @@ func TestAKillAtAnyStepOfAResolutionIsPutRightAndResolvedByTheNextPull(t *testin
 			}
 			t.Run(fmt.Sprintf("%s, %s", policy, step.name), func(t *testing.T) {
 				c := newCutScenario(t, policy)
+				c.counting(t)
 				remote := c.remoteRefs(t)
 				stand := makeTrap(t, step.trap(policy))
-				c.puller = puller(t, c.f, c.l, resolving(policy), func(o *Options) { o.Git.Git = stand.binary })
+				c.puller = puller(t, c.f, c.l, resolving(policy), c.gated(), func(o *Options) { o.Git.Git = stand.binary })
 
 				_, err := c.pull(t)
 
 				if err == nil || !stand.killed() {
 					t.Fatalf("the pull that was killed = %v, killed = %v, want it to fail where the agent was killed", err, stand.killed())
+				}
+				// The breaker is told once the checkout is at the commit, which a kill never gets to: a commit that was made and
+				// not moved to is not counted, and one that was moved to and not told of is the one that the limit is over by.
+				if n := c.counted(t); n != 0 {
+					t.Errorf("the breaker was told of %d commits by an agent that was killed, want none", n)
 				}
 				c.restart(t)
 
@@ -234,6 +279,11 @@ func TestAKillAtAnyStepOfAResolutionIsPutRightAndResolvedByTheNextPull(t *testin
 
 				if err != nil || got.Outcome != step.outcome {
 					t.Fatalf("the next pull = %+v, %v, want %s", got, err, step.outcome)
+				}
+				// The next pull counts the resolution that it makes, once, and counts nothing when the kill left the checkout
+				// resolved already.
+				if want := map[Outcome]int{Resolved: 1, Ahead: 0}[step.outcome]; c.counted(t) != want {
+					t.Errorf("the breaker was told of %d commits after the next pull, want %d", c.counted(t), want)
 				}
 				noted := step.noted[policy]
 				if noted == "" && got.Repaired != "" {
