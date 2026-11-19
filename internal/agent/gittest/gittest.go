@@ -169,6 +169,47 @@ func (f *Fixture) Publish(branch string, files map[string]string) string {
 	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
 }
 
+// PublishExecutable is Publish for files that are executable: they are written with the mode 0755, and the commit has
+// them as such.
+func (f *Fixture) PublishExecutable(branch string, files map[string]string) string {
+	f.T.Helper()
+	for name, content := range files {
+		path := filepath.Join(f.scratch, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			f.T.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			f.T.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o755); err != nil {
+			f.T.Fatal(err)
+		}
+	}
+	f.Plain(f.scratch, "add", "-A")
+	f.Plain(f.scratch, "commit", "-q", "--allow-empty", "-m", "executable")
+	f.Plain(f.scratch, "push", "-q", "--force", f.Bare, "HEAD:refs/heads/"+branch)
+	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
+}
+
+// PublishRaw commits the files with exactly the bytes given, whatever the attributes of the scratch repository say: they are
+// made into blobs with no conversion and put in the index by name, so that a file with both kinds of line ending is in the
+// repository with both, as one that was committed before an attribute was set. It is for a test that publishes nothing else
+// after it, because the scratch repository's own files are not kept in step with the index.
+func (f *Fixture) PublishRaw(branch string, files map[string]string) string {
+	f.T.Helper()
+	aside := filepath.Join(f.root, "raw")
+	for name, content := range files {
+		if err := os.WriteFile(aside, []byte(content), 0o644); err != nil {
+			f.T.Fatal(err)
+		}
+		blob := strings.TrimSpace(f.Plain(f.scratch, "hash-object", "-w", "--no-filters", aside))
+		f.Plain(f.scratch, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+name)
+	}
+	f.Plain(f.scratch, "commit", "-q", "--allow-empty", "-m", "raw")
+	f.Plain(f.scratch, "push", "-q", "--force", f.Bare, "HEAD:refs/heads/"+branch)
+	return strings.TrimSpace(f.Plain(f.scratch, "rev-parse", "HEAD"))
+}
+
 // PublishLink commits a link in the scratch repository, with the target, and pushes it as Publish does.
 func (f *Fixture) PublishLink(branch, name, target string) string {
 	f.T.Helper()

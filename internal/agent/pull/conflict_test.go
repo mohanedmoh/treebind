@@ -457,25 +457,34 @@ func TestAModeChangeAndAnEditOfTheSameFileAreOneConflictAndTheWinnerTakesBoth(t 
 	}
 }
 
-func TestACheckoutAndARepositoryThatMadeTheSameChangeAreResolvedWithNothingToOverride(t *testing.T) {
+func TestACheckoutAndARepositoryThatMadeTheSameChangeAreResolvedWithNothingToOverrideAndNoCommit(t *testing.T) {
+	// Both sides hold the same tree, so there is nothing for a policy to decide: the checkout moves to the tip of the
+	// repository, with either policy, and the commit of the checkout is kept in the ref for the local commits. Nothing is
+	// made that the repository would have to take, which is what ends a loop with a host that rewrites what it is sent.
 	for _, policy := range []Policy{FollowRemote, FollowLocal} {
 		t.Run(string(policy), func(t *testing.T) {
 			w := newWorld(t, subPath, resolving(policy))
 			local := w.local(t, map[string]string{fileA: aChanged})
 			tip := w.f.Publish(branchMain, map[string]string{fileA: aChanged})
+			remote := w.remoteRefs(t)
 
 			got, err := w.pull(t)
 
-			if err != nil || got.Outcome != Resolved || got.Resolution.Overridden != 0 || got.Resolution.Carried != 0 {
-				t.Fatalf("result = %+v, %v, want Resolved with nothing overridden and nothing carried", got, err)
+			if err != nil || got.Outcome != Resolved || got.To != tip {
+				t.Fatalf("result = %+v, %v, want Resolved, at the tip %s", got, err, tip)
+			}
+			wantResolution(t, got, Resolution{Policy: policy, LocalCommits: 1, RemoteCommits: 1, Local: firstLocal})
+			if w.head() != tip {
+				t.Errorf("HEAD = %s, want the tip %s: the trees are the same, so no commit is made", w.head(), tip)
 			}
 			wantFiles(t, w, map[string]string{fileA: aChanged})
-			if policy == FollowRemote {
-				if w.head() != tip {
-					t.Errorf("HEAD = %s, want the tip %s: there is nothing of the checkout's to put on it", w.head(), tip)
-				}
-			} else if got, want := fmt.Sprint(w.parents(t, w.head())), fmt.Sprint([]string{local, tip}); got != want {
-				t.Errorf("the parents are %s, want %s: the history of the repository has to be in the history of the branch", got, want)
+			if dirty := w.dirty(t); dirty != "" {
+				t.Errorf("the checkout has changes after the resolution: %s", dirty)
+			}
+			w.wantLocalRefs(t, ref{firstLocal, local})
+			w.wantRemote(t, remote)
+			if next, err := w.pull(t); err != nil || next.Outcome != UpToDate {
+				t.Errorf("the next pull = %+v, %v, want UpToDate: the checkout has nothing the repository lacks", next, err)
 			}
 		})
 	}
