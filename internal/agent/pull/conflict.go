@@ -36,7 +36,8 @@ const (
 	// application changed put on it, and the commits that the checkout had are kept under a ref of their own.
 	FollowRemote Policy = config.ConflictFollowRemote
 	// FollowLocal makes the volume win: the checkout is moved to a merge of its own commits and the repository's, in
-	// which a file that both changed has the version of the volume, so that the next push is a fast-forward.
+	// which a file that both changed has the version of the volume, so that the next push is a fast-forward. When both
+	// hold the same files there is nothing to merge, and it is moved to the repository's tip as followRemote is.
 	FollowLocal Policy = config.ConflictFollowLocal
 )
 
@@ -74,9 +75,10 @@ type Resolution struct {
 	// followRemote they are in the ref that keeps the commits of the checkout.
 	Dropped []string
 	// Commit is the commit that the resolution made. It is empty when the checkout was moved to the repository's tip,
-	// because the application had changed nothing that the repository did not.
+	// because the application had changed nothing that the repository did not, or because both sides hold the same files.
 	Commit string
-	// Local is the ref that keeps the commits of the checkout. It is set with followRemote.
+	// Local is the ref that keeps the commits of the checkout. It is set when the checkout was moved to the repository's tip:
+	// always with followRemote, and with followLocal when both sides hold the same files.
 	Local string
 }
 
@@ -120,15 +122,19 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 			return Result{}, p.fail(ReasonRefused, "the lock could not be checked: %v", err)
 		}
 	}
+	// The checkout is moved to the tip, and not to a descendant of itself, when the repository wins and when both sides hold
+	// the same files: a merge of two sides with the same tree is a commit that the repository would have to take for nothing,
+	// and a host that rewrites what it is sent gives it back as another, so that the next pull makes one again (R-18).
+	toTip := p.o.Policy == FollowRemote || found.sameTree
 	var refs []recoveryRef
-	if p.o.Policy == FollowRemote {
+	if toTip {
 		if res.Local, refs, err = p.keepRef(ctx, localPrefix, "local", head, "the resolution"); err != nil {
 			return Result{}, err
 		}
 	}
 
 	target := tip
-	if p.o.Policy == FollowLocal || len(found.carry) > 0 {
+	if (p.o.Policy == FollowLocal && !found.sameTree) || len(found.carry) > 0 {
 		commit, dropped, err := p.commitOf(ctx, head, tip, winner, found.carry, res)
 		if err != nil {
 			return Result{}, err
@@ -142,9 +148,9 @@ func (p *Puller) resolveConflict(ctx context.Context, head, tip string, ours, th
 	}
 	res.Carried = len(found.carry) - len(res.Dropped)
 
-	// followRemote moves the checkout to a commit that is not a descendant of it, with a checkout that is refused for the same
+	// A move to the tip is to a commit that is not a descendant of the checkout's, with a checkout that is refused for the same
 	// things as a merge is. followLocal's commit is a descendant of the checkout's, and is a fast-forward.
-	result, err := p.apply(ctx, head, target, move{switching: p.o.Policy == FollowRemote})
+	result, err := p.apply(ctx, head, target, move{switching: toTip})
 	// The old refs go whether the move was made or not: a resolution that is refused at every interval, while the
 	// application commits, makes a ref at each try, and none would go. Not after the lock was refused, which is a write.
 	var warning string
@@ -167,6 +173,9 @@ type comparison struct {
 	carry []touch
 	// overridden is how many files both sides changed differently.
 	overridden int
+	// sameTree says that the checkout and the repository hold the same files, as one tree: there is nothing that a policy
+	// has to decide, and no commit to make, whichever side wins.
+	sameTree bool
 }
 
 // compare lists what each side changed since the commit that the two share, which is the empty tree for histories that
@@ -195,7 +204,11 @@ func (p *Puller) compare(ctx context.Context, head, tip, winner, loser string) (
 	for _, change := range won {
 		byPath[change.path] = change
 	}
-	var found comparison
+	same, err := p.sameTree(ctx, head, tip)
+	if err != nil {
+		return comparison{}, err
+	}
+	found := comparison{sameTree: same}
 	for _, change := range lost {
 		other, both := byPath[change.path]
 		switch {
@@ -206,6 +219,19 @@ func (p *Puller) compare(ctx context.Context, head, tip, winner, loser string) (
 		}
 	}
 	return found, nil
+}
+
+// sameTree says whether two commits have the same tree, which is the id of all of their files and modes. It only reads.
+func (p *Puller) sameTree(ctx context.Context, a, b string) (bool, error) {
+	out, err := p.git.Run(ctx, "rev-parse", a+"^{tree}", b+"^{tree}")
+	if err != nil {
+		return false, p.fail(ReasonPullFailed, "the trees of the checkout and of the repository cannot be compared: %v", err)
+	}
+	trees := strings.Fields(string(out.Stdout))
+	if len(trees) != 2 {
+		return false, p.fail(ReasonPullFailed, "the trees of the checkout and of the repository cannot be compared: Git gave %d ids", len(trees))
+	}
+	return trees[0] == trees[1], nil
 }
 
 // commitOf makes the commit that the checkout is moved to: the tree of the winner with the changes of the loser that
