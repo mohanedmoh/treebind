@@ -338,8 +338,8 @@ func TestTheAgentIsToldTheLimitOfCommitsOnlyWhenItIsNotTheDefault(t *testing.T) 
 	// changed, and its pod is not replaced (docs/adr/0035).
 	defaulted := int32(agentconfig.DefaultCommitMaxPerHour)
 	for name, c := range map[string]*treebindv1alpha1.CommitSpec{
-		"no commit section":    nil,
-		"an empty one":         {},
+		"no commit section":      nil,
+		"an empty one":           {},
 		"the default, filled in": {MaxPerHour: &defaulted},
 	} {
 		t.Run(name, func(t *testing.T) {
