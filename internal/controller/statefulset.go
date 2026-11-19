@@ -436,6 +436,12 @@ func commitEnv(commit *treebindv1alpha1.CommitSpec) []corev1.EnvVar {
 		}
 		env = append(env, corev1.EnvVar{Name: setting.name, Value: strings.ReplaceAll(setting.value, "$", "$$")})
 	}
+	// The limit of commits in an hour is a number, and is left out when it is the default of the CRD and of the agent, as the
+	// conflict policy is, so that the pod template of a Treebind that has the default filled in by the API server is the one
+	// that it had (docs/adr/0035).
+	if limit := commit.MaxPerHour; limit != nil && int(*limit) != agentconfig.DefaultCommitMaxPerHour {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvCommitMaxPerHour, Value: strconv.FormatInt(int64(*limit), 10)})
+	}
 	return env
 }
 

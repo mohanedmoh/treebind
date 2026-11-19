@@ -33,6 +33,7 @@ spec:
     authorName: treebind
     authorEmail: treebind@example.org
     messageTemplate: "treebind: sync {{ .Count }} file(s)"
+    maxPerHour: 60
   paths:
     exclude:
       - "*.tmp"

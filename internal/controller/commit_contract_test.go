@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,6 +28,9 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
@@ -325,5 +330,124 @@ var _ = Describe("spec.commit", func() {
 		}
 		Expect(valid(ctx, treebindv1alpha1.CommitSpec{MessageTemplate: pathsNUL})).To(MatchError(ContainSubstring("messageTemplate must not contain a NUL")))
 		Expect(valid(ctx, treebindv1alpha1.CommitSpec{MessageTemplate: strings.Repeat("x", 4097)})).To(MatchError(ContainSubstring("4096")))
+	})
+})
+
+func TestTheAgentIsToldTheLimitOfCommitsOnlyWhenItIsNotTheDefault(t *testing.T) {
+	// 60 is the default of the CRD and of the agent, so it is not passed: a pod template that never had the variable is not
+	// changed, and its pod is not replaced (docs/adr/0035).
+	defaulted := int32(agentconfig.DefaultCommitMaxPerHour)
+	for name, c := range map[string]*treebindv1alpha1.CommitSpec{
+		"no commit section":      nil,
+		"an empty one":           {},
+		"the default, filled in": {MaxPerHour: &defaulted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			treebind := newTreebind(testTreebindName)
+			treebind.Spec.Commit = c
+
+			config, env, err := agentConfigOf(t, treebind)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value, set := env[agentconfig.EnvCommitMaxPerHour]; set || config.CommitMaxPerHour != agentconfig.DefaultCommitMaxPerHour {
+				t.Errorf("%s is %q and the agent reads %d, want the variable left out and the default", agentconfig.EnvCommitMaxPerHour, value, config.CommitMaxPerHour)
+			}
+		})
+	}
+
+	limit := int32(12)
+	treebind := newTreebind(testTreebindName)
+	treebind.Spec.Commit = &treebindv1alpha1.CommitSpec{MaxPerHour: &limit}
+
+	config, env, err := agentConfigOf(t, treebind)
+
+	if err != nil {
+		t.Fatalf("the agent refuses the environment of its own pod: %v", err)
+	}
+	// The name is written out, because it is what ADR 0035 and the page about the loops tell a person.
+	if env["TREEBIND_COMMIT_MAX_PER_HOUR"] != "12" || config.CommitMaxPerHour != 12 {
+		t.Errorf("TREEBIND_COMMIT_MAX_PER_HOUR = %q and the agent reads %d, want 12 on both sides", env["TREEBIND_COMMIT_MAX_PER_HOUR"], config.CommitMaxPerHour)
+	}
+}
+
+func TestTheAgentAcceptsEveryLimitOfCommitsTheOperatorCanPutInThePod(t *testing.T) {
+	for _, limit := range []int32{agentconfig.MinCommitMaxPerHour, 2, 59, 60, 61, 1000, agentconfig.MaxCommitMaxPerHour} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			treebind := newTreebind(testTreebindName)
+			treebind.Spec.Commit = &treebindv1alpha1.CommitSpec{MaxPerHour: &limit}
+
+			config, _, err := agentConfigOf(t, treebind)
+
+			if err != nil || config.CommitMaxPerHour != int(limit) {
+				t.Errorf("the agent reads %d, %v, want %d and no refusal", config.CommitMaxPerHour, err, limit)
+			}
+		})
+	}
+}
+
+var _ = Describe("commit.maxPerHour", func() {
+	It("is accepted by the API server exactly when the agent accepts it", func() {
+		ctx := context.Background()
+		var accepted, refused int
+		for i, limit := range []int64{
+			math.MinInt64, -1 << 40, -1, 0, 1, 2, 59, 60, 61, 9999, 10000, 10001, 1 << 20, math.MaxInt32, math.MaxInt32 + 1, math.MaxInt64,
+		} {
+			object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind(fmt.Sprintf("max-per-hour-%d", i)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedField(object, limit, "spec", "commit", "maxPerHour")).To(Succeed())
+			treebind := &unstructured.Unstructured{Object: object}
+			treebind.SetGroupVersionKind(treebindv1alpha1.GroupVersion.WithKind("Treebind"))
+
+			createErr := k8sClient.Create(ctx, treebind)
+
+			// The operator writes the number as Go does, which is what a value that the API server took reaches the agent as.
+			_, agentErr := agentconfig.CheckCommitMaxPerHour(strconv.FormatInt(limit, 10))
+			if (createErr == nil) != (agentErr == nil) {
+				Fail(fmt.Sprintf("maxPerHour %d: the API server accepts it = %v (%v), the agent accepts it = %v (%v): "+
+					"a value that the API server takes and the agent refuses leaves a sync pod that exits at start for ever",
+					limit, createErr == nil, createErr, agentErr == nil, agentErr))
+			}
+			if createErr == nil {
+				accepted++
+				Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
+			} else {
+				refused++
+			}
+		}
+		// The list has to hold both, or the check above says nothing.
+		Expect(accepted).To(BeNumerically(">", 4))
+		Expect(refused).To(BeNumerically(">", 4))
+	})
+
+	It("is refused by the API server when it is not a whole number", func() {
+		ctx := context.Background()
+		for i, value := range []any{"60", 1.5, true, []any{int64(1)}, map[string]any{"n": int64(1)}} {
+			object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind(fmt.Sprintf("max-per-hour-type-%d", i)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedField(object, value, "spec", "commit", "maxPerHour")).To(Succeed())
+			treebind := &unstructured.Unstructured{Object: object}
+			treebind.SetGroupVersionKind(treebindv1alpha1.GroupVersion.WithKind("Treebind"))
+
+			Expect(k8sClient.Create(ctx, treebind)).NotTo(Succeed(), "%#v", value)
+		}
+	})
+
+	It("is filled in with the default of the agent when the commit section is there, and not when it is not", func() {
+		ctx := context.Background()
+		withSection := newTreebind("max-per-hour-default")
+		withSection.Spec.Commit = &treebindv1alpha1.CommitSpec{MessageTemplate: commitTemplate}
+		Expect(k8sClient.Create(ctx, withSection)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, withSection)).To(Succeed()) })
+		without := newTreebind("max-per-hour-no-section")
+		Expect(k8sClient.Create(ctx, without)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, without)).To(Succeed()) })
+
+		var got treebindv1alpha1.Treebind
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: withSection.Namespace, Name: withSection.Name}, &got)).To(Succeed())
+		Expect(got.Spec.Commit.MaxPerHour).To(HaveValue(BeEquivalentTo(agentconfig.DefaultCommitMaxPerHour)))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: without.Namespace, Name: without.Name}, &got)).To(Succeed())
+		Expect(got.Spec.Commit).To(BeNil())
 	})
 })

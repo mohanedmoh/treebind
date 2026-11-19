@@ -127,6 +127,8 @@ var _ = Describe("Treebind schema", func() {
 			AuthorName:      "treebind",
 			AuthorEmail:     "treebind@example.org",
 			MessageTemplate: "treebind: sync {{ .Count }} file(s)",
+			// The API server fills in the default when it is left out, so the object comes back as it was written only with it.
+			MaxPerHour: new(int32(agentconfig.DefaultCommitMaxPerHour)),
 		}
 		tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Exclude: []string{"*.tmp", "*.swp"}}
 		tb.Spec.Placement.Mode = treebindv1alpha1.PlacementModeStandalone
