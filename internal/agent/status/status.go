@@ -61,6 +61,9 @@ type Report struct {
 	Treebind Treebind `json:"treebind"`
 	// StartedAt is when the agent process started.
 	StartedAt time.Time `json:"startedAt"`
+	// TemplateHash is the hash of the pod template that the agent runs in, as the operator gave it to the agent, which says
+	// which spec the report is of. It is absent for an agent that was started without one.
+	TemplateHash string `json:"templateHash,omitempty"`
 	// Time is when the report was made, by the agent's clock.
 	Time time.Time `json:"time"`
 	// CheckedAt is when the checks last finished. It is absent until they first
@@ -69,6 +72,32 @@ type Report struct {
 	CheckedAt time.Time `json:"checkedAt,omitzero"`
 	// Checks are the results of the preflight checks, in the order they ran.
 	Checks []Check `json:"checks"`
+	// LastSynced is the commit at which the agent last saw the checkout and the branch of the repository agree, and when
+	// and by which step it first saw them agree at that commit: a step that finds them agreeing at the same commit again
+	// changes nothing. It is absent until a step has, since the agent started, and a step that fails afterwards leaves it as
+	// it is: a failure says nothing about the commit that the two last agreed on.
+	LastSynced LastSynced `json:"lastSynced,omitzero"`
+}
+
+// The steps that a LastSynced is by. They are API in the sense of docs/adr/0004: the operator matches on them.
+const (
+	// ByPull is a pull that found the checkout at the tip of the branch, or brought it there.
+	ByPull = "Pull"
+	// ByPush is a push that brought the branch to the commit of the checkout.
+	ByPush = "Push"
+)
+
+// LastSynced is the step that first saw the checkout and the branch of the repository at the same commit, the last that
+// they were seen to agree at.
+type LastSynced struct {
+	// Commit is the full id of the commit of the repository. For a directory of the repository (spec.repository.path) it
+	// is the repository's commit whose directory the checkout holds, and never the checkout's own snapshot of it, which
+	// the repository does not have (docs/adr/0036).
+	Commit string `json:"commit"`
+	// Time is when the step ended, by the agent's clock: when the agent first saw the two agree at Commit.
+	Time time.Time `json:"time"`
+	// By is the step: ByPull or ByPush.
+	By string `json:"by"`
 }
 
 // Treebind is the namespace and name of a Treebind.

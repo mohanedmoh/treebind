@@ -292,6 +292,7 @@ func (s *scans) pushStep(ctx context.Context, now time.Time, committed bool) {
 		return
 	}
 	checked, reason := pushResult(result, err)
+	s.a.agreedByPush(s.p, result, err)
 	s.reportPush(checked)
 	if err != nil {
 		if backsOffPush(reason) {

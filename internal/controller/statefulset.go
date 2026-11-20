@@ -200,7 +200,27 @@ func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	}, nil
 }
 
+// desiredPodTemplate returns the pod template of the sync pod, with the hash of the rest of the template as the last
+// variable of the agent. The agent reports it, which is how the operator tells which template a report is of. The
+// variable is a function of the rest of the template, so the template changes exactly when it did without the variable,
+// and once more when the operator first sets it: every sync pod is replaced at that upgrade, and that is meant.
 func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings) (corev1.PodTemplateSpec, error) {
+	template, err := podTemplateWithoutHash(treebind, agent)
+	if err != nil {
+		return corev1.PodTemplateSpec{}, err
+	}
+	hash, err := templateHash(template)
+	if err != nil {
+		return corev1.PodTemplateSpec{}, err
+	}
+	container := &template.Spec.Containers[0]
+	container.Env = append(container.Env, corev1.EnvVar{Name: agentconfig.EnvTemplateHash, Value: hash})
+	return template, nil
+}
+
+// podTemplateWithoutHash returns the pod template that the spec and the settings of the operator say, without the variable
+// that holds its hash.
+func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSettings) (corev1.PodTemplateSpec, error) {
 	mountPath := treebind.Spec.Target.MountPath
 	if mountPath == "" {
 		mountPath = defaultMountPath
@@ -455,7 +475,8 @@ func commitEnv(commit *treebindv1alpha1.CommitSpec) []corev1.EnvVar {
 // templateHash returns the SHA-256 of the JSON encoding of the pod template.
 // The API server fills defaults into the template of the stored StatefulSet,
 // so comparing the stored template with the desired one would always differ.
-// Comparing hashes of what the operator wrote does not.
+// Comparing hashes of what the operator wrote does not. The agent is given the hash of the template without the
+// variable that carries it, and the annotation holds the hash of the template with it.
 func templateHash(template corev1.PodTemplateSpec) (string, error) {
 	encoded, err := json.Marshal(template)
 	if err != nil {

@@ -187,6 +187,10 @@ type agent struct {
 type checked struct {
 	at     time.Time
 	checks []status.Check
+	// synced is the commit at which the checkout and the branch were last seen to agree, with when and by which step they
+	// were first seen to, which is published with the checks so that a report never pairs a check with an agreement of
+	// another moment.
+	synced status.LastSynced
 }
 
 // Run serves the status endpoint and checks the volume until ctx is done, and then
@@ -297,8 +301,10 @@ func (a *agent) report() status.Report {
 		StartedAt: a.startedAt,
 		Checks:    []status.Check{},
 	}
+	// Reported as the operator gave it: the agent does not read it, and the operator is the one that compares it.
+	report.TemplateHash = a.Config.TemplateHash
 	if latest := a.checks.Load(); latest != nil {
-		report.CheckedAt, report.Checks = latest.at, latest.checks
+		report.CheckedAt, report.Checks, report.LastSynced = latest.at, latest.checks, latest.synced
 	}
 	return report
 }
@@ -323,6 +329,9 @@ type progress struct {
 	// conflict is what the last resolution of a conflict did, or that it could not be made, which only a Treebind that
 	// syncs in both directions has.
 	conflict *preflight.Result
+	// synced is the step that first saw the checkout and the branch at the commit that they last agreed on, and is zero
+	// until one has. agreed says which steps count.
+	synced status.LastSynced
 }
 
 // prepare checks the volume, and once it is in order takes the writer lock, which is held
@@ -468,7 +477,7 @@ func (a *agent) publish(p *progress) {
 			results = append(results, *step)
 		}
 	}
-	a.checks.Store(&checked{at: a.Now().UTC(), checks: status.ChecksFrom(results)})
+	a.checks.Store(&checked{at: a.Now().UTC(), checks: status.ChecksFrom(results), synced: p.synced})
 }
 
 // checkedOut is what the checkout was asked for and what it made, which the pulls that follow need.
@@ -585,11 +594,15 @@ func shortOf(id string) string {
 
 // shownOf is the commit that a check names: for a directory of the repository the commit of the repository, which a person can look
 // up, and for the whole repository, or when the pull or the push did not say, the commit of the checkout (docs/adr/0036).
-func shownOf(source, id string) string {
+func shownOf(source, id string) string { return shortOf(fullOf(source, id)) }
+
+// fullOf is the commit that shownOf shows, in full, which is the one that the report says the checkout and the branch last agreed
+// on, so that the two never name different commits.
+func fullOf(source, id string) string {
 	if source != "" {
-		return shortOf(source)
+		return source
 	}
-	return shortOf(id)
+	return id
 }
 
 // failedCheckout is the failed result for an error of the checkout: its own reason when
