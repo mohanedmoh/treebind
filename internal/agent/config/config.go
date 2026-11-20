@@ -49,6 +49,9 @@ const (
 	// branch is not set when the repository's default branch is.
 	EnvRepoURL    = "TREEBIND_REPO_URL"
 	EnvRepoBranch = "TREEBIND_REPO_BRANCH"
+	// EnvRepoPath is the directory of the repository that is the synced directory: spec.repository.path (docs/adr/0036). It is not
+	// set when the whole repository is, so that a pod template that never had it does not change.
+	EnvRepoPath = "TREEBIND_REPO_PATH"
 	// EnvSSHKeyFile and EnvKnownHostsFile are the files, in the pod, of the SSH key and of the
 	// host keys that are trusted. They are paths and never the content (NFR-3), and they are
 	// set when the Treebind names the Secret and the ConfigMap they come from.
@@ -147,6 +150,9 @@ type Config struct {
 	// RepoURL is the address of the repository, and RepoBranch the branch to follow, which
 	// is empty for the default branch of the repository.
 	RepoURL, RepoBranch string
+	// RepoPath is the directory of the repository whose files are the synced directory, with its files at the root of it. It is
+	// empty when the whole repository is.
+	RepoPath string
 	// SSHKeyFile and KnownHostsFile are the files of the SSH key and of the trusted host
 	// keys. Both are set for an ssh:// repository. They are ignored for an https:// one.
 	SSHKeyFile, KnownHostsFile string
@@ -204,9 +210,11 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		MountPath: orDefault(get(EnvMountPath), DefaultMountPath),
 		// Not trimmed: the CRD accepts a path with spaces around it, the operator passes
 		// it on as it is, and it names the directory the user meant.
-		SubPath:        getenv(EnvSubPath),
-		RepoURL:        get(EnvRepoURL),
-		RepoBranch:     get(EnvRepoBranch),
+		SubPath:    getenv(EnvSubPath),
+		RepoURL:    get(EnvRepoURL),
+		RepoBranch: get(EnvRepoBranch),
+		// Not trimmed, as the sub path is not: the CRD accepts a path with spaces around it, and the operator passes it as it is.
+		RepoPath:       getenv(EnvRepoPath),
 		SSHKeyFile:     get(EnvSSHKeyFile),
 		KnownHostsFile: get(EnvKnownHostsFile),
 		SyncInterval:   interval,
@@ -285,6 +293,9 @@ func (c Config) validate() error {
 	}
 	if err := CheckBranch(c.RepoBranch); err != nil {
 		problems = append(problems, fmt.Errorf("%s %w", EnvRepoBranch, err))
+	}
+	if err := CheckRepoPath(c.RepoPath); err != nil {
+		problems = append(problems, fmt.Errorf("%s %w", EnvRepoPath, err))
 	}
 	problems = append(problems, c.checkRepository()...)
 	if !cleanAbsolute(c.StatusKeysFile) {
