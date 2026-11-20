@@ -136,6 +136,10 @@ type Error struct {
 	// Repaired says what the pull put right before it failed, such as an update that was cut off, in words for the
 	// check. It is empty when there was nothing to put right.
 	Repaired string
+	// Conflict is set when the checkout and the repository each had commits that the other lacked, and the policy to
+	// resolve that could not be applied (docs/adr/0034). The reason is then the one of the update that failed, which is
+	// the same for an update that is no conflict, and this is what tells the two apart without reading the message.
+	Conflict bool
 }
 
 // Error returns the message.

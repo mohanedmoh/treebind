@@ -621,7 +621,9 @@ func TestAPullerWithoutAPolicyStillSaysDivergedAndWritesNothing(t *testing.T) {
 
 	_, err := w.pull(t)
 
-	wantReason(t, err, ReasonDiverged)
+	if got := errorOf(t, err, ReasonDiverged); got.Conflict {
+		t.Error("a pull with no conflict policy says that a resolution failed: it tried none")
+	}
 	if w.head() != local || gittest.Read(t, w.l, fileA) != mine || len(w.refsUnder(t, "refs/treebind/")) != 0 || !w.indexIsClean() {
 		t.Error("a pull with no conflict policy changed the checkout, the refs or the index")
 	}

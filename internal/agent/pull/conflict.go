@@ -43,8 +43,8 @@ const (
 )
 
 // ReasonConflictResolved is the reason of the check that says that a conflict was resolved. A resolution that could not be
-// made is not one: it is a failed pull, with the reason of the update, and a message that says the conflict was not resolved
-// (docs/adr/0034). It is API in the sense of docs/adr/0004.
+// made is not one: it is a failed pull, with the reason of the update, a message that says the conflict was not
+// resolved, and Conflict set in its *Error (docs/adr/0034). It is API in the sense of docs/adr/0004.
 const ReasonConflictResolved = "ConflictResolved"
 
 const (
@@ -91,6 +91,7 @@ type Resolution struct {
 func (p *Puller) resolve(ctx context.Context, head, tip string, ours, theirs int) (Result, error) {
 	result, err := p.resolveConflict(ctx, head, tip, ours, theirs)
 	if failure, ok := errors.AsType[*Error](err); ok {
+		failure.Conflict = true
 		failure.Message = fmt.Sprintf("the conflict between the checkout and the branch %s of the repository was not resolved: %s",
 			p.o.Branch, failure.Message)
 	}

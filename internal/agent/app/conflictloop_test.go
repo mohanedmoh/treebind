@@ -320,11 +320,12 @@ func TestAResolutionPushesAtTheNextScanEvenWhenAFailedPushIsStillWaiting(t *test
 	}
 }
 
-func TestAResolutionThatFailsIsAFailedPullWithItsReasonAndTheConflictCheckIsNotChanged(t *testing.T) {
+func TestAResolutionThatFailsIsAFailedPullAndAFailedConflictCheckWithTheSameReason(t *testing.T) {
 	w := newPushWorld()
 	puller := &scriptedPuller{answer: func(int) (pull.Result, error) {
-		return pull.Result{}, &pull.Error{Reason: pull.ReasonBlocked, Message: "the conflict between the checkout and the repository was not resolved: " +
-			"the checkout was not updated, because 1 file(s) have a local edit"}
+		return pull.Result{}, &pull.Error{Reason: pull.ReasonBlocked, Conflict: true,
+			Message: "the conflict between the checkout and the repository was not resolved: " +
+				"the checkout was not updated, because 1 file(s) have a local edit"}
 	}}
 	r := start(t, w.with(func(o *Options) { o.NewPuller = func(pull.Options) (Puller, error) { return puller, nil } }))
 	w.scanner.awaitBegun(t)
@@ -332,18 +333,19 @@ func TestAResolutionThatFailsIsAFailedPullWithItsReasonAndTheConflictCheckIsNotC
 		w.next(t, scanAnswer{})
 	}
 
-	eventually(t, "the Pull check to fail", func() bool {
-		got, _ := pullCheck(t, r)
+	eventually(t, "the Conflict check to fail", func() bool {
+		got, _ := conflictCheck(t, r)
 		return got.Outcome == outcomeFailed
 	})
 
 	got, _ := pullCheck(t, r)
-	if got.Reason != pull.ReasonBlocked || !strings.Contains(got.Message, "was not resolved") {
-		t.Errorf("pull = %+v, want Blocked, saying that the conflict was not resolved", got)
+	if got.Outcome != outcomeFailed || got.Reason != pull.ReasonBlocked || !strings.Contains(got.Message, "was not resolved") {
+		t.Errorf("pull = %+v, want it failed with Blocked, saying that the conflict was not resolved", got)
 	}
-	if conflict, _ := conflictCheck(t, r); conflict.Outcome != outcomeSkipped || conflict.Message != notResolved ||
-		strings.Contains(conflict.Message, "gone different ways") {
-		t.Errorf("conflict = %+v, want it not tried, and not saying that the sides have not gone different ways: they have, and the resolution fails", conflict)
+	conflict, _ := conflictCheck(t, r)
+	if conflict.Reason != pull.ReasonBlocked || !strings.Contains(conflict.Message, "was not resolved") ||
+		!strings.Contains(conflict.Message, "1 file(s) have a local edit") {
+		t.Errorf("conflict = %+v, want it failed with the reason and the words of the update", conflict)
 	}
 }
 
@@ -455,27 +457,107 @@ func TestAResolutionThatMadeNoCommitLeavesTheWaitOfAFailedPushAsItWas(t *testing
 	}
 }
 
-func TestAPullThatFailsBeforeAndAfterAConflictLeavesTheConflictCheckSayingOnlyThatNothingWasResolved(t *testing.T) {
-	w := newPushWorld()
-	puller := &scriptedPuller{answer: func(n int) (pull.Result, error) {
-		if n == 1 {
-			return pull.Result{}, &pull.Error{Reason: pull.ReasonDiverged, Message: "the checkout and the branch main of the repository have gone different ways"}
-		}
-		return pull.Result{}, &pull.Error{Reason: pull.ReasonBlocked, Message: "the conflict between the checkout and the branch main of the repository was not resolved: a file has a local edit"}
-	}}
-	r := start(t, w.with(func(o *Options) { o.NewPuller = func(pull.Options) (Puller, error) { return puller, nil } }))
-	w.scanner.awaitBegun(t)
+// bidirectional starts an agent that syncs in both directions, with the pulls that the test answers one at a time. It
+// has no scans, which a resolution does not need to be reported.
+func bidirectional(t *testing.T, direction string) (*running, *fakePuller) {
+	t.Helper()
+	f := newFakePuller()
+	change, _ := withPuller(f, &loopClock{})
+	r := start(t, func(o *Options) {
+		change(o)
+		o.Config.SyncDirection = direction
+	})
+	f.awaitBegun(t)
+	return r, f
+}
 
-	for _, calls := range []int32{1, 2} {
-		for puller.calls.Load() < calls {
-			w.next(t, scanAnswer{})
+// failedResolution is a pull that found a conflict and could not resolve it, for the reason of the update that it tried.
+func failedResolution(reason, message string) answer {
+	return answer{err: &pull.Error{Reason: reason, Message: message, Conflict: true}}
+}
+
+func TestTheConflictCheckIsFailedUntilAPullPassesWithNoConflictAndThenGoesBackToTheLastResolution(t *testing.T) {
+	r, f := bidirectional(t, config.DirectionBidirectional)
+	const (
+		blocked  = "the conflict between the checkout and the branch main of the repository was not resolved: 2 file(s) have a local edit"
+		held     = "the conflict between the checkout and the branch main of the repository was not resolved: 20 commits in the last hour"
+		notFound = "the checkout was not updated, because a file that the update changes has a local edit"
+	)
+	want := func(when, outcome, reason, message string) {
+		t.Helper()
+		got, ok := conflictCheck(t, r)
+		if !ok || got.Outcome != outcome || got.Reason != reason || got.Message != message {
+			t.Errorf("%s: conflict = %+v, want %s, %q and %q", when, got, outcome, reason, message)
 		}
-		eventually(t, "the Pull check to fail", func() bool {
-			got, _ := pullCheck(t, r)
-			return got.Outcome == outcomeFailed
-		})
-		if got, _ := conflictCheck(t, r); got.Message != notResolved {
-			t.Errorf("after the pull %d the conflict message = %q, want %q", calls, got.Message, notResolved)
+	}
+	want("before the first pull", outcomeSkipped, "NotChecked", notResolved)
+
+	f.answer(t, upToDate(testCommit))
+	want("after a pull that found nothing, and no conflict was ever found", outcomeSkipped, "NotChecked", notResolved)
+
+	// The same reason as the next pull, with no conflict: what is Blocked is a file in the way of an update, and the
+	// Conflict check is about a resolution that could not be made.
+	f.answer(t, failedPull(pull.ReasonBlocked, notFound))
+	want("after an update that is no conflict was blocked", outcomeSkipped, "NotChecked", notResolved)
+
+	f.answer(t, failedResolution(pull.ReasonBlocked, blocked))
+	want("after a conflict that was blocked", outcomeFailed, pull.ReasonBlocked, blocked)
+	if got, _ := pullCheck(t, r); got.Outcome != outcomeFailed || got.Reason != pull.ReasonBlocked {
+		t.Errorf("pull = %+v, want it failed with Blocked as well", got)
+	}
+
+	// A pull that fails for another cause says nothing of the conflict.
+	f.answer(t, failedPull(pull.ReasonFetchFailed, noRoute))
+	want("after a pull that failed for another cause", outcomeFailed, pull.ReasonBlocked, blocked)
+
+	f.answer(t, failedResolution(pull.ReasonTooManyCommits, held))
+	want("after a conflict that the breaker held", outcomeFailed, pull.ReasonTooManyCommits, held)
+
+	f.answer(t, upToDate(testCommit))
+	want("after a pull that found no conflict, and none was ever resolved", outcomeSkipped, "NotChecked", notResolved)
+
+	f.answer(t, answer{result: resolution(pull.FollowRemote)})
+	resolved, _ := conflictCheck(t, r)
+	if resolved.Outcome != outcomePassed || resolved.Reason != pull.ReasonConflictResolved {
+		t.Fatalf("conflict = %+v after a resolution, want it passed, with ConflictResolved", resolved)
+	}
+
+	f.answer(t, failedResolution(pull.ReasonBlocked, blocked))
+	want("after a conflict that was blocked, with one resolved before", outcomeFailed, pull.ReasonBlocked, blocked)
+	if got := r.readyz(t); got != http.StatusOK {
+		t.Errorf("readyz = %d, want ready: a conflict that cannot be resolved is not a reason for the agent to be not ready", got)
+	}
+
+	f.answer(t, advanced(testCommit, otherCommit))
+	want("after a pull that found no conflict, with one resolved before", outcomePassed, pull.ReasonConflictResolved, resolved.Message)
+
+	f.answer(t, answer{result: resolution(pull.FollowLocal)})
+	if got, _ := conflictCheck(t, r); got.Outcome != outcomePassed || got.Reason != pull.ReasonConflictResolved ||
+		!strings.Contains(got.Message, string(pull.FollowLocal)) {
+		t.Errorf("conflict = %+v after a resolution that follows the failure, want the resolution of followLocal", got)
+	}
+	// The log has the resolutions, and the pull that went back to the first of them does not say again that it was made.
+	if n := r.logs.count("check=Conflict"); n != 2 {
+		t.Errorf("the log has %d lines for the Conflict check, want 2, one for each resolution:\n%s", n, r.logs.String())
+	}
+}
+
+func TestATreebindThatOnlyPullsKeepsNoConflictCheckWhateverAPullFindsAndWhateverItSays(t *testing.T) {
+	r, f := bidirectional(t, config.DirectionPull)
+
+	for _, answered := range []answer{
+		failedPull(pull.ReasonDiverged, "the checkout and the branch main of the repository have gone different ways"),
+		// A pull that only pulls has no policy, so none of its failures is one of a resolution. The check does not exist
+		// whatever the error says.
+		failedResolution(pull.ReasonBlocked, "the conflict between the checkout and the repository was not resolved: a file"),
+		upToDate(testCommit),
+	} {
+		f.answer(t, answered)
+		if got, found := conflictCheck(t, r); found {
+			t.Errorf("a Treebind that only pulls has the Conflict check %+v after %+v", got, answered)
 		}
+	}
+	if got, _ := pullCheck(t, r); got.Outcome != outcomePassed {
+		t.Errorf("pull = %+v, want it passed after the last pull", got)
 	}
 }
