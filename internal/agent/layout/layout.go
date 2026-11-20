@@ -33,6 +33,7 @@ import (
 	"path"
 
 	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/git"
 )
 
 // GitDirName is the Git directory inside the state directory, and LockDirName the directory of the
@@ -92,4 +93,15 @@ func (l Layout) NeverSynced() string {
 		return config.StateDirName
 	}
 	return ""
+}
+
+// RunnerOptions are the settings of the Runner for the checkout that the layout describes: g with the directories of the
+// layout, and a look at the Git directory before every command, so that Git is not run against one that holds something the
+// agent did not put there (docs/adr/0019). Every step that runs Git against the checkout makes its Runner from it.
+func (l Layout) RunnerOptions(g git.Options) git.Options {
+	g.GitDir = l.GitDir
+	g.WorkTree = l.WorkTree
+	g.AllowGitDirInWorkTree = l.GitDirInWorkTree
+	g.VerifyGitDir = true
+	return g
 }

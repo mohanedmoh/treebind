@@ -315,31 +315,50 @@ const StateDirName = ".treebind"
 // API server accepts and the agent refuses would leave a sync pod that exits at start
 // for ever.
 func CheckSubPath(subPath string) error {
-	if subPath == "" {
+	if err := checkRelativeDirectory(subPath, MaxSubPathLength); err != nil {
+		return err
+	}
+	if subPath != "" && strings.Split(subPath, "/")[0] == StateDirName {
+		return fmt.Errorf("must not start with '%s', which the agent keeps for its own state", StateDirName)
+	}
+	return nil
+}
+
+// MaxRepoPathLength is the most characters that repository.path of the CRD may have.
+const MaxRepoPathLength = 1024
+
+// CheckRepoPath returns the reason when a value cannot be the repository path of a Treebind, and nil when it can. An empty
+// one is the whole repository. The rules are the ones that the CRD puts on repository.path, and a test holds the two together,
+// for the reason given at CheckSubPath. They are the rules of the sub path except for the state directory: a directory of the
+// repository becomes the root of the synced directory (docs/adr/0036), so it cannot reach the state directory by its name.
+func CheckRepoPath(repoPath string) error {
+	return checkRelativeDirectory(repoPath, MaxRepoPathLength)
+}
+
+// checkRelativeDirectory is what a sub path and a repository path have in common: a directory, relative, in its shortest form,
+// that is not or does not reach the Git directory of a repository. An empty one says no directory.
+func checkRelativeDirectory(dir string, longest int) error {
+	if dir == "" {
 		return nil
 	}
 	switch {
-	case utf8.RuneCountInString(subPath) > MaxSubPathLength:
-		return fmt.Errorf("must be at most %d characters", MaxSubPathLength)
-	case strings.HasPrefix(subPath, "/"):
+	case utf8.RuneCountInString(dir) > longest:
+		return fmt.Errorf("must be at most %d characters", longest)
+	case strings.HasPrefix(dir, "/"):
 		return errors.New("must be relative")
-	case subPath == ".":
+	case dir == ".":
 		return errors.New("must not be '.'")
-	case strings.Contains(subPath, `\`):
+	case strings.Contains(dir, `\`):
 		return errors.New("must not contain a backslash")
-	case strings.Contains(subPath, "//"):
+	case strings.Contains(dir, "//"):
 		return errors.New("must not contain '//'")
-	case strings.HasSuffix(subPath, "/"):
+	case strings.HasSuffix(dir, "/"):
 		return errors.New("must not end with '/'")
 	}
-	segments := strings.Split(subPath, "/")
-	for _, segment := range segments {
+	for segment := range strings.SplitSeq(dir, "/") {
 		if segment == ".." || segment == "." || segment == ".git" {
 			return errors.New("must not contain a '..', '.' or '.git' segment")
 		}
-	}
-	if segments[0] == StateDirName {
-		return fmt.Errorf("must not start with '%s', which the agent keeps for its own state", StateDirName)
 	}
 	return nil
 }
