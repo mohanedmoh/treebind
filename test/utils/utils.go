@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
@@ -147,6 +149,41 @@ func LoadImageToKindClusterWithName(name string) error {
 	cmd := exec.Command(kindBinary, kindOptions...)
 	_, err := Run(cmd)
 	return err
+}
+
+// BuildAgentImage builds the sync agent image with ko, as `make dev` does, loads it into the kind cluster
+// and returns the reference that the cluster knows it by. ko needs no Dockerfile and no registry: with
+// KO_DOCKER_REPO=kind.local it puts the image straight into the nodes of the cluster that KIND_CLUSTER
+// names. It builds for the architecture of the machine, which is the one the cluster runs.
+func BuildAgentImage() (string, error) {
+	if _, err := Run(exec.Command("make", "ko")); err != nil {
+		return "", err
+	}
+	project, err := GetProjectDir()
+	if err != nil {
+		return "", err
+	}
+	cluster := defaultKindCluster
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
+		cluster = v
+	}
+	// Run gives the command an environment of its own, so the variables are put in front of ko.
+	cmd := exec.Command("env", "KO_DOCKER_REPO=kind.local", "KIND_CLUSTER_NAME="+cluster,
+		filepath.Join(project, "bin", "ko"), "build", "--base-import-paths",
+		"--platform=linux/"+runtime.GOARCH, "./cmd/agent")
+	output, err := Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	// ko writes what it does to standard error and the reference of the image to standard output, and Run gives both, so the
+	// reference is the last line that names an image of the repository that ko was told to publish to.
+	lines := GetNonEmptyLines(output)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if reference := strings.TrimSpace(lines[i]); strings.HasPrefix(reference, "kind.local/") {
+			return reference, nil
+		}
+	}
+	return "", fmt.Errorf("ko did not print the reference of the image: %q", output)
 }
 
 // GetNonEmptyLines converts given command output string into individual objects
