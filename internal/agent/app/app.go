@@ -297,6 +297,8 @@ func (a *agent) report() status.Report {
 		StartedAt: a.startedAt,
 		Checks:    []status.Check{},
 	}
+	// Reported as the operator gave it: the agent does not read it, and the operator is the one that compares it.
+	report.TemplateHash = a.Config.TemplateHash
 	if latest := a.checks.Load(); latest != nil {
 		report.CheckedAt, report.Checks = latest.at, latest.checks
 	}

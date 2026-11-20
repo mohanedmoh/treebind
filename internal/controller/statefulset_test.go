@@ -472,6 +472,12 @@ func TestTemplateHashFollowsTheCapOnDeletions(t *testing.T) {
 // the lists on, byte for byte, so that upgrading the operator replaces none of those sync pods
 // (#87). The hashes are those of commit 2eb611c. A change that alters them replaces every such pod,
 // and has to say so.
+//
+// The template is now given its own hash as a variable (#214), which replaces every sync pod once, so
+// the hash of the whole template, in the annotation, is no longer the one of that commit. The hash of
+// the rest of it is, and that is the value of the variable: the annotation that a StatefulSet of the
+// operator before has is the value that the new one gives the agent, and so it differs from the new
+// annotation and the template is rewritten, once.
 func TestATemplateWithoutListsIsTheOneOfTheOperatorBefore(t *testing.T) {
 	full := func() *treebindv1alpha1.Treebind {
 		treebind := newTreebind(testTreebindName)
@@ -498,10 +504,16 @@ func TestATemplateWithoutListsIsTheOneOfTheOperatorBefore(t *testing.T) {
 		for _, paths := range withoutLists() {
 			treebind := tt.treebind()
 			treebind.Spec.Paths = paths
-			if got := mustDesiredStatefulSet(t, treebind, testImage).Annotations[templateHashAnnotation]; got != tt.want {
+			statefulSet := mustDesiredStatefulSet(t, treebind, testImage)
+			if got := templateHashVariable(t, statefulSet); got != tt.want {
 				t.Errorf("%s and spec.paths %+v: hash %s, want %s, which the operator wrote before. If the change "+
 					"of the template is meant, upgrading the operator replaces every sync pod: say so, and pin the new hash",
 					name, paths, got, tt.want)
+			}
+			if got := statefulSet.Annotations[templateHashAnnotation]; got == tt.want {
+				t.Errorf("%s and spec.paths %+v: the annotation is %s, the one that the operator wrote before, so a "+
+					"StatefulSet of it is not rewritten and its sync pod never gets the hash of its template",
+					name, paths, got)
 			}
 		}
 	}
@@ -578,8 +590,13 @@ func TestAgentEnvironment(t *testing.T) {
 		{Name: "TREEBIND_STATUS_SUBJECT", Value: testSubject},
 		{Name: "TREEBIND_STATUS_KEYS_FILE", Value: "/etc/treebind/status/jwks.json"},
 	}
-	if !reflect.DeepEqual(container.Env, want) {
-		t.Errorf("env = %+v\nwant %+v", container.Env, want)
+	// The hash of the rest of the template comes last. Its value is held by TestThePodTemplateHoldsTheHashOfTheRestOfIt.
+	n := len(container.Env)
+	if n == 0 || container.Env[n-1].Name != agentconfig.EnvTemplateHash {
+		t.Fatalf("the last variable is not %s: env = %+v", agentconfig.EnvTemplateHash, container.Env)
+	}
+	if got := container.Env[:n-1]; !reflect.DeepEqual(got, want) {
+		t.Errorf("env = %+v\nwant %+v", got, want)
 	}
 }
 
@@ -609,6 +626,7 @@ func TestAgentEnvironmentWithEverySetting(t *testing.T) {
 		agentconfig.EnvPodName, agentconfig.EnvPathsInclude, agentconfig.EnvPathsExclude, agentconfig.EnvSSHKeyFile,
 		agentconfig.EnvKnownHostsFile, agentconfig.EnvStatusAddr, agentconfig.EnvStatusIssuer,
 		agentconfig.EnvStatusAudience, agentconfig.EnvStatusSubject, agentconfig.EnvStatusKeysFile,
+		agentconfig.EnvTemplateHash,
 	}
 	if !reflect.DeepEqual(names, want) {
 		t.Errorf("variables = %v\nwant        %v", names, want)
