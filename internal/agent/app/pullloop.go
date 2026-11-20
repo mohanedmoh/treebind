@@ -58,6 +58,7 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 	var gate breaker.Gate
 	options := pull.Options{
 		Layout: done.options.Layout, URL: done.options.URL, Branch: done.made.Branch, Git: done.options.Git,
+		Path: done.options.Path,
 		// The lock is checked immediately before an update is written. The cap on deletions is the
 		// Treebind's when it says, and the pull's own when it does not, and the recovery ref is the pull's
 		// own (docs/adr/0026, docs/adr/0027).
@@ -197,7 +198,7 @@ func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 	var message string
 	switch result.Outcome {
 	case pull.Advanced:
-		message = fmt.Sprintf("advanced the checkout on the branch %s from %s to %s", result.Branch, shortOf(result.From), shortOf(result.To))
+		message = fmt.Sprintf("advanced the checkout on the branch %s from %s to %s", result.Branch, shownOf(result.FromSource, result.From), shownOf(result.ToSource, result.To))
 		if result.Recovery != "" {
 			message += "; the commit it was at is kept as " + result.Recovery
 		}
@@ -206,15 +207,15 @@ func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 		}
 	case pull.Resolved:
 		message = fmt.Sprintf("resolved a conflict on the branch %s by %s: the checkout moved from %s to %s; the Conflict check says how",
-			result.Branch, policyOf(result), shortOf(result.From), shortOf(result.To))
+			result.Branch, policyOf(result), shownOf(result.FromSource, result.From), shownOf(result.ToSource, result.To))
 		if result.Warning != "" {
 			message += "; " + result.Warning
 		}
 	case pull.Ahead:
 		message = fmt.Sprintf("the checkout is ahead of the branch %s (%s): it has commits that the repository does not have yet, "+
-			"and there is nothing to pull", result.Branch, shortOf(result.To))
+			"and there is nothing to pull", result.Branch, shownOf(result.ToSource, result.To))
 	default:
-		message = fmt.Sprintf("the checkout is at the tip of the branch %s (%s)", result.Branch, shortOf(result.To))
+		message = fmt.Sprintf("the checkout is at the tip of the branch %s (%s)", result.Branch, shownOf(result.ToSource, result.To))
 	}
 	if result.Repaired != "" {
 		message += "; " + result.Repaired
@@ -228,10 +229,12 @@ func pullResult(result pull.Result, err error) (preflight.Result, bool) {
 // case when the repository answered and what is wrong is a file, a commit, a branch, the Git directory or an
 // update that removes too many files, which a person puts right: the next pull should find it at once when
 // they have, and costs one question. Refused is only the fence now, a lock that could not be checked, which is
-// a volume that does not answer (docs/adr/0026).
+// a volume that does not answer (docs/adr/0026). A directory that is not one, and a checkout that is for another,
+// are refused after the fetch and before the repository's tip is held, so that the next pull fetches again, and
+// the wait grows for them (docs/adr/0036).
 func backsOff(reason string) bool {
 	switch reason {
-	case pull.ReasonFetchFailed, pull.ReasonPullFailed, pull.ReasonRefused:
+	case pull.ReasonFetchFailed, pull.ReasonPullFailed, pull.ReasonRefused, pull.ReasonPathNotFound, pull.ReasonPathMismatch:
 		return true
 	}
 	return false
