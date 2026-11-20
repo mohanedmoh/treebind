@@ -147,6 +147,37 @@ func TestReportFormatWithTheTemplateHash(t *testing.T) {
 	}
 }
 
+func TestReportFormatOnceTheCheckoutAndTheBranchAgreed(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	const want = `{"version":1,"treebind":{"namespace":"apps","name":"dashboards"},` +
+		`"startedAt":"2026-11-12T09:00:00Z","time":"2026-11-12T09:30:00Z","checkedAt":"2026-11-12T09:10:00Z","checks":[],` +
+		`"lastSynced":{"commit":"` + commit + `","time":"2026-11-12T09:05:00.25Z","by":"Push"}}`
+	synced := LastSynced{Commit: commit, Time: time.Date(2026, 11, 12, 9, 5, 0, 250_000_000, time.UTC), By: ByPush}
+	handler := NewHandler(func() Report {
+		return Report{
+			Treebind:   sampleReport().Treebind,
+			StartedAt:  started,
+			CheckedAt:  time.Date(2026, 11, 12, 9, 10, 0, 0, time.UTC),
+			LastSynced: synced,
+		}
+	}, onlyGoodToken)
+	handler.now = func() time.Time { return reported }
+
+	w := request(handler, http.MethodGet, Path, "Bearer "+goodToken)
+
+	if got := w.Body.String(); got != want {
+		t.Errorf("the report changed:\n got %s\nwant %s", got, want)
+	}
+	// The operator reads it back with the same type, to the nanosecond.
+	var report Report
+	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
+		t.Fatalf("the body is not a report: %v", err)
+	}
+	if got := report.LastSynced; got.Commit != synced.Commit || !got.Time.Equal(synced.Time) || got.By != synced.By {
+		t.Errorf("lastSynced read back = %+v, want %+v", got, synced)
+	}
+}
+
 func TestHandlerServesTheReport(t *testing.T) {
 	t.Run("an accepted GET gets the report with headers that keep it out of caches", func(t *testing.T) {
 		w := request(newHandler(onlyGoodToken), http.MethodGet, Path, "Bearer "+goodToken)
