@@ -530,6 +530,8 @@ func (a *agent) checkoutOptions() (checkout.Options, error) {
 		Layout: where,
 		URL:    a.Config.RepoURL,
 		Branch: a.Config.RepoBranch,
+		// The directory of the repository that is the synced directory, or none for the whole repository (docs/adr/0036).
+		Path: a.Config.RepoPath,
 		// The Runners of the checkout, the pulls and the scans are all made from these options, and each command
 		// tells the loop how long it may take.
 		Git: git.Options{
@@ -555,7 +557,7 @@ func (a *agent) runCheckout(ctx context.Context, options checkout.Options) (pref
 	if err != nil {
 		return failedCheckout(err), checkout.Result{}
 	}
-	short := shortOf(made.Commit)
+	short := shownOf(made.Source, made.Commit)
 	var message string
 	switch made.Outcome {
 	case checkout.Cloned:
@@ -578,6 +580,15 @@ func shortOf(id string) string {
 		return "no commit yet"
 	}
 	return id[:min(len(id), shortCommit)]
+}
+
+// shownOf is the commit that a check names: for a directory of the repository the commit of the repository, which a person can look
+// up, and for the whole repository, or when the pull or the push did not say, the commit of the checkout (docs/adr/0036).
+func shownOf(source, id string) string {
+	if source != "" {
+		return shortOf(source)
+	}
+	return shortOf(id)
 }
 
 // failedCheckout is the failed result for an error of the checkout: its own reason when

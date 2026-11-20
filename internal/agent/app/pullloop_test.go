@@ -788,9 +788,13 @@ func TestTheFenceOfAnAgentWithNoLockLetsTheUpdateThrough(t *testing.T) {
 
 func TestOnlyAPullThatTheRepositoryOrTheVolumeCouldNotAnswerMakesTheNextWaitGrow(t *testing.T) {
 	cases := map[string]bool{
-		pull.ReasonFetchFailed:      true,
-		pull.ReasonPullFailed:       true,
-		pull.ReasonRefused:          true,
+		pull.ReasonFetchFailed: true,
+		pull.ReasonPullFailed:  true,
+		pull.ReasonRefused:     true,
+		// A directory that is not one, and a checkout that is for another: the projection did not hold the repository's tip, so the
+		// next pull fetches again, and the wait grows so that a Git host is not asked more for it (R-19).
+		pull.ReasonPathNotFound:     true,
+		pull.ReasonPathMismatch:     true,
 		pull.ReasonBlocked:          false,
 		pull.ReasonTooManyDeletions: false,
 		pull.ReasonTooManyCommits:   false,

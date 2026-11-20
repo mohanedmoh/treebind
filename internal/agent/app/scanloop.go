@@ -182,6 +182,8 @@ func (a *agent) startScans(p *progress, done checkedOut, gate breaker.Gate) *sca
 		p.push = notTried(CheckPush, "not tried, because the first scan is running")
 		pusher, err := a.NewPusher(push.Options{
 			Layout: l, URL: done.options.URL, Branch: done.made.Branch, Git: done.options.Git, Fence: a.fence,
+			// The commits of the checkout are sent as commits of the repository, by the author of the agent's commits.
+			Path: done.options.Path, Author: a.commitIdentity(),
 		})
 		if err != nil {
 			// A wrong setting is a failed check, and the scans, the commits and the pulls go on: the commits stay on
@@ -329,10 +331,10 @@ func pushResult(result push.Result, err error) (preflight.Result, string) {
 	switch {
 	case result.Outcome == push.Pushed && result.From == "":
 		checked.Message = fmt.Sprintf("pushed %s to the new branch %s, which is now at %s",
-			plural(result.Commits, "commit", "commits"), result.Branch, shortOf(result.To))
+			plural(result.Commits, "commit", "commits"), result.Branch, shownOf(result.ToSource, result.To))
 	case result.Outcome == push.Pushed:
 		checked.Message = fmt.Sprintf("pushed %s to the branch %s: %s..%s",
-			plural(result.Commits, "commit", "commits"), result.Branch, shortOf(result.From), shortOf(result.To))
+			plural(result.Commits, "commit", "commits"), result.Branch, shownOf(result.FromSource, result.From), shownOf(result.ToSource, result.To))
 	default:
 		checked.Message = "nothing to push: the repository has every commit of the checkout"
 	}

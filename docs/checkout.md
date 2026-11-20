@@ -16,6 +16,9 @@ kubectl logs <name>-sync-0
 kubectl describe treebind <name>
 ```
 
+With `spec.repository.path` the files of the checkout are the files of one directory of the repository, at the root of
+the synced directory: see [the directory of the repository](repository-path.md).
+
 After the checkout the agent pulls what the repository gains, every interval, as [pulling](pull.md) says. It
 does not report itself ready after the checkout: it is ready once a pull has passed, as
 [the probes](agent-status.md#the-probes) say.
@@ -30,6 +33,7 @@ does not report itself ready after the checkout: it is ready once a pull has pas
 | A repository with no commits yet | Makes an empty checkout. The first sync commits what is in the directory | cloned or adopted |
 | A checkout from an earlier start of the same repository and branch | Opens it | reopened |
 | A checkout of another repository, or of another branch | Changes nothing | `RepositoryMismatch` |
+| A checkout made for another `spec.repository.path`, or for the whole repository when the Treebind names one, or the other way round | Changes nothing | `PathMismatch` |
 
 "Exactly the files of the branch" means that no file differs, is missing or is extra. Empty
 directories do not count, and `.treebind` is not counted when the whole claim is synced.
@@ -44,6 +48,8 @@ minute. It carries on once the cause is put right, with no restart.
 | `DirectoryNotEmpty` | The directory holds files that are not the branch's. Nothing was touched | Empty the directory, or make it hold exactly the files of the branch. To publish what is there, point the Treebind at an empty repository: the first sync commits it |
 | `RepositoryMismatch` | The checkout in `.treebind/git` is of another repository, follows another branch, or is not one the agent made | To keep following the branch it has, set `spec.repository.branch` to it. To start again, empty `.treebind/git`; commits that were not pushed are lost with it |
 | `BranchNotFound` | The repository has no such branch, or no default branch to follow | Set `spec.repository.branch` to a branch it has |
+| `PathNotFound` | The branch has no directory at `spec.repository.path`, or has something there that is not one. Nothing was written | Check the name, or make the directory in the repository first, as [the page about the directory](repository-path.md) says |
+| `PathMismatch` | The checkout was made for another directory of the repository, or for the whole repository, and the Treebind names another now. Every file was left where it is | Remove or set back `spec.repository.path` to keep what is there, or empty the synced directory and `.treebind/git` to start again with the new one: see [the page about the directory](repository-path.md) |
 | `ReservedPath` | The branch has a file named `.treebind` at its root, where the agent keeps its state when the whole claim is synced | Use a `subPath`, or rename the file |
 | `FetchFailed` | The repository cannot be reached, the key is refused, or the host key is not in the known hosts | The message has what Git said. Check the address, the deploy key and the known hosts |
 | `GitDirUnsafe` | The Git directory holds something the agent did not put there | See [the Git directory](git-directory.md) |

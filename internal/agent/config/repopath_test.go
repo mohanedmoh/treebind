@@ -77,3 +77,42 @@ func TestCheckRepoPath(t *testing.T) {
 		})
 	}
 }
+
+func TestFromEnvTakesTheRepositoryPathAndLeavesItEmptyWithoutOne(t *testing.T) {
+	config, err := fromMap(complete())
+	if err != nil || config.RepoPath != "" {
+		t.Errorf("without TREEBIND_REPO_PATH: %+v, %v, want an empty path: the whole repository", config, err)
+	}
+
+	env := complete()
+	env[EnvRepoPath] = stateNamedPath
+	config, err = fromMap(env)
+	if err != nil || config.RepoPath != stateNamedPath {
+		t.Errorf("with a path: %+v, %v", config, err)
+	}
+}
+
+// The CRD accepts a path with spaces around it, and the operator passes it on as it is: the directory is the one the user named
+// and not a trimmed one.
+func TestFromEnvDoesNotTrimTheRepositoryPath(t *testing.T) {
+	env := complete()
+	env[EnvRepoPath] = spacedPath
+
+	config, err := fromMap(env)
+
+	if err != nil || config.RepoPath != spacedPath {
+		t.Errorf("path = %q, %v, want it untouched", config.RepoPath, err)
+	}
+}
+
+func TestFromEnvRefusesARepositoryPathThatCannotBeOneAndSaysEveryProblemAtOnce(t *testing.T) {
+	env := complete()
+	env[EnvRepoPath] = parentSegmentInside
+	env[EnvSubPath] = "/abs"
+
+	_, err := fromMap(env)
+
+	if err == nil || !strings.Contains(err.Error(), EnvRepoPath+" must not contain") || !strings.Contains(err.Error(), EnvSubPath) {
+		t.Errorf("got %v, want the problems of both variables, each named", err)
+	}
+}
