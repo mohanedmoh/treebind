@@ -4,12 +4,16 @@ The sync agent holds no Kubernetes credential, so the operator goes to it for th
 state of a sync: every 30 seconds it asks the agent of each Treebind for its report
 (`GET /status` on port 8080 of the sync pod) with a short-lived token of its own
 service account. The decisions behind this are in
-[ADR 0011](adr/0011-the-agent-status-endpoint.md) and
-[ADR 0015](adr/0015-the-operator-reads-the-agents-status.md).
+[ADR 0011](adr/0011-the-agent-status-endpoint.md),
+[ADR 0015](adr/0015-the-operator-reads-the-agents-status.md) and
+[ADR 0037](adr/0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md).
 
 Whether the operator can read the report is the condition `AgentUnreachable`. It is
 about the operator's view of the agent, not about the sync, so it never changes
-`Ready`: the sync can work while the operator cannot read it.
+`Ready`: the sync can work while the operator cannot read it. What the report says of
+the sync is in the conditions `Synced` and `Conflict` and in `status.lastSyncedCommit`
+and `status.lastSyncTime`, which [a section of their own](#what-synced-and-conflict-say)
+describes.
 
 ```
 kubectl describe treebind <name>
@@ -35,6 +39,93 @@ A failure is `Unknown` with the reason `PollFailing` and turns `True` only when 
 polls have failed for 3 minutes in a row. It goes back to `False` at the first poll
 that works. After a failed poll the operator tries again in a minute, not in 30
 seconds.
+
+## What `Synced` and `Conflict` say
+
+From the same report the operator writes two more conditions and two fields of the status, in the same write as
+`AgentUnreachable` and only when something changed. `kubectl describe treebind <name>` shows them, and `kubectl get treebind`
+shows `Ready`, `Synced` and `Conflict`. The decisions behind them are in
+[ADR 0037](adr/0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md).
+
+```
+kubectl get treebind <name> -o jsonpath='{.status.conditions[?(@.type=="Synced")]}'
+kubectl get treebind <name> -o jsonpath='{.status.lastSyncedCommit} {.status.lastSyncTime}'
+```
+
+`status.lastSyncedCommit` is the full id of the commit of the repository at which the agent last saw the checkout and the
+branch agree, after a pull or a push. With `spec.repository.path` it is the repository's commit and not the checkout's
+snapshot of it ([the directory of the repository](repository-path.md)). `status.lastSyncTime` is when the agent first saw
+them agree at that commit, by its clock and in whole seconds. The two change together, when the commit changes: a pull that
+finds nothing new changes neither, so a Treebind with nothing to sync keeps its time. A restart of the sync pod, a step that
+fails and a poll that fails clear nothing.
+
+### Synced
+
+| Status | Reason | Means | What to check |
+| :-- | :-- | :-- | :-- |
+| `True` | `InSync` | No step of the sync has failed, and the agent has seen the checkout and the branch agree since it started, at `status.lastSyncedCommit` | Nothing |
+| `False` | The reason of the step that failed, as its check spells it: `FetchFailed`, `Blocked`, `TooManyDeletions`, `PushRejected` and the others of [the checks](#what-the-report-holds) | A step failed. The message says which step, what the reason means, and at which commit the volume and the repository last agreed | The check of the same name in the report and the log of the sync pod, which say which file and what the Git host said. The page of the step says what to do: [the checkout](checkout.md), [pulling](pull.md), [local changes](local-changes.md) |
+| `False` | `SyncFailed` | A step failed with a reason that this release of the operator does not define, as an agent of another release can report | The log of the sync pod, and whether the operator and the agent image are of the same release |
+| `Unknown` | `AwaitingAgentReport` | The operator has not polled yet | Wait a minute |
+| `Unknown` | `SyncPending` | No step has failed, and the agent has not seen the volume and the repository agree since it started: the lock, the checkout, the first pull or the first push is still to come, as after every start of the sync pod | Wait: the first pull comes within one interval of the checkout |
+| `Unknown` | `AgentOutdated` | The report is of another pod template than the spec gives now, as while the sync pod is replaced after a change of the spec, or of an agent of the release before, which reports none | Wait for the new pod. If it lasts, `Ready` says whether the sync objects could not be updated (`ReconcileFailed`), and `kubectl describe pod` says why the new pod does not run |
+| `Unknown` | `AgentUnreachable` | `AgentUnreachable` is `True`: the operator has not read the report for 3 minutes, so it does not know what the sync does | `AgentUnreachable` says why |
+
+- **It follows the steps, not the files.** `True` says that no step failed and that the agent has seen the two agree, and not
+  that nothing waits. Files that the application wrote and that have not settled, files that have settled and are not
+  committed yet, and commits of the checkout that are not pushed yet are no failure, so they do not make `Synced` `False`.
+  `status.lastSyncedCommit` says at which commit the volume and the repository last agreed.
+- **The reason is of the first step that failed.** The order is the one of the report. A reason that needs a person comes
+  before one that waits for the Git host, so that a host that does not answer does not hide a file that someone has to move.
+- **A restart makes it `Unknown`.** The agent keeps what it saw in memory, so after every start of the sync pod `Synced` says
+  `SyncPending` until the first pull or push that finds the two in agreement, or `False` if a step fails first. It is `True`
+  again after that, with the commit and the time of the status as they were if nothing new came.
+- **The messages are fixed.** A message is a sentence for the step and the reason, the first 12 digits of
+  `status.lastSyncedCommit`, and where to read more. Nothing that the agent wrote is in it, because everyone who can read the
+  Treebind reads it, and the text of a check names files and quotes the Git host.
+- **How current it is.** The operator reads the report every 30 seconds, a fifth more or less, every minute after a poll that
+  failed, and at once after a change of the spec. A change shows in the status that long after the agent made it, and a change
+  from Git also waits for the pull. The conditions carry the generation of the spec they were made for.
+
+### Conflict
+
+| Status | Reason | Means | What to check |
+| :-- | :-- | :-- | :-- |
+| `True` | The reason of the update that could not be made: `Blocked`, `TooManyDeletions`, `TooManyCommits`, `Refused` or `PullFailed` | The last pull found that your directory and the repository each have commits that the other lacks, and could not resolve it with `spec.sync.conflictPolicy`. Local work waits for a person | The message, the `Pull` and `Conflict` checks of the report, and [conflicts](conflicts.md). A pull that passes without a conflict puts it back to `False` |
+| `False` | `ConflictResolved` | The last conflict that the agent found since it started was resolved by the policy, also one by `followRemote`, which keeps your version of a file in a ref that is never pushed | The `Conflict` check names the policy, the counts and where the commits are kept |
+| `False` | `NoConflict` | The agent knows of no conflict that waits, and has resolved none since it started. It is also the answer for a `pull` Treebind, which has no conflict to resolve: an update that it cannot take, `Diverged` among them, makes `Synced` `False` | Nothing |
+| `Unknown` | As `Synced` | `Conflict` is `Unknown` whenever `Synced` is, for a Treebind that only pulls too, with the same reason and message | See `Synced` |
+
+The agent keeps what it knows of a conflict in memory. After a restart the `Conflict` check is skipped until a conflict has
+been resolved, so `Conflict` can say `NoConflict` before a pull has run, while `Synced` is `False` for another step, even though the pull
+before the restart could not resolve a conflict. The next pull that finds the conflict again makes it `True`.
+
+### Ready
+
+When the sync pod is ready, `Ready` is `False` with the reason `NotSynced` only when `Synced` is `False` for the current spec
+and its reason is one that a person puts right. The message names the reason of `Synced`. For the reasons that the sync puts
+right by itself `Ready` stays `True`, while `Synced` still says them, because `Ready` is what `kubectl wait` and the health
+checks of a GitOps controller act on, and a Git host that is down should not turn every Treebind that uses it not ready
+([ADR 0030](adr/0030-the-agent-is-ready-after-its-first-pull-and-stays-ready-while-it-runs.md)).
+
+| Reason of `Synced` `False` | `Ready` |
+| :-- | :-- |
+| `FetchFailed`, `PushFailed` | Stays `True`: the Git host did not answer, and the agent asks again with a wait that grows |
+| `NonFastForward` and `Blocked`, for a Treebind that syncs in both directions | Stays `True`: the next pull brings the commits that the push lacked, and the next scan commits the edit that was in the way of the update |
+| Any other, `SyncFailed` too, and `Blocked` for a Treebind that only pulls | `False` with `NotSynced`: a file, a branch, the volume, a limit of the spec or a rule of the repository has to change |
+
+`Unknown` never makes `Ready` `False`, and neither does a `Synced` of an earlier generation, which is what a change of the spec
+leaves in place until the next poll. `Conflict` is not an input: a conflict that cannot be resolved is a failed step, so
+`Synced` says its reason, and `Ready` follows that.
+
+### Upgrading the operator
+
+Every sync pod is replaced once when the operator is upgraded to the release that writes these conditions. The pod template
+gains the variable `TREEBIND_TEMPLATE_HASH`, the hash of the rest of the template, which the agent reports so that the operator
+can tell a report of the current spec from one of the spec before. While a pod is replaced `Ready` says `SyncPodNotReady`, and
+`Synced` and `Conflict` turn `Unknown` until the new pod has pulled: with `AgentOutdated` while the operator reads the old pod,
+and with `SyncPending` once it reads the new one. After that no pod is replaced for a change that the agent does not see, such as
+writing out `mountPath: /work`, which is the default.
 
 ## The cluster has to allow the call
 
@@ -85,7 +176,8 @@ after that. The operator turns the `Ready` condition of the Treebind on when the
 **It stays ready while the agent runs.** A pull that fails later (the repository does not answer, a file is in the way,
 the branches diverged, the update would remove too many files) does not make the pod not ready, because the files on the
 volume are as they were, and a Git host that is down for an hour should not turn every Treebind that uses it
-not ready. The `Pull` check says what the last pull found. A container that restarts starts not ready, because nothing in its
+not ready. The `Pull` check says what the last pull found, and `Synced` says it in the Treebind: it turns `Ready` `False` only
+for a reason that a person puts right ([below](#ready)). A container that restarts starts not ready, because nothing in its
 memory says that the one before it synced, and is ready again after its first pull.
 
 **Alive means the loop is not stuck.** The loop of the agent beats, and each beat says how long it is until the next:
@@ -104,6 +196,7 @@ says `the loop of the agent did not beat within what it promised`, with how late
 | The same, for longer | No pull has passed | The `Pull` check: its reason says what is in the way, and [pulling](pull.md) says what to do |
 | The same, with `BranchGone` | The repository has no such branch, or no commit at all yet | Put a commit on the branch, or set `spec.repository.branch` to one that exists. A Treebind that syncs in both directions turns ready by itself when its first commit is pushed |
 | The same, and the `Pull` check is `Skipped` with `NotChecked` | The volume, the lock or the checkout has not passed | The check that failed, in the same report |
+| The pod is `1/1`, and `Ready` is `False` with `NotSynced` | A step of the sync failed for a reason that a person puts right | `Synced`: its reason and message, then the check of the same name in the report ([`Synced` and `Ready`](#ready)) |
 | The container restarts, and `kubectl describe pod` shows `Liveness probe failed: HTTP probe failed with statuscode: 503` | The loop was stuck: a step took longer than it promised, most often a call on a volume that does not answer | The log of the container before the restart (`kubectl logs --previous`), for the line about the loop and how late it was, and the volume |
 
 While the pod is not ready, `kubectl describe pod` shows the event `Readiness probe failed: HTTP probe failed with
@@ -142,8 +235,9 @@ The report lists the agent's checks, in the order the agent runs them, each with
 | `Changes` | The last scan of your directory for what the application changed: how many files, how many have settled, what is left out, and what the events of the file system cannot do. Only for a Treebind that syncs in both directions. It is skipped until the first scan | [Local changes](local-changes.md) |
 | `Commit` | The last commit of the files that the scans found settled: how many and the short id, that there was nothing to commit, or why it failed (`CommitFailed`, or `TooManyCommits` when the limit of commits in an hour is reached). Only for a Treebind that syncs in both directions. It is skipped until a file settles | [Local changes](local-changes.md), [echo loops](echo-loops.md) |
 | `Push` | The last push of the commits of the checkout: how many and the two ids, that there is nothing to push, or why it failed (`NonFastForward`, `PushRejected` with the words of the host, `PushFailed`). Only for a Treebind that syncs in both directions. It is skipped until the first scan | [Local changes](local-changes.md) |
-| `Conflict` | What the last resolution of a conflict between your directory and the repository did: the policy, how many commits each side had, how many files had the winner's version, how many were kept from the other side, the commit that was made and, for `followRemote`, the ref that keeps the commits of the directory. It is `Passed` with the reason `ConflictResolved`, and stays so until the next resolution. Only for a Treebind that syncs in both directions. It is skipped, saying that no conflict has been resolved since the agent started, until a conflict has been resolved; a resolution that could not be made is a failed `Pull`, whose message says that the conflict was not resolved. It does not change `Ready` | [Conflicts](conflicts.md) |
+| `Conflict` | What the last resolution of a conflict between your directory and the repository did: the policy, how many commits each side had, how many files had the winner's version, how many were kept from the other side, the commit that was made and, for `followRemote`, the ref that keeps the commits of the directory. It is `Passed` with the reason `ConflictResolved`, and stays so until the next resolution. Only for a Treebind that syncs in both directions. It is skipped, saying that no conflict has been resolved since the agent started, until a conflict has been resolved. A resolution that could not be made makes it `Failed`, with the reason of the update (`Blocked`, `TooManyDeletions`, `TooManyCommits`, `Refused`, `PullFailed`), and the `Pull` check fails with the same reason and a message that says that the conflict was not resolved. The next pull that passes without a conflict puts the check back to what it said before: the last resolution, or `Skipped`. It does not change whether the agent is ready, and the operator derives the `Conflict` condition from it | [Conflicts](conflicts.md) |
 
 A check that cannot be tried because one before it failed, or that waits, is `Skipped`, with the reason
-`NotChecked` and the check that failed in the message. The operator does not show the checks as
-conditions yet: they are in the report and in the agent's log.
+`NotChecked` and the check that failed in the message. The operator shows what the checks say of the
+sync as the conditions `Synced` and `Conflict` ([above](#what-synced-and-conflict-say)). The checks themselves,
+with their messages, which name files and quote the Git host, are in the report and in the agent's log.

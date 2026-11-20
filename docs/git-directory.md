@@ -112,7 +112,8 @@ way: what it cannot look at it cannot tell is its own. A claim
 that cannot be written to fails the check with `ReadOnlyVolume`, `NotWritable` or `WriteFailed`,
 as the check `Writable` does. The result is in the agent's log, once for each change, and in its
 status report, which [the status page](agent-status.md) shows how to read by hand. The operator
-does not show it as a condition yet.
+shows a failed check in the condition `Synced`, `False` with the reason of the check
+([the conditions](agent-status.md#synced)).
 
 The checkout looks as well, before it starts and before each command. When it finds such a file
 it stops with the same reason, `GitDirUnsafe`, and the name of the file, and runs no more Git. It

@@ -3,6 +3,9 @@
 - Status: accepted
 - Date: 2026-11-12
 - Issue: #104
+- Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
+  adds `templateHash` and `lastSynced` to the report, and puts the hash of the pod template in it where this record
+  plans the generation of the spec
 
 ## Context
 
