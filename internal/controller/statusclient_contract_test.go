@@ -143,10 +143,14 @@ var _ = Describe("The operator and the agent", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
+		// The hash is the one the agent read from its pod, and the commit is spelled as Git spells it, so that the
+		// client's checks of the two are held to what the agent writes.
 		report := status.Report{
-			Treebind:  status.Treebind{Namespace: config.Namespace, Name: config.Name},
-			StartedAt: time.Now().Add(-time.Hour),
-			Checks:    []status.Check{{Name: reportedChecks, Outcome: "Passed", Message: "mounted"}},
+			Treebind:     status.Treebind{Namespace: config.Namespace, Name: config.Name},
+			StartedAt:    time.Now().Add(-time.Hour),
+			TemplateHash: config.TemplateHash,
+			Checks:       []status.Check{{Name: reportedChecks, Outcome: "Passed", Message: "mounted"}},
+			LastSynced:   status.LastSynced{Commit: commitOne, Time: time.Now().UTC(), By: status.ByPull},
 		}
 		server := httptest.NewServer(status.NewHandler(func() status.Report { return report }, verifier))
 		DeferCleanup(server.Close)
@@ -185,6 +189,8 @@ var _ = Describe("The operator and the agent", func() {
 		Expect(report.Treebind).To(Equal(status.Treebind{Namespace: namespace, Name: treebindName}))
 		Expect(report.Checks).To(HaveLen(1))
 		Expect(report.Checks[0].Name).To(Equal(reportedChecks))
+		Expect(report.TemplateHash).NotTo(BeEmpty())
+		Expect(report.LastSynced.Commit).To(Equal(commitOne))
 	})
 
 	It("is refused with a token that was minted for the agent of another Treebind", func() {

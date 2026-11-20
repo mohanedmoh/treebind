@@ -303,6 +303,102 @@ func TestFetchSaysWhyAnAnswerIsNotAReport(t *testing.T) {
 	}
 }
 
+// The fields of the sync as the agent writes them: a SHA-256 of a pod template, and the full names of a commit in a
+// repository of SHA-1 and of SHA-256.
+const (
+	wellFormedHash   = "27ed59bdbee75da599c2e1f63aa5ca8a94c718e28c03fe67345826eb4ff8bab0"
+	wellFormedSHA1   = "0123456789abcdef0123456789abcdef01234567"
+	wellFormedSHA256 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	messageBadHash   = "the sync agent's report has a template hash that is not 64 lowercase hexadecimal digits"
+	messageBadCommit = "the sync agent's report has a last synced commit that is not the full name of a Git object"
+	messageBadStep   = "the sync agent's report has a last synced step that is neither Pull nor Push"
+	messageNoTime    = "the sync agent's report has a last synced commit with no time"
+)
+
+// The operator compares the template hash of a report by equality and writes its commit into the status of the
+// Treebind, where everyone who reads the Treebind reads it, so a report that has either, or the step of the agreement,
+// in another form than the agent writes is refused like one of another version, with a message that holds none of it.
+func TestFetchRefusesAFieldOfTheSyncThatIsNotAsTheAgentWritesIt(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*status.Report)
+		wantMessage string
+	}{
+		{"a hash of 63 digits", func(r *status.Report) { r.TemplateHash = wellFormedHash[1:] }, messageBadHash},
+		{"a hash of 65 digits", func(r *status.Report) { r.TemplateHash = wellFormedHash + "0" }, messageBadHash},
+		{"a hash of the length of a SHA-1", func(r *status.Report) { r.TemplateHash = wellFormedHash[:40] }, messageBadHash},
+		{"a hash in capitals", func(r *status.Report) { r.TemplateHash = strings.ToUpper(wellFormedHash) }, messageBadHash},
+		{"a hash with a letter past f", func(r *status.Report) { r.TemplateHash = wellFormedHash[:63] + "g" }, messageBadHash},
+		{"a hash with a newline", func(r *status.Report) { r.TemplateHash = wellFormedHash[:63] + "\n" }, messageBadHash},
+		{"a short commit", func(r *status.Report) { r.LastSynced.Commit = wellFormedSHA1[:12] }, messageBadCommit},
+		{"a commit of 39 digits", func(r *status.Report) { r.LastSynced.Commit = wellFormedSHA1[1:] }, messageBadCommit},
+		{"a commit of 41 digits", func(r *status.Report) { r.LastSynced.Commit = wellFormedSHA1 + "0" }, messageBadCommit},
+		{"a commit of 63 digits", func(r *status.Report) { r.LastSynced.Commit = wellFormedSHA256[1:] }, messageBadCommit},
+		{"a commit of 65 digits", func(r *status.Report) { r.LastSynced.Commit = wellFormedSHA256 + "0" }, messageBadCommit},
+		{"a commit in capitals", func(r *status.Report) { r.LastSynced.Commit = strings.ToUpper(wellFormedSHA1) }, messageBadCommit},
+		{"a commit with a letter past f", func(r *status.Report) { r.LastSynced.Commit = wellFormedSHA1[:39] + "x" }, messageBadCommit},
+		{"a name of a branch", func(r *status.Report) { r.LastSynced.Commit = "refs/heads/main" }, messageBadCommit},
+		{"a commit with no time", func(r *status.Report) { r.LastSynced.Time = time.Time{} }, messageNoTime},
+		{"a step in other letters", func(r *status.Report) { r.LastSynced.By = "pull" }, messageBadStep},
+		{"a step that the operator does not know", func(r *status.Report) { r.LastSynced.By = "Merge" }, messageBadStep},
+		{"a step with a space", func(r *status.Report) { r.LastSynced.By = status.ByPush + " " }, messageBadStep},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report := wellFormedSyncReport()
+			tt.mutate(&report)
+			server := answering(t, func(w http.ResponseWriter, _ *http.Request) { writeReport(w, report) })
+
+			got, err := newTestClient(server, &fakeTokens{token: testToken}).Fetch(context.Background(), testTarget)
+
+			fetchErr := wantFetchError(t, err, KindReportUnreadable, tt.wantMessage)
+			if got != nil {
+				t.Errorf("a report came back with the error: %+v", got)
+			}
+			for _, field := range []string{report.TemplateHash, report.LastSynced.Commit, report.LastSynced.By} {
+				if field != "" && strings.Contains(fetchErr.Error(), field) {
+					t.Errorf("the error %q holds %q, which the agent's answer said", fetchErr.Error(), field)
+				}
+			}
+		})
+	}
+}
+
+// A field that the agent writes as it does is read as it is, and a report without them, from an agent of the release
+// before, is read too.
+func TestFetchReadsTheFieldsOfTheSyncAsTheAgentWritesThem(t *testing.T) {
+	sha256Push := wellFormedSyncReport()
+	sha256Push.LastSynced = status.LastSynced{Commit: wellFormedSHA256, Time: sha256Push.Time, By: status.ByPush}
+	for name, report := range map[string]status.Report{
+		"a hash and a commit of SHA-1 by a pull": wellFormedSyncReport(),
+		"a commit of SHA-256 by a push":          sha256Push,
+		"none of them":                           goodReport(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := answering(t, func(w http.ResponseWriter, _ *http.Request) { writeReport(w, report) })
+
+			got, err := newTestClient(server, &fakeTokens{token: testToken}).Fetch(context.Background(), testTarget)
+
+			if err != nil {
+				t.Fatalf("Fetch = %v, want the report", err)
+			}
+			if got.TemplateHash != report.TemplateHash || got.LastSynced.Commit != report.LastSynced.Commit ||
+				got.LastSynced.By != report.LastSynced.By || !got.LastSynced.Time.Equal(report.LastSynced.Time) {
+				t.Errorf("report = %+v, want %+v", got, report)
+			}
+		})
+	}
+}
+
+// wellFormedSyncReport is goodReport with a template hash and an agreement, as the agent of this release writes them.
+func wellFormedSyncReport() status.Report {
+	report := goodReport()
+	report.TemplateHash = wellFormedHash
+	report.LastSynced = status.LastSynced{Commit: wellFormedSHA1, Time: report.CheckedAt, By: status.ByPull}
+	return report
+}
+
 func TestFetchAcceptsAReportJustUnderTheLimit(t *testing.T) {
 	server := answering(t, func(w http.ResponseWriter, _ *http.Request) {
 		body, _ := json.Marshal(goodReport())

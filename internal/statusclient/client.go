@@ -34,11 +34,13 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 )
 
@@ -249,7 +251,51 @@ func (c *Client) readReport(ctx context.Context, body io.Reader, target Target) 
 	if report.Treebind.Namespace != target.Namespace || report.Treebind.Name != target.Name {
 		return nil, &Error{Kind: KindReportUnreadable, Message: "the report is the report of another Treebind"}
 	}
+	if message := malformedSyncField(&report); message != "" {
+		return nil, &Error{Kind: KindReportUnreadable, Message: message}
+	}
 	return &report, nil
+}
+
+// The lengths of the full name of a Git object, in hexadecimal digits, in a repository of SHA-1 and of SHA-256.
+const (
+	sha1NameLength   = 40
+	sha256NameLength = 64
+)
+
+// malformedSyncField returns why a field of the report that the operator compares, or writes into the status of the
+// Treebind, is not as the agent writes it, and nothing when each is absent or well formed. The template hash is compared
+// by equality, so one of another spelling would be a report of no template for as long as the agent runs; the commit
+// becomes status.lastSyncedCommit, which everyone who reads the Treebind reads, with the time of the agreement that
+// becomes status.lastSyncTime, and the step is matched on. An absent
+// field is the report of an agent of the release before, which has none of them.
+func malformedSyncField(report *status.Report) string {
+	if agentconfig.CheckTemplateHash(report.TemplateHash) != nil {
+		return fmt.Sprintf("the sync agent's report has a template hash that is not %d lowercase hexadecimal digits",
+			agentconfig.TemplateHashLength)
+	}
+	agreed := report.LastSynced
+	if agreed.Commit != "" && !isObjectName(agreed.Commit) {
+		return "the sync agent's report has a last synced commit that is not the full name of a Git object"
+	}
+	if agreed.Commit != "" && agreed.Time.IsZero() {
+		// status.lastSyncTime is written from it when the commit is another, and an agreement with no time would clear it.
+		return "the sync agent's report has a last synced commit with no time"
+	}
+	if agreed.By != "" && agreed.By != status.ByPull && agreed.By != status.ByPush {
+		return fmt.Sprintf("the sync agent's report has a last synced step that is neither %s nor %s",
+			status.ByPull, status.ByPush)
+	}
+	return ""
+}
+
+// isObjectName says whether the text is the full name of a Git object as Git writes it: lowercase hexadecimal digits,
+// as many as the object format of the repository has.
+func isObjectName(name string) bool {
+	if len(name) != sha1NameLength && len(name) != sha256NameLength {
+		return false
+	}
+	return !strings.ContainsFunc(name, func(c rune) bool { return (c < '0' || c > '9') && (c < 'a' || c > 'f') })
 }
 
 // failed turns an error of the network into the error of the poll. A caller that
