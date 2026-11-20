@@ -46,6 +46,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
+	"github.com/mohanedmoh/treebind/internal/agent/subtree"
 )
 
 const (
@@ -112,6 +113,12 @@ const (
 	// it may, so that the conflict was not resolved and nothing was written (docs/adr/0035). It is the reason of the commit
 	// step for the same cause.
 	ReasonTooManyCommits = breaker.ReasonTooManyCommits
+	// ReasonPathNotFound means the branch of the repository has something at repository.path that is not a directory. It is the
+	// reason of the checkout for the same cause (docs/adr/0036).
+	ReasonPathNotFound = subtree.ReasonPathNotFound
+	// ReasonPathMismatch means the checkout was made for another directory than the one the Treebind names. It is the reason of
+	// the checkout for the same cause.
+	ReasonPathMismatch = subtree.ReasonPathMismatch
 	// ReasonPullFailed means the agent could not pull for another reason: Git failed on the
 	// volume, or the checkout is not what a pull expects.
 	ReasonPullFailed = "PullFailed"
@@ -145,6 +152,10 @@ type Options struct {
 	URL string
 	// Branch is the branch the checkout follows: Result.Branch of the checkout.
 	Branch string
+	// Path is the directory of the repository that is the synced directory (spec.repository.path), or empty for the whole
+	// repository. What the pull compares and applies is then the snapshots of that directory (docs/adr/0036), and the commits
+	// that its Result names are the snapshots', with the commits of the repository that they are of beside them.
+	Path string
 	// Git are the settings of the Runner: the git binary, ssh and the CA bundle. The directories
 	// and the look at the Git directory are taken from Layout.
 	Git git.Options
@@ -191,6 +202,10 @@ type Result struct {
 	// From and To are the commits the checkout moved between when it was advanced, and From is
 	// empty when the checkout had no commit. Otherwise both are the commit it is at.
 	From, To string
+	// FromSource and ToSource are, for a directory of the repository, the commits of the repository that From and To are the
+	// snapshots of, which are the ones that a person can look up. ToSource is the tip of the branch that the pull saw, and
+	// FromSource is empty when the checkout was not moved, or From is not a snapshot. Both are empty for the whole repository.
+	FromSource, ToSource string
 	// Recovery is the ref that keeps the commit the checkout was at before it was advanced, and is
 	// empty when it was not advanced or had no commit.
 	Recovery string
@@ -210,6 +225,8 @@ type Puller struct {
 	// change of it afterwards would not reach the Runner.
 	o   Options
 	git *git.Runner
+	// projector makes the snapshots of the directory, and is nil for the whole repository.
+	projector *subtree.Projector
 }
 
 const (
@@ -258,7 +275,14 @@ func New(o Options) (*Puller, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pull: Git cannot be set up: %w", err)
 	}
-	return &Puller{o: o, git: runner}, nil
+	p := &Puller{o: o, git: runner}
+	if o.Path != "" {
+		// The projector refuses a path that the CRD refuses.
+		if p.projector, err = subtree.New(subtree.Options{Layout: o.Layout, Git: o.Git, Path: o.Path, Branch: o.Branch}); err != nil {
+			return nil, fmt.Errorf("pull: Git cannot be set up: %w", err)
+		}
+	}
+	return p, nil
 }
 
 // Pull asks the repository for the tip of the branch, fetches it if it is new, and fast-forwards
@@ -293,17 +317,55 @@ func (p *Puller) update(ctx context.Context, head string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	known, err := p.try(ctx, "rev-parse", "--verify", "--quiet", remotePrefix+p.o.Branch+"^{commit}")
+	known, err := p.try(ctx, "rev-parse", "--verify", "--quiet", p.knownRef()+"^{commit}")
 	if err != nil {
 		return Result{}, p.fail(ReasonPullFailed, "the checkout in %s cannot be read: %v", p.o.Layout.GitDir, err)
 	}
-	tip := known
-	if remote != known {
-		if tip, err = p.fetch(ctx); err != nil {
-			return Result{}, err
-		}
+	tip, source, err := p.tip(ctx, remote, known)
+	if err != nil {
+		return Result{}, err
 	}
+	result, err := p.advance(ctx, head, tip)
+	result.ToSource = source
+	if err == nil && source != "" && head != "" && head != tip && (result.Outcome == Advanced || result.Outcome == Resolved) {
+		// Only a pull that moved the checkout says where it came from, so that a pull that has nothing to do asks Git nothing more.
+		result.FromSource, _, _ = p.projector.Source(ctx, head)
+	}
+	return result, err
+}
 
+// knownRef is the ref that holds the tip of the repository as the checkout last saw it: for a directory, the ref of the
+// repository's own tip and not the one of the snapshots.
+func (p *Puller) knownRef() string {
+	if p.projector != nil {
+		return subtree.RealRef(p.o.Branch)
+	}
+	return remotePrefix + p.o.Branch
+}
+
+// tip returns the commit that the checkout is to be compared with, and for a directory the tip of the repository that it is the
+// snapshot of. It fetches only when the repository's tip is not the one that the checkout holds, which is the cheap question
+// that keeps many Treebinds from hammering one Git host (R-19).
+func (p *Puller) tip(ctx context.Context, remote, known string) (tip, source string, err error) {
+	if p.projector == nil {
+		if remote == known {
+			return known, "", nil
+		}
+		tip, err = p.fetch(ctx)
+		return tip, "", err
+	}
+	if remote == known {
+		tip, err = p.try(ctx, "rev-parse", "--verify", "--quiet", remotePrefix+p.o.Branch+"^{commit}")
+		if err != nil {
+			return "", "", p.fail(ReasonPullFailed, "the checkout in %s cannot be read: %v", p.o.Layout.GitDir, err)
+		}
+		return tip, known, nil
+	}
+	return p.fetchDirectory(ctx)
+}
+
+// advance compares the checkout, which is at head, with the tip, and applies what is new.
+func (p *Puller) advance(ctx context.Context, head, tip string) (Result, error) {
 	if head == tip {
 		return Result{Outcome: UpToDate, Branch: p.o.Branch, From: head, To: tip}, nil
 	}
@@ -373,6 +435,24 @@ func (p *Puller) fetch(ctx context.Context) (string, error) {
 		return "", p.fail(ReasonFetchFailed, "the branch %s was fetched but cannot be read: %v", p.o.Branch, err)
 	}
 	return strings.TrimSpace(string(out.Stdout)), nil
+}
+
+// fetchDirectory fetches the branch into the ref that a fetch brings the tip to, and makes the snapshot of the directory at it, which
+// is the one that the checkout is compared with, and then holds the tip. It returns the snapshot and the tip it is of.
+func (p *Puller) fetchDirectory(ctx context.Context) (snapshot, source string, err error) {
+	refspec := "+" + headsPrefix + p.o.Branch + ":" + subtree.FetchRef(p.o.Branch)
+	if _, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+		"--", p.o.URL, refspec); err != nil {
+		return "", "", p.fail(ReasonFetchFailed, "the branch %s cannot be fetched: %v", p.o.Branch, err)
+	}
+	projection, err := p.projector.Project(ctx)
+	if err != nil {
+		if refusal, ok := errors.AsType[*subtree.Error](err); ok {
+			return "", "", &Error{Reason: refusal.Reason, Message: refusal.Message, Err: refusal}
+		}
+		return "", "", p.fail(ReasonPullFailed, "the files of the directory of the branch %s cannot be made: %v", p.o.Branch, err)
+	}
+	return projection.Snapshot, projection.Real, nil
 }
 
 // fastForward applies the commits up to tip to the checkout, which is at from, or has no commit
