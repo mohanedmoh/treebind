@@ -155,6 +155,7 @@ func (l *pulls) report(ctx context.Context, result pull.Result, err error, clear
 		return false
 	}
 	checked, failed := pullResult(result, err)
+	l.a.agreedByPull(l.p, result, err)
 	if note := clearedNote(cleared); note != "" {
 		checked.Message += "; " + note
 	}
