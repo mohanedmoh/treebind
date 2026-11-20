@@ -277,6 +277,13 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	if branch := treebind.Spec.Repository.Branch; branch != "" {
 		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoBranch, Value: branch})
 	}
+	// The directory of the repository whose files are the synced directory (docs/adr/0036). The variable is left out when the
+	// whole repository is synced, so that a pod template that never had it does not change, and its pod is not replaced, when
+	// the operator learns to pass it on. The kubelet expands $(NAME) and $$ in the value of a variable, and the CRD takes a
+	// path with a '$' in it, so each one is written as $$, which the kubelet turns back into one.
+	if repoPath := treebind.Spec.Repository.Path; repoPath != "" {
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoPath, Value: strings.ReplaceAll(repoPath, "$", "$$")})
+	}
 	// How to sync, and who the pod is, for the writer lock (docs/adr/0021). Without an interval the
 	// agent uses the default of the CRD, which is what the API server fills in.
 	if interval := treebind.Spec.Sync.Interval; interval != nil {
