@@ -89,6 +89,7 @@ with no restart.
 - **Changing `spec.sync.interval` replaces the sync pod.** The new pod uses the new interval.
 - **The agent is ready once a pull has passed, and stays ready.** The sync pod, and so the `Ready` condition of the
   Treebind, turns ready after the first pull that is `Passed`, whether the checkout was at the tip, advanced or
-  ahead. A pull that fails later does not make it not ready: the files are as they were, and the check says what the
-  pull found. A repository with no commit yet, and a branch that is gone, say `BranchGone`, so the Treebind is not
-  ready until the branch has a commit. See [the probes](agent-status.md#the-probes).
+  ahead. A pull that fails later does not make the pod not ready: the files are as they were, and the check says what the
+  pull found. The condition `Synced` says it in the Treebind, and turns `Ready` `False` only for a reason that a person puts
+  right, as [the conditions](agent-status.md#ready) say. A repository with no commit yet, and a branch that is gone, say
+  `BranchGone`, so the Treebind is not ready until the branch has a commit. See [the probes](agent-status.md#the-probes).

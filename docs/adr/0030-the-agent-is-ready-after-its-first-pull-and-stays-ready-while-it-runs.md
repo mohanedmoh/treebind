@@ -5,6 +5,8 @@
 - Issue: #48
 - Extended by: [0033](0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md), which
   makes the first push that works a sync too for a `bidirectional` Treebind
+- Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
+  says how `Ready` follows `Synced`: a failure that waits for the Git host leaves it `True`
 
 ## Context
 

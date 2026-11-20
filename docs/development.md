@@ -129,8 +129,11 @@ deletes the cluster.
 of the MVP with the real agent: a Treebind that syncs in both directions, a pod that mounts the claim with the same `subPath` as an
 application does, and the ssh remote that `make dev-ssh` starts. A file written in the pod has to be a commit on the remote, a
 commit pushed from Git has to be a file in the pod, and both have to go on after the pod of the sync is deleted with and without its
-grace period and after the leader of the operator is deleted. What `kubectl describe` shows of the outcomes is a pending spec, and
-its output says so, until the operator writes `Synced` from the report of the agent.
+grace period and after the leader of the operator is deleted. The last spec reads the outcomes as a user does, with `kubectl
+describe`: after each of the two changes `Synced` is `True` with the reason `InSync`, `Conflict` is `False`, `Ready` stays `True`,
+and `Last Synced Commit` is the full id of the tip of the remote ([the conditions](agent-status.md#what-synced-and-conflict-say)).
+The operator reads the report of the agent every 30 seconds, so that spec waits for the status for up to two minutes after the
+change has arrived.
 
 The suite builds the agent image with ko into the cluster, as `make dev` does, so `make ko` downloads it the first time. It needs
 the network for what the cluster pulls (the image of the remote, `busybox` for the pod of the application) and for the `apk` that the

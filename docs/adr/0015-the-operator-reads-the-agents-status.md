@@ -3,6 +3,9 @@
 - Status: accepted
 - Date: 2026-11-13
 - Issue: #99
+- Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
+  tells a report of the current spec from one of the spec before by the hash of the pod template and not by a
+  generation, and writes `Synced` and `Conflict` from the report
 
 ## Context
 

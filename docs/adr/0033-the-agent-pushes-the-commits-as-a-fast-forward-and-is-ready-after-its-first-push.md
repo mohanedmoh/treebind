@@ -4,6 +4,8 @@
 - Date: 2026-11-18
 - Issue: #37
 - Extends: [0030](0030-the-agent-is-ready-after-its-first-pull-and-stays-ready-while-it-runs.md)
+- Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
+  shows a rejected or failed push as `Synced` `False` with the reason of the `Push` check
 
 ## Context
 

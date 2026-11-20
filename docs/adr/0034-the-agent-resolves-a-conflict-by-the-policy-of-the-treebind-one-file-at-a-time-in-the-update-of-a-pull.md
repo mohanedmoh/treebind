@@ -4,6 +4,8 @@
 - Date: 2026-11-18
 - Issue: #38
 - Extends: [0020](0020-the-agent-pulls-by-fast-forward-and-never-writes-over-a-local-edit.md), [0033](0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md)
+- Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
+  writes the `Conflict` condition, and makes a resolution that could not be made fail the `Conflict` check
 
 ## Context
 

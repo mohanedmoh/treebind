@@ -45,21 +45,45 @@ the commits that came from it, except when both sides held the same files: the c
 ## What the report says
 
 The `Pull` check says `resolved a conflict` and points at the `Conflict` check, which comes after `Push` and is `Skipped` until
-a conflict has been resolved, and says that none has been since the agent started, which is all it knows: a conflict that
-every resolution fails is in the failed `Pull` check. After a resolution it is `Passed` with the reason `ConflictResolved`, and
-its message has the policy, how many commits each side had, how many files had the winner's version, how many were kept from
-the other side, the commit that was made, or that none was, and, for `followRemote`, the ref that keeps the commits of your
-directory. It says that until the next resolution, and
-it does not change `Ready`. A resolution that cannot be made, for a file with a local edit, an untracked file in the way or too
-many deletions, is a failed `Pull` whose message begins with `the conflict between the checkout and the branch ... was not
-resolved`. The push of what a resolution made is tried at the next scan, without waiting for the interval of a push that was
-refused. A resolution that made no commit has nothing new to push, and leaves that wait as it was.
+a conflict has been resolved, and says that none has been since the agent started, which is all it knows. After a resolution
+it is `Passed` with the reason `ConflictResolved`, and its message has the policy, how many commits each side had, how many
+files had the winner's version, how many were kept from the other side, the commit that was made, or that none was, and, for
+`followRemote`, the ref that keeps the commits of your directory. It says that until the next resolution, and it does not
+change whether the agent is ready.
+
+A resolution that cannot be made, for a file with a local edit, an untracked file in the way, too many deletions or the limit
+of commits of the hour, is a failed `Pull` whose message begins with `the conflict between the checkout and the branch ... was
+not resolved`, and it makes the `Conflict` check `Failed` with the reason of the update: `Blocked`, `TooManyDeletions`,
+`TooManyCommits`, `Refused` or `PullFailed`. An update that is no conflict fails with the same reasons and leaves the check as
+it was. The next pull that passes without a conflict puts the check back to what it said before, the last resolution or
+`Skipped`, and a pull that fails for another cause leaves it as it was. The push of what a resolution made is tried at the next scan, without waiting for the interval of a push
+that was refused. A resolution that made no commit has nothing new to push, and leaves that wait as it was.
+
+## What the Treebind says
+
+The operator derives the condition `Conflict` from that check, and writes it with `Synced` at its next poll of the agent
+([the conditions](agent-status.md#conflict)).
+
+| `Conflict` | Reason | When |
+| :-- | :-- | :-- |
+| `True` | The reason of the update that could not be made | The last pull found a conflict and could not resolve it, and no pull has passed since. Local work waits for a person: the message and the `Pull` check say which update was refused |
+| `False` | `ConflictResolved` | The last conflict that the agent found since it started was resolved, with either policy |
+| `False` | `NoConflict` | The agent knows of no conflict that waits, and has resolved none since it started. It is the answer for a `pull` Treebind too, whose `Diverged` is `Synced` `False` and not a conflict |
+| `Unknown` | As `Synced` | The operator does not know what the sync does, and `Synced` says why: no report yet, a report that is not of the current spec, none yet in which the agent has seen the two agree since it started, or an agent that cannot be read |
+
+A conflict that cannot be resolved is a failed step, so `Synced` is `False` with the same reason, and `Ready` follows that as
+[the status page](agent-status.md#ready) says. `Conflict` is not an input of `Ready`: with `TooManyDeletions`, `TooManyCommits`,
+`Refused` and `PullFailed`, which a person puts right, `Ready` turns `False` with `NotSynced`, and with `Blocked`, which the
+next scan and pull put right by committing the edit, it stays `True`. A resolution is not a conflict that waits: `ConflictResolved`
+is `False`, because the sync went on by the policy. The agent keeps what it knows in memory, so after a restart `Conflict` can
+say `NoConflict`, when `Synced` is `False` for another step, until a pull finds the conflict again.
 
 ## What it does not do
 
 - **It does not write over a local edit.** A file that has an edit that is not committed yet, and that the resolution would
   change, an untracked file in its way, or a file that a `.gitignore` hides, makes the pull `Blocked`, as for an update, and
-  nothing is written. The agent commits the edit at its next scan, and the pull goes on.
+  nothing is written. `Conflict` is `True` with that reason until a pull passes. The agent commits the edit at its next scan,
+  and the pull goes on.
 - **It does not remove many files.** The cap of [the deletion guard](deletion-guard.md) applies to what a resolution removes.
 - **It does not force and does not rewrite.** The repository's refs are never written by a pull, and the push that follows
   is the fast-forward of [pushing](local-changes.md).

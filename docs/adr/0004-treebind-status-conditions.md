@@ -3,6 +3,9 @@
 - Status: accepted
 - Date: 2026-11-11
 - Issue: #26
+- Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
+  writes `Synced` and `Conflict` from the agent's report, names their reasons, and makes `Ready` `False` with
+  `NotSynced` only for a failure that waits for a person
 
 ## Context
 
