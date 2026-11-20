@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
@@ -175,11 +176,10 @@ func BuildAgentImage() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// ko writes what it does to standard error and the reference of the image to standard output, and Run gives both, so the
-	// reference is the last line that names an image of the repository that ko was told to publish to.
-	lines := GetNonEmptyLines(output)
-	for i := len(lines) - 1; i >= 0; i-- {
-		if reference := strings.TrimSpace(lines[i]); strings.HasPrefix(reference, "kind.local/") {
+	// ko writes what it does to standard error and the reference of the image to standard output, and Run gives
+	// both, so the reference is the last line that names an image of the repository that ko was told to publish to.
+	for _, line := range slices.Backward(GetNonEmptyLines(output)) {
+		if reference := strings.TrimSpace(line); strings.HasPrefix(reference, "kind.local/") {
 			return reference, nil
 		}
 	}
