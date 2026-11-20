@@ -51,6 +51,12 @@ jobs:
           NODE_IMAGE: ${{ inputs.node-image }}
         run: kind create cluster --name "$KIND_CLUSTER" --image "$NODE_IMAGE" --wait 120s
 
+      # setup-go pins the toolchain that go.mod names and sets GOTOOLCHAIN=local, and the ko that the suite builds the agent
+      # image with needs a newer Go than that to be built. The toolchain that it asks for is allowed for this step only,
+      # and the suite finds bin/ko built.
+      - name: Install ko
+        run: GOTOOLCHAIN=auto make ko
+
       - name: Run the end-to-end suite
         run: make test-e2e
 
