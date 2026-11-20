@@ -424,12 +424,21 @@ type TreebindStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// lastSyncedCommit is the commit the volume and the repository last agreed
-	// on.
+	// lastSyncedCommit is the commit of the repository at which the sync agent
+	// last found the volume and the repository in agreement, after a pull or a
+	// push. It is the full id of the commit of the repository, also when
+	// spec.repository.path syncs only one directory of it, and it is absent until
+	// they have agreed once. A step that fails, a restart of the sync pod and a
+	// poll that does not get the report change nothing here: the Synced condition
+	// says whether they agree now.
 	// +optional
 	LastSyncedCommit string `json:"lastSyncedCommit,omitempty"`
 
-	// lastSyncTime is when the last sync finished.
+	// lastSyncTime is when the volume and the repository came to agree at
+	// lastSyncedCommit. It moves when lastSyncedCommit does, and not at every
+	// pull that finds nothing new, so a Treebind with nothing to sync keeps it.
+	// Whether the report is current is what the AgentUnreachable and Synced
+	// conditions say.
 	// +optional
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 
@@ -476,16 +485,149 @@ const (
 	ReasonReconcileFailed = "ReconcileFailed"
 
 	// ConditionSynced is the type of the condition that says whether the volume
-	// matches the repository at status.lastSyncedCommit.
+	// matches the repository at status.lastSyncedCommit. It is True when no step
+	// of the sync has failed, False with the reason of the step that failed, and
+	// Unknown while the operator cannot tell, which its reasons say. The reasons of
+	// False are the ones the agent reports for its steps, spelled as it spells them,
+	// and are API in the sense of docs/adr/0004: users and tooling match on them.
 	ConditionSynced = "Synced"
 
-	// ConditionConflict is the type of the condition that says whether local work
-	// is parked and waits for someone to resolve it.
+	// ConditionConflict is the type of the condition that says whether the last pull
+	// found a conflict between the volume and the repository that it could not
+	// resolve, so that local work waits for someone. It is True with the reason of the
+	// update that could not be made, False when there is no such conflict, and Unknown
+	// as Synced is. A Treebind that only pulls has no conflict to resolve: an update
+	// that it cannot take is Synced False. It never changes Ready.
 	ConditionConflict = "Conflict"
 
 	// ReasonAwaitingAgentReport means the sync agent has not reported yet, so the
 	// condition is Unknown.
 	ReasonAwaitingAgentReport = "AwaitingAgentReport"
+	// ReasonAgentUnreachable means the operator has not been able to read the report
+	// of the agent for the time that AgentUnreachable waits, so it does not know what
+	// the sync does. The condition is Unknown.
+	ReasonAgentUnreachable = "AgentUnreachable"
+	// ReasonSyncPending means the report has no outcome of the sync to give yet: the
+	// lock, the checkout or the first pull is still to come, as it is after every start
+	// of the sync pod. The condition is Unknown.
+	ReasonSyncPending = "SyncPending"
+	// ReasonAgentOutdated means the report is of an agent that runs another pod
+	// template than the spec gives now, as the sync pod does while it is replaced, so it
+	// says nothing of the sync of this spec. The condition is Unknown.
+	ReasonAgentOutdated = "AgentOutdated"
+	// ReasonInSync means no step of the sync failed and the volume and the repository
+	// agree at status.lastSyncedCommit. The condition is True.
+	ReasonInSync = "InSync"
+	// ReasonSyncFailed means a step of the sync failed with a reason that this release
+	// of the operator does not define, as an agent of another release can report, so
+	// that the operator writes no reason it did not define. The condition is False, and
+	// the log of the sync pod says which step and why.
+	ReasonSyncFailed = "SyncFailed"
+	// ReasonNoConflict means the last pull found no conflict, or the Treebind only
+	// pulls, which has none to resolve. The Conflict condition is False.
+	ReasonNoConflict = "NoConflict"
+	// ReasonConflictResolved means the last conflict that the agent found since it
+	// started was resolved by spec.sync.conflictPolicy, including one by followRemote,
+	// which keeps the volume's version of a file in a ref that is never pushed. The
+	// Conflict condition is False.
+	ReasonConflictResolved = "ConflictResolved"
+
+	// The reasons that follow are the reasons of a step of the sync that failed, spelled
+	// as the sync agent spells them in its report, and a test holds them to the agent's
+	// (docs/adr/0009). Synced is False with the reason of a step that failed, and Conflict
+	// is True with the reason of the pull when it could not resolve a conflict.
+
+	// ReasonMountPathInvalid means the path where the volume is mounted does not exist,
+	// cannot be read or is not a directory.
+	ReasonMountPathInvalid = "MountPathInvalid"
+	// ReasonNotMounted means the path is on the container's own filesystem and not on a
+	// mounted volume.
+	ReasonNotMounted = "NotMounted"
+	// ReasonNotWritable means the user of the sync agent cannot create a file in the
+	// directory.
+	ReasonNotWritable = "NotWritable"
+	// ReasonReadOnlyVolume means the volume refuses writes.
+	ReasonReadOnlyVolume = "ReadOnlyVolume"
+	// ReasonWriteFailed means writing to the volume failed for another reason, such as a
+	// full volume or an I/O error.
+	ReasonWriteFailed = "WriteFailed"
+	// ReasonGitDirUnsafe means the Git directory, the state directory or a directory on
+	// the way to the synced directory is a link, belongs to another user or is open to
+	// others, or the Git directory holds something the agent did not put there, such as a
+	// hook or a config key, or the agent cannot look at it to tell. Git is not run against
+	// it, and the directory is left as it is.
+	ReasonGitDirUnsafe = "GitDirUnsafe"
+	// ReasonTimedOut means the volume did not answer in time.
+	ReasonTimedOut = "TimedOut"
+	// ReasonLockFailed means the lock that keeps one agent writing to the volume could
+	// not be taken: the volume refused it, or it is held in a format that a newer release
+	// wrote. The agent tries again with a growing wait.
+	ReasonLockFailed = "LockFailed"
+	// ReasonDirectoryNotEmpty means the directory holds files that are not the branch's,
+	// and the agent does not write over data it did not put there. Nothing was touched.
+	ReasonDirectoryNotEmpty = "DirectoryNotEmpty"
+	// ReasonRepositoryMismatch means the Git directory that is there is of another
+	// repository, or follows another branch than the one the Treebind names.
+	ReasonRepositoryMismatch = "RepositoryMismatch"
+	// ReasonBranchNotFound means the repository has no such branch, or no default branch
+	// to follow.
+	ReasonBranchNotFound = "BranchNotFound"
+	// ReasonReservedPath means the branch has a file where the agent keeps its own state,
+	// and a checkout or an update would write it there.
+	ReasonReservedPath = "ReservedPath"
+	// ReasonFetchFailed means a command that asks the repository failed: the host cannot
+	// be reached, the key is refused, or the repository does not exist.
+	ReasonFetchFailed = "FetchFailed"
+	// ReasonCheckoutFailed means the agent could not make the checkout on the volume.
+	ReasonCheckoutFailed = "CheckoutFailed"
+	// ReasonPathNotFound means the branch has no directory at spec.repository.path, or has
+	// something there that is not one. Nothing was written.
+	ReasonPathNotFound = "PathNotFound"
+	// ReasonPathMismatch means the checkout was made for another directory than the one
+	// spec.repository.path names now, or for the whole repository, and a checkout is not
+	// changed to the other. Nothing was written.
+	ReasonPathMismatch = "PathMismatch"
+	// ReasonBlocked means the update changes a file that has a local edit, or that an
+	// untracked file is in the way of. Nothing was written, and the next pull tries again.
+	ReasonBlocked = "Blocked"
+	// ReasonDiverged means the volume and the repository each have commits that the other
+	// lacks, and the Treebind has no conflict policy to say which wins because it only
+	// pulls. Nothing was written.
+	ReasonDiverged = "Diverged"
+	// ReasonBranchGone means the repository has no such branch any more.
+	ReasonBranchGone = "BranchGone"
+	// ReasonTooManyDeletions means the update would remove more files from the directory
+	// than spec.sync.maxDeletions allows at once, or every file of the branch. Nothing was
+	// written, and the agent asks again at every interval.
+	ReasonTooManyDeletions = "TooManyDeletions"
+	// ReasonRefused means the agent stopped the update itself, as when it lost the lock
+	// while the update ran.
+	ReasonRefused = "Refused"
+	// ReasonTooManyCommits means a commit is not made because the agent has made as many
+	// in the last hour as spec.commit.maxPerHour allows. The files stay on the volume, or
+	// the conflict stays unresolved, until one of the commits of the hour is an hour old.
+	ReasonTooManyCommits = "TooManyCommits"
+	// ReasonPullFailed means the agent could not pull for another reason: Git failed on
+	// the volume, or the checkout is not what a pull expects.
+	ReasonPullFailed = "PullFailed"
+	// ReasonScanFailed means the agent could not look for the files that changed on the
+	// volume.
+	ReasonScanFailed = "ScanFailed"
+	// ReasonCommitFailed means a commit could not be made: Git said no, the lock could not
+	// be checked, or the volume refused a write. The files stay on the volume, and the next
+	// scan finds them again.
+	ReasonCommitFailed = "CommitFailed"
+	// ReasonNonFastForward means the repository has commits on the branch that the volume
+	// lacks, so the push is not a fast-forward. The agent does not force it: the next pull
+	// brings the commits, or the conflict policy says which side wins.
+	ReasonNonFastForward = "NonFastForward"
+	// ReasonPushRejected means the repository refused the push: a protected branch, a hook,
+	// a rule, a file that is too large, a secret that it found. A person puts it right.
+	ReasonPushRejected = "PushRejected"
+	// ReasonPushFailed means the push could not be made: the repository did not answer, the
+	// key was refused, the volume refused, or the lock could not be checked. The agent tries
+	// again with a growing wait.
+	ReasonPushFailed = "PushFailed"
 
 	// ConditionAgentUnreachable is the type of the condition that says whether the
 	// operator can read the report of the sync agent. It is False while it can,

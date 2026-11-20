@@ -677,13 +677,23 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               lastSyncTime:
-                description: lastSyncTime is when the last sync finished.
+                description: |-
+                  lastSyncTime is when the volume and the repository came to agree at
+                  lastSyncedCommit. It moves when lastSyncedCommit does, and not at every
+                  pull that finds nothing new, so a Treebind with nothing to sync keeps it.
+                  Whether the report is current is what the AgentUnreachable and Synced
+                  conditions say.
                 format: date-time
                 type: string
               lastSyncedCommit:
                 description: |-
-                  lastSyncedCommit is the commit the volume and the repository last agreed
-                  on.
+                  lastSyncedCommit is the commit of the repository at which the sync agent
+                  last found the volume and the repository in agreement, after a pull or a
+                  push. It is the full id of the commit of the repository, also when
+                  spec.repository.path syncs only one directory of it, and it is absent until
+                  they have agreed once. A step that fails, a restart of the sync pod and a
+                  poll that does not get the report change nothing here: the Synced condition
+                  says whether they agree now.
                 type: string
               observedGeneration:
                 description: |-
