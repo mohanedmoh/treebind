@@ -284,6 +284,11 @@ func main() {
 			Client: mgr.GetClient(), Namespace: operatorNamespace, ServiceAccount: operatorAccount,
 		}),
 		StatusKeys: statusKeys,
+		// The settings of the reconcile of the spec, from which the poller computes the
+		// hash of the pod template that the spec gives.
+		AgentImage:    agentImage,
+		StatusIssuer:  status.Issuer,
+		StatusSubject: status.Subject,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind-status")
 		os.Exit(1)

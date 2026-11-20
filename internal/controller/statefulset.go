@@ -201,21 +201,34 @@ func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agent agentSettings
 }
 
 // desiredPodTemplate returns the pod template of the sync pod, with the hash of the rest of the template as the last
-// variable of the agent. The agent reports it, which is how the operator tells which template a report is of. The
-// variable is a function of the rest of the template, so the template changes exactly when it did without the variable,
-// and once more when the operator first sets it: every sync pod is replaced at that upgrade, and that is meant.
+// variable of the agent, agentTemplateHash. The agent reports it, which is how the operator tells which template a
+// report is of. The variable is a function of the rest of the template, so the template changes exactly when it did
+// without the variable, and once more when the operator first sets it: every sync pod is replaced at that upgrade, and
+// that is meant.
 func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings) (corev1.PodTemplateSpec, error) {
-	template, err := podTemplateWithoutHash(treebind, agent)
+	hash, err := agentTemplateHash(treebind, agent)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, err
 	}
-	hash, err := templateHash(template)
+	template, err := podTemplateWithoutHash(treebind, agent)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, err
 	}
 	container := &template.Spec.Containers[0]
 	container.Env = append(container.Env, corev1.EnvVar{Name: agentconfig.EnvTemplateHash, Value: hash})
 	return template, nil
+}
+
+// agentTemplateHash returns the hash that the agent of the Treebind is given in its pod template, the hash of the rest
+// of the template that the spec and the settings of the operator give. The status poller compares the hash in a report
+// with it to tell a report of the current spec from one of the spec before, so this is the one place it is computed:
+// a poller that computed it another way would take every report for one of another template.
+func agentTemplateHash(treebind *treebindv1alpha1.Treebind, agent agentSettings) (string, error) {
+	template, err := podTemplateWithoutHash(treebind, agent)
+	if err != nil {
+		return "", err
+	}
+	return templateHash(template)
 }
 
 // podTemplateWithoutHash returns the pod template that the spec and the settings of the operator say, without the variable
