@@ -120,7 +120,19 @@ type RepositorySpec struct {
 	Branch string `json:"branch,omitempty"`
 
 	// path is a directory inside the repository. Only that directory is synced
-	// with the volume. The whole repository is used when it is empty.
+	// with the volume: its files are the files of the synced directory, at the
+	// root of it (target.subPath, or the whole claim), and nothing else of the
+	// repository is written to the volume. The patterns of paths are relative to
+	// it. The whole repository is used when it is empty. The branch has to have
+	// the directory when the Treebind starts, so that a mistake in the name does
+	// not make the agent commit the application's files into a new directory of
+	// the repository. A commit of the agent changes the files of the directory
+	// and nothing outside it.
+	//
+	// A volume that is synced with the whole repository is not changed to
+	// sync only a directory of it, nor the other way round: the agent refuses
+	// to start it, with every file where it is, and says how to keep what is
+	// there and how to start again.
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024
 	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/') && self != '.' && !self.contains('\\\\') && !self.contains('//') && !('..' in self.split('/'))",message="path must be relative, must not be '.' and must not contain '..', '//' or a backslash"
