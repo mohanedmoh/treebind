@@ -91,6 +91,9 @@ func TestAResolutionThatNeedsACommitIsNotMadeWhenTheBreakerHoldsAndWritesNothing
 			if !errors.Is(err, held) {
 				t.Errorf("error = %v, want it to wrap what the breaker said", err)
 			}
+			if !failure.Conflict {
+				t.Error("a resolution that the breaker held does not say that it was a conflict")
+			}
 			for _, want := range []string{"was not resolved", held.Error()} {
 				if !strings.Contains(failure.Message, want) {
 					t.Errorf("message = %q, want it to have %q", failure.Message, want)

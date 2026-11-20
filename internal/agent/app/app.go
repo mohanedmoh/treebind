@@ -326,7 +326,8 @@ type progress struct {
 	// changes is the scan for local changes, which only a Treebind that syncs in both directions has, commit is
 	// what came of the last commit of the files that the scans found settled, and push of the last push.
 	changes, commit, push *preflight.Result
-	// conflict is what the last resolution of a conflict did, which only a Treebind that syncs in both directions has.
+	// conflict is what the last resolution of a conflict did, or that it could not be made, which only a Treebind that
+	// syncs in both directions has.
 	conflict *preflight.Result
 	// synced is the step that first saw the checkout and the branch at the commit that they last agreed on, and is zero
 	// until one has. agreed says which steps count.

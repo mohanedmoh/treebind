@@ -39,9 +39,14 @@ const CheckPull = "Pull"
 
 // CheckConflict is the name of the check that says what the last resolution of a conflict between the checkout and the
 // repository did (docs/adr/0034). It is in the report after the push, for a Treebind that syncs in both directions, and
-// is skipped until a conflict is found. It never changes what the agent says about being ready, and the Conflict
-// condition of the Treebind is written from it by the issue that owns the condition (#74).
+// is skipped until a conflict is found. It is failed, with the reason of the update, from a pull that found a conflict
+// and could not resolve it until the next pull that passes without one, which puts back what it said before. It never
+// changes what the agent says about being ready. The operator derives the Conflict condition of the Treebind from it.
 const CheckConflict = "Conflict"
+
+// conflictNotResolved is what the Conflict check says until a conflict is resolved: it says nothing of whether one
+// exists.
+const conflictNotResolved = "no conflict has been resolved since the agent started"
 
 // Puller pulls into the checkout once. The Puller of package pull is one.
 type Puller interface {
@@ -80,7 +85,7 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 	}
 	l := &pulls{a: a, p: p, options: options}
 	if a.Config.SyncDirection == config.DirectionBidirectional {
-		p.conflict = notTried(CheckConflict, "no conflict has been resolved since the agent started")
+		p.conflict = notTried(CheckConflict, conflictNotResolved)
 	}
 
 	p.pulling = notTried(CheckPull, fmt.Sprintf("waiting: the first pull is due in %s", phase.Round(time.Second)))
@@ -115,6 +120,8 @@ type pulls struct {
 	// puller is made at the first pull, and again at the next when it could not be made.
 	puller                 Puller
 	logged, loggedConflict []string
+	// resolution is what the Conflict check said of the last conflict that was resolved, and is nil until there is one.
+	resolution *preflight.Result
 	// resolved is called when a pull resolved a conflict by making a commit, and is nil when there are no scans, so that
 	// nothing is pushed.
 	resolved func()
@@ -162,12 +169,14 @@ func (l *pulls) report(ctx context.Context, result pull.Result, err error, clear
 	l.p.pulling = &checked
 	if err == nil && result.Outcome == pull.Resolved && result.Resolution != nil {
 		conflict := conflictResult(result)
-		l.p.conflict = &conflict
+		l.p.conflict, l.resolution = &conflict, &conflict
 		// A commit waits for a push, and a resolution that made none leaves the wait of a push that failed as it was: asking
 		// the Git host again at once for nothing new is what the wait is there against (R-19).
 		if l.resolved != nil && result.Resolution.Commit != "" {
 			l.resolved()
 		}
+	} else {
+		l.unresolved(err)
 	}
 	l.a.publish(l.p)
 	l.logged = l.a.logChanges("pull", []preflight.Result{checked}, l.logged)
@@ -179,6 +188,29 @@ func (l *pulls) report(ctx context.Context, result pull.Result, err error, clear
 		l.a.becomeReady("the first pull passed, and the agent reports itself ready")
 	}
 	return failed
+}
+
+// unresolved puts what a pull that resolved no conflict says in the Conflict check. A pull that found a conflict and
+// could not resolve it makes the check failed, with the reason of the update, until a pull passes with none, which puts
+// back what the check said before the failure: the last resolution, or not tried. A pull that failed for another cause
+// says nothing of a conflict and leaves the check as it was. A Treebind that only pulls has no check. The failure is in
+// the log once, as the failure of the Pull check, which has the same message.
+func (l *pulls) unresolved(err error) {
+	if l.p.conflict == nil {
+		return
+	}
+	if failure, ok := errors.AsType[*pull.Error](err); ok && failure.Conflict {
+		l.p.conflict = &preflight.Result{
+			Check: CheckConflict, Outcome: preflight.Failed, Reason: failure.Reason, Message: shortened(failure.Message),
+		}
+		return
+	}
+	if err == nil && l.p.conflict.Outcome == preflight.Failed {
+		l.p.conflict = l.resolution
+		if l.p.conflict == nil {
+			l.p.conflict = notTried(CheckConflict, conflictNotResolved)
+		}
+	}
 }
 
 // pullResult turns what a pull did, or why it could not, into the result of the check, and says whether

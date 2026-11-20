@@ -223,6 +223,9 @@ func TestAResolutionIsRefusedWhenItWouldRemoveMoreFilesThanTheCapAndWritesNothin
 			if !strings.Contains(got.Message, "4 file(s)") {
 				t.Errorf("message = %q, want the number of files", got.Message)
 			}
+			if !got.Conflict {
+				t.Error("the refusal of a resolution does not say that it was a conflict")
+			}
 			w.wantNotMoved(t, local)
 			wantFiles(t, w, map[string]string{fileA: mine, fileB: contentB, fileE: contentE})
 		})
@@ -311,6 +314,9 @@ func TestAResolutionWritesNothingWhenTheFenceRefusesAndOnlyTheLocalRefWhenItRefu
 				if !errors.Is(err, f.lost) || !strings.Contains(got.Message, "the lock is lost") {
 					t.Errorf("error = %v, want the refusal of the caller underneath and in the message", err)
 				}
+				if !got.Conflict {
+					t.Error("the refusal of a resolution by the fence does not say that it was a conflict")
+				}
 				w.wantNotMoved(t, local)
 				wantFiles(t, w, map[string]string{fileA: mine, fileB: contentB})
 				if refuse == 1 {
@@ -380,6 +386,27 @@ func TestAResolutionThatCannotBeMadeSaysThatTheConflictWasNotResolved(t *testing
 				!strings.Contains(got.Message, fileB) {
 				t.Errorf("message = %q, want it to say that the conflict was not resolved, and the file", got.Message)
 			}
+			if !got.Conflict {
+				t.Error("the failure of a resolution does not say that it was a conflict")
+			}
+		})
+	}
+}
+
+// What a resolution is refused for, an update is refused for too, with the same reason, and only the *Error says which it was.
+func TestAnUpdateThatIsNoConflictIsBlockedWithTheSameReasonAndNoConflictInTheError(t *testing.T) {
+	for _, policy := range []Policy{FollowRemote, FollowLocal} {
+		t.Run(string(policy), func(t *testing.T) {
+			w := newWorld(t, subPath, resolving(policy))
+			gittest.Write(t, w.l, fileB, edited)
+			w.f.Publish(branchMain, map[string]string{fileB: bChanged})
+
+			_, err := w.pull(t)
+
+			got := errorOf(t, err, ReasonBlocked)
+			if got.Conflict || strings.Contains(got.Message, "was not resolved") {
+				t.Errorf("error = %+v, want an update that is no conflict: the checkout has no commit that the repository lacks", got)
+			}
 		})
 	}
 }
@@ -396,6 +423,9 @@ func TestAResolutionWithoutAnAuthorIsRefusedBeforeItWritesAnything(t *testing.T)
 			got := errorOf(t, err, ReasonPullFailed)
 			if !strings.Contains(got.Message, "no valid author") || !strings.Contains(got.Message, "was not resolved") {
 				t.Errorf("message = %q, want it to say that the commits of the agent have no valid author", got.Message)
+			}
+			if !got.Conflict {
+				t.Error("the failure of a resolution for want of an author does not say that it was a conflict")
 			}
 			w.wantNotMoved(t, local)
 			w.wantLocalRefs(t)
