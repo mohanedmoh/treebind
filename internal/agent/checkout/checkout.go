@@ -41,6 +41,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
+	"github.com/mohanedmoh/treebind/internal/agent/subtree"
 )
 
 // DefaultFetchTimeout is how long the first fetch and the checkout may take. A large
@@ -126,6 +127,10 @@ type Options struct {
 	URL string
 	// Branch is the branch to follow, or empty for the default branch of the repository.
 	Branch string
+	// Path is the directory of the repository that is the synced directory (spec.repository.path), or empty for the whole
+	// repository. The files of the checkout are then the ones of that directory at the root, and its branch is a branch of
+	// snapshots of it (docs/adr/0036).
+	Path string
 	// Git are the settings of the Runner: the git binary, ssh and the CA bundle. GitDir,
 	// WorkTree and AllowGitDirInWorkTree are taken from Layout, and VerifyGitDir is always
 	// set.
@@ -144,6 +149,9 @@ type Result struct {
 	// Commit is the commit the checkout is at, or empty when the branch has none yet: the
 	// repository has no commits, and the first sync makes the first one.
 	Commit string
+	// Source is, for a directory of the repository, the commit of the repository that Commit is the snapshot of, which is the one a
+	// person can look up. It is empty for the whole repository, and when the checkout is at a commit of its own.
+	Source string
 }
 
 // Test hook, replaced only by tests.
@@ -161,6 +169,9 @@ func Open(ctx context.Context, o Options) (Result, error) {
 	}
 	if err := config.CheckBranch(o.Branch); err != nil {
 		return Result{}, fmt.Errorf("checkout: the branch %q %w", o.Branch, err)
+	}
+	if err := config.CheckRepoPath(o.Path); err != nil {
+		return Result{}, fmt.Errorf("checkout: the path %q %w", o.Path, err)
 	}
 	if o.FetchTimeout == 0 {
 		o.FetchTimeout = DefaultFetchTimeout
@@ -210,14 +221,35 @@ type checkout struct {
 	git *git.Runner
 	// branch is the branch that is followed, once it is known.
 	branch string
+	// projector makes the snapshots of the directory, and is nil for the whole repository.
+	projector *subtree.Projector
 }
 
 func (c *checkout) open(ctx context.Context) (Result, error) {
+	// A checkout is of the directory it was made for, or of the whole repository, and is not changed to the other (FR-18). It is
+	// judged first, before the repository is asked or a file is read: nothing goes over the network for a checkout that is refused,
+	// and a host that is down is not what the Treebind is told. A Git directory that has no commit is a first checkout that did not
+	// finish, which is judged afresh whatever it was made for, with the rules that protect a volume that holds data (ADR 0017): a
+	// start that was stopped before the marker was written must not be refused for it.
+	if c.hasRepository() {
+		if refusal, err := c.judgePath(ctx); err != nil || refusal != nil {
+			if err != nil {
+				return Result{}, err
+			}
+			return Result{}, refusal
+		}
+	}
 	remote, err := c.askRemote(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	c.branch = remote.branch
+	if c.Path != "" {
+		c.projector, err = subtree.New(subtree.Options{Layout: c.Layout, Git: c.Git, Path: c.Path, Branch: c.branch})
+		if err != nil {
+			return Result{}, fail(ReasonCheckoutFailed, "Git cannot be set up: %v", err)
+		}
+	}
 	if c.hasRepository() {
 		return c.existing(ctx, remote)
 	}
@@ -308,7 +340,7 @@ func (c *checkout) foreign(ctx context.Context) (string, error) {
 		return "", err
 	}
 	for ref := range strings.Lines(string(out.Stdout)) {
-		if ref = strings.TrimSpace(ref); !strings.HasPrefix(ref, remotePrefix) {
+		if ref = strings.TrimSpace(ref); !strings.HasPrefix(ref, remotePrefix) && !subtree.IsOwnRef(ref) {
 			return ref, nil
 		}
 	}
@@ -324,6 +356,16 @@ func (c *checkout) first(ctx context.Context, remote remoteState) (Result, error
 	if _, err := c.git.Run(ctx, "init", "--quiet", "--template=", "--initial-branch="+c.branch); err != nil {
 		return Result{}, fail(ReasonCheckoutFailed, "the repository cannot be made in %s: %v", c.Layout.GitDir, err)
 	}
+	if c.Path != "" {
+		// Before the first file of the checkout, as the marker of the first checkout is, so that a checkout with a commit has it.
+		if err := c.writePathMarker(); err != nil {
+			return Result{}, fail(ReasonCheckoutFailed, "the state directory %s cannot be written to: %v", c.Layout.StateDir, err)
+		}
+	} else {
+		// A checkout of the whole repository has no marker. One that is left from a checkout of a directory, which a person who
+		// started again by emptying the Git directory did not empty beside it, is not what this one is made for.
+		c.removePathMarker()
+	}
 
 	outcome := Cloned
 	if !empty {
@@ -337,6 +379,11 @@ func (c *checkout) first(ctx context.Context, remote remoteState) (Result, error
 
 	tip, err := c.fetch(ctx)
 	if err != nil {
+		// A directory that the branch does not have is a refusal that leaves nothing, as a directory that holds data is: the history
+		// that was fetched for it is not kept for a mistake in a name.
+		if refusal, ok := errors.AsType[*Error](err); ok && refusal.Reason == ReasonPathNotFound {
+			return Result{}, c.refuse(refusal)
+		}
 		return Result{}, err
 	}
 	if err := c.checkReserved(ctx, tip); err != nil {
@@ -483,7 +530,22 @@ func (c *checkout) result(ctx context.Context, outcome Outcome) (Result, error) 
 	if err != nil {
 		return Result{}, fail(ReasonCheckoutFailed, "the checkout in %s cannot be read: %v", c.Layout.GitDir, err)
 	}
-	return Result{Outcome: outcome, Branch: c.branch, Commit: commit}, nil
+	result := Result{Outcome: outcome, Branch: c.branch, Commit: commit}
+	if c.projector != nil && commit != "" {
+		// The commit that a person looks up is the tip that the snapshot at the tip of the branch is the directory of, which is the one
+		// that the repository's tip ref holds, and not the one the snapshot was made at: a change outside the directory moves the tip
+		// and leaves the snapshot as it is. A checkout at a commit of its own is at no commit of the repository.
+		snapshot, _, err := c.try(ctx, "rev-parse", "--verify", "--quiet", remotePrefix+c.branch+"^{commit}")
+		if err != nil {
+			return Result{}, fail(ReasonCheckoutFailed, "the checkout in %s cannot be read: %v", c.Layout.GitDir, err)
+		}
+		if commit == snapshot {
+			if result.Source, _, err = c.try(ctx, "rev-parse", "--verify", "--quiet", subtree.RealRef(c.branch)+"^{commit}"); err != nil {
+				return Result{}, fail(ReasonCheckoutFailed, "the checkout in %s cannot be read: %v", c.Layout.GitDir, err)
+			}
+		}
+	}
+	return result, nil
 }
 
 // fail returns an *Error. The last of the arguments that is an error is the one underneath.

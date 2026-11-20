@@ -73,6 +73,7 @@ func (c *checkout) clearGitDir() error {
 		}
 	}
 	c.removeMarker()
+	c.removePathMarker()
 	return nil
 }
 

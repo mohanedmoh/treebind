@@ -24,6 +24,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
+	"github.com/mohanedmoh/treebind/internal/agent/subtree"
 )
 
 const (
@@ -111,16 +112,27 @@ func (c *checkout) remoteHasBranches(ctx context.Context) (bool, error) {
 	return len(strings.TrimSpace(string(out.Stdout))) > 0, nil
 }
 
-// fetch fetches the branch into refs/remotes/origin and returns the commit it is at. The
-// URL is on the command line and not in the config; the tags and the FETCH_HEAD file, which
-// names the URL, are left out.
+// fetch fetches the branch and returns the commit that the checkout is to be at: the tip, which it keeps in refs/remotes/origin,
+// or, for a directory of the repository, the snapshot of the directory at the tip, which the tip is kept beside in a ref of its
+// own. The URL is on the command line and not in the config; the tags and the FETCH_HEAD file, which names the URL, are left out.
 func (c *checkout) fetch(ctx context.Context) (string, error) {
-	refspec := "+" + headsPrefix + c.branch + ":" + remotePrefix + c.branch
+	into := remotePrefix + c.branch
+	if c.projector != nil {
+		into = subtree.FetchRef(c.branch)
+	}
+	refspec := "+" + headsPrefix + c.branch + ":" + into
 	if _, err := c.git.RunTimeout(ctx, c.FetchTimeout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
 		"--", c.URL, refspec); err != nil {
 		return "", fail(ReasonFetchFailed, "the branch %s cannot be fetched: %v", c.branch, err)
 	}
-	out, err := c.git.Run(ctx, "rev-parse", "--verify", remotePrefix+c.branch+"^{commit}")
+	if c.projector != nil {
+		projection, err := c.projector.Project(ctx)
+		if err != nil {
+			return "", projected(err, c.branch)
+		}
+		return projection.Snapshot, nil
+	}
+	out, err := c.git.Run(ctx, "rev-parse", "--verify", into+"^{commit}")
 	if err != nil {
 		return "", fail(ReasonFetchFailed, "the branch %s was fetched but cannot be read: %v", c.branch, err)
 	}

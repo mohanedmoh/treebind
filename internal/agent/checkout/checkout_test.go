@@ -525,6 +525,21 @@ func TestOpenSaysWhenTheRepositoryCannotBeReached(t *testing.T) {
 	}
 }
 
+// A path that the CRD refuses is told before the repository is asked anything: a host that is down is not what the Treebind is told
+// for a setting that is wrong.
+func TestOpenRefusesAPathThatTheCRDRefusesBeforeAskingTheRepository(t *testing.T) {
+	f := newFixture(t)
+	options := f.options(f.layout(subPath), branchMain)
+	options.URL = "ssh://localhost" + f.root + "/gone.git"
+	options.Path = "a/../b"
+
+	_, err := Open(context.Background(), options)
+
+	if err == nil || !strings.Contains(err.Error(), "must not contain a '..'") {
+		t.Fatalf("error = %v, want the path refused and not the host that cannot be reached", err)
+	}
+}
+
 func TestOpenRefusesWhatItCannotUse(t *testing.T) {
 	f := newFixture(t)
 	l := f.layout(subPath)
@@ -535,6 +550,7 @@ func TestOpenRefusesWhatItCannotUse(t *testing.T) {
 		"no URL":      {func(o *Options) { o.URL = "" }, "URL"},
 		"a branch":    {func(o *Options) { o.Branch = "-x" }, "must not start with '-'"},
 		"ssh by name": {func(o *Options) { o.Git.SSH.Program = "relative/ssh" }, "SSH.Program"},
+		"a path":      {func(o *Options) { o.Path = "a/../b" }, "must not contain a '..'"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := f.options(l, branchMain)
