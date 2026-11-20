@@ -797,6 +797,9 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(phase).To(Equal(string(corev1.PodSucceeded)), "ssh-keygen could not load the key: %s", logs)
 		})
 	})
+
+	// The definition of done runs last: it gives the operator the agent image, which replaces its pods.
+	Context("Definition of done", definitionOfDone)
 })
 
 // throwawayPrivateKey returns a PEM encoded private key that is generated for one
