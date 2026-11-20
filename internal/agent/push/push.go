@@ -45,6 +45,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
+	"github.com/mohanedmoh/treebind/internal/agent/subtree"
 )
 
 const (
@@ -93,6 +94,10 @@ type Result struct {
 	From, To string
 	// Commits is how many commits were sent.
 	Commits int
+	// FromSource and ToSource are, for a directory of the repository, the commits of the repository that the push moved the
+	// branch between, which are the ones a person can look up: From and To are the checkout's own commits. Both are empty for the
+	// whole repository.
+	FromSource, ToSource string
 	// Warning says what did not work after a push that did: the tracking ref could not be moved.
 	Warning string
 }
@@ -123,6 +128,13 @@ type Options struct {
 	Git git.Options
 	// Timeout is how long a push may take. DefaultTimeout when it is zero.
 	Timeout time.Duration
+	// Path is the directory of the repository that is the synced directory (spec.repository.path), or empty for the whole
+	// repository. The commits of the checkout are then commits of the snapshots of the directory, and each is sent as a commit of
+	// the repository that changes the directory and nothing else (docs/adr/0036).
+	Path string
+	// Author is the author and the committer of those commits, which is the one of the commits of the agent. It is needed only
+	// when there is a path.
+	Author git.Identity
 	// Fence is called immediately before the push, and nothing is sent when it returns an error. It is the check
 	// that the agent still holds the writer lock (docs/adr/0023). With none, nothing is checked.
 	Fence func(ctx context.Context) error
@@ -133,6 +145,8 @@ type Options struct {
 type Pusher struct {
 	o   Options
 	git *git.Runner
+	// projector makes the commits of the repository of the commits of the checkout, and is nil for the whole repository.
+	projector *subtree.Projector
 }
 
 // New checks the options and makes a Pusher.
@@ -153,7 +167,14 @@ func New(o Options) (*Pusher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("push: %w", err)
 	}
-	return &Pusher{o: o, git: runner}, nil
+	p := &Pusher{o: o, git: runner}
+	if o.Path != "" {
+		// The projector refuses a path that the CRD refuses.
+		if p.projector, err = subtree.New(subtree.Options{Layout: o.Layout, Git: o.Git, Path: o.Path, Branch: o.Branch, Author: o.Author}); err != nil {
+			return nil, fmt.Errorf("push: %w", err)
+		}
+	}
+	return p, nil
 }
 
 // checkBranch refuses a name that is not a branch of the shape that Git takes, or that would be read as more
@@ -207,6 +228,24 @@ func (p *Pusher) Push(ctx context.Context) (Result, error) {
 				"so the push would not be a fast-forward, and it is not sent. The agent does not force it", branch)}
 		}
 	}
+	// What is sent is the head of the checkout, or for a directory of the repository the commit of the repository that the head is
+	// made again as, and what moves with the push is the ref that names it.
+	sent, refspec, commits := local, headsPrefix+branch+":"+headsPrefix+branch, waiting
+	var fromSource string
+	if p.projector != nil {
+		translation, err := p.projector.Translate(ctx, local)
+		if err != nil {
+			return Result{}, p.translateFailed(err)
+		}
+		if translation.Commits == 0 {
+			return Result{Outcome: NothingToPush, Branch: branch, From: known, To: known}, nil
+		}
+		sent, commits = translation.Tip, translation.Commits
+		refspec = sent + ":" + headsPrefix + branch
+		if fromSource, _, err = p.try(ctx, "rev-parse", "--verify", "--quiet", subtree.RealRef(branch)+"^{commit}"); err != nil {
+			return Result{}, p.fail(err, "the last known tip of the repository's branch %s cannot be read: %v", branch, err)
+		}
+	}
 	if p.o.Fence != nil {
 		if err := p.o.Fence(ctx); err != nil {
 			return Result{}, &Error{Reason: ReasonPushFailed, Err: err,
@@ -214,7 +253,6 @@ func (p *Pusher) Push(ctx context.Context) (Result, error) {
 		}
 	}
 
-	refspec := headsPrefix + branch + ":" + headsPrefix + branch
 	out, err := p.git.RunTimeout(ctx, p.o.Timeout, "push", "--porcelain", "--no-verify", "--", p.o.URL, refspec)
 	status := parsePorcelain(string(out.Stdout), headsPrefix+branch)
 	switch {
@@ -231,16 +269,36 @@ func (p *Pusher) Push(ctx context.Context) (Result, error) {
 		return Result{}, &Error{Reason: ReasonPushFailed, Message: fmt.Sprintf("Git pushed the branch %s and said nothing that the agent can read about it", branch)}
 	}
 
-	result := Result{Outcome: Pushed, Branch: branch, From: known, To: local, Commits: waiting}
+	result := Result{Outcome: Pushed, Branch: branch, From: known, To: local, Commits: commits}
+	if p.projector != nil {
+		result.FromSource, result.ToSource = fromSource, sent
+	}
 	if status.flag == '=' {
 		// The repository had the commits already, from another way, and the checkout did not know.
 		result.Outcome, result.Commits, result.From = NothingToPush, 0, local
 	}
-	if err := p.moveTrackingRef(ctx, local); err != nil {
+	if err := p.noteTheTip(ctx, local, sent); err != nil {
 		result.Warning = fmt.Sprintf("the repository took the push, but the checkout's note of where the repository is (the tracking ref %s) "+
 			"could not be moved, so the commits are counted as waiting until the next pull moves it: %v", remotePrefix+branch, err)
+		if p.projector != nil {
+			result.Warning = fmt.Sprintf("the repository took the push, but the checkout could not be put at the snapshot of what it took, "+
+				"so the commits are counted as waiting until the next pull puts it right: %v", err)
+		}
 	}
 	return result, nil
+}
+
+// translateFailed is the error of a push whose commits could not be made again as commits of the repository. A repository that
+// changed the directory since the checkout was last put at it is one that the checkout is behind, which a pull puts right.
+func (p *Pusher) translateFailed(err error) *Error {
+	if errors.Is(err, subtree.ErrBehind) {
+		return &Error{Reason: ReasonNonFastForward, Err: err, Message: fmt.Sprintf("the branch %s of the repository has changes in the "+
+			"directory that the checkout does not have yet, so the push is not sent: the next pull brings them in", p.o.Branch)}
+	}
+	if refusal, ok := errors.AsType[*subtree.Error](err); ok {
+		return &Error{Reason: refusal.Reason, Message: refusal.Message, Err: refusal}
+	}
+	return p.fail(err, "the commits of the checkout cannot be made again as commits of the repository: %v", err)
 }
 
 // try runs a command that says no with exit status 1, as rev-parse --verify --quiet does, and returns what it
@@ -281,6 +339,16 @@ func (p *Pusher) isAncestor(ctx context.Context, commit, branch string) (bool, e
 	return found, err
 }
 
+// noteTheTip records that the repository is at the commit that was sent: for the whole repository the tracking ref is moved to the
+// head, which is what was sent, and for a directory the checkout is put at the snapshot of the commit of the repository that was
+// sent (docs/adr/0036).
+func (p *Pusher) noteTheTip(ctx context.Context, head, sent string) error {
+	if p.projector != nil {
+		return p.settle(ctx, head, sent)
+	}
+	return p.moveTrackingRef(ctx, head)
+}
+
 // moveTrackingRef records that the repository is at the commit, as a push to a named remote does. It is a write, so
 // it checks the writer lock again, and does nothing without it. It is not given up by a stop that came in the middle
 // of the push that it follows.
@@ -294,6 +362,14 @@ func (p *Pusher) moveTrackingRef(ctx context.Context, commit string) error {
 	}
 	_, err := p.git.Run(ctx, "update-ref", remotePrefix+p.o.Branch, commit)
 	return err
+}
+
+// settle puts the checkout at the snapshot of the commit that was sent. Like moveTrackingRef it is not given up by a stop, and it
+// checks the writer lock before it writes.
+func (p *Pusher) settle(ctx context.Context, head, sent string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), updateTimeout)
+	defer cancel()
+	return p.projector.Settle(ctx, head, sent, p.o.Fence)
 }
 
 // pushedFlag says whether the flag of a ref in the output of `git push --porcelain` is one of a push that worked: a
