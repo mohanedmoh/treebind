@@ -33,45 +33,8 @@ import (
 
 // The reason of Synced False is the reason of the step of the agent that failed, and the reasons are API in the sense
 // of docs/adr/0004: people and tooling match on them. The agent spells them where it makes the checks and the API
-// spells them for the condition, and nothing but these tests says that the two are the same.
-
-// failedStepReasons are the reasons of a step that failed, as the API names them, in the order of the steps of the
-// agent. Synced False takes one of them, and Conflict True takes the ones of the pull.
-var failedStepReasons = []string{
-	// Mount, Writable and GitDir.
-	treebindv1alpha1.ReasonMountPathInvalid,
-	treebindv1alpha1.ReasonNotMounted,
-	treebindv1alpha1.ReasonNotWritable,
-	treebindv1alpha1.ReasonReadOnlyVolume,
-	treebindv1alpha1.ReasonWriteFailed,
-	treebindv1alpha1.ReasonGitDirUnsafe,
-	treebindv1alpha1.ReasonTimedOut,
-	// Lock.
-	treebindv1alpha1.ReasonLockFailed,
-	// Checkout.
-	treebindv1alpha1.ReasonDirectoryNotEmpty,
-	treebindv1alpha1.ReasonRepositoryMismatch,
-	treebindv1alpha1.ReasonBranchNotFound,
-	treebindv1alpha1.ReasonReservedPath,
-	treebindv1alpha1.ReasonFetchFailed,
-	treebindv1alpha1.ReasonCheckoutFailed,
-	treebindv1alpha1.ReasonPathNotFound,
-	treebindv1alpha1.ReasonPathMismatch,
-	// Pull.
-	treebindv1alpha1.ReasonBlocked,
-	treebindv1alpha1.ReasonDiverged,
-	treebindv1alpha1.ReasonBranchGone,
-	treebindv1alpha1.ReasonTooManyDeletions,
-	treebindv1alpha1.ReasonRefused,
-	treebindv1alpha1.ReasonTooManyCommits,
-	treebindv1alpha1.ReasonPullFailed,
-	// Changes, Commit and Push.
-	treebindv1alpha1.ReasonScanFailed,
-	treebindv1alpha1.ReasonCommitFailed,
-	treebindv1alpha1.ReasonNonFastForward,
-	treebindv1alpha1.ReasonPushRejected,
-	treebindv1alpha1.ReasonPushFailed,
-}
+// spells them for the condition, and nothing but these tests says that the two are the same. The operator's list of
+// them is failedStepReasons.
 
 // operatorReasons are the reasons that the operator gives to Synced and Conflict with the spelling that people match
 // on, and each one is spelled like its name. ConflictResolved is also the reason that the agent gives the Conflict
@@ -191,7 +154,7 @@ func TestEveryReasonOfTheAgentIsNamedByTheAPIWithTheSameSpelling(t *testing.T) {
 	agent := agentReasons(t)
 
 	known := map[string]bool{}
-	for _, reason := range failedStepReasons {
+	for reason := range failedStepReasons {
 		known[reason] = true
 	}
 	for _, reason := range agentReasonsOfNoFailure {
@@ -200,11 +163,11 @@ func TestEveryReasonOfTheAgentIsNamedByTheAPIWithTheSameSpelling(t *testing.T) {
 	for reason, constants := range agent {
 		if !known[reason] {
 			t.Errorf("the agent gives the reason %q (%s) and the API has no constant for it: add one to api/v1alpha1 and to "+
-				"the lists of this test, so that Synced can say it and the operator does not write SyncFailed for it",
+				"failedStepReasons, so that Synced can say it and the operator does not write SyncFailed for it",
 				reason, strings.Join(constants, ", "))
 		}
 	}
-	for _, reason := range failedStepReasons {
+	for reason := range failedStepReasons {
 		if _, ok := agent[reason]; !ok {
 			t.Errorf("the API names the reason %q and no step of the agent gives it: it is not spelled as the agent "+
 				"spells it, or the agent dropped it", reason)
@@ -212,18 +175,11 @@ func TestEveryReasonOfTheAgentIsNamedByTheAPIWithTheSameSpelling(t *testing.T) {
 	}
 }
 
-func TestTheReasonsOfAFailedStepAreListedOnceAndAreNotTheOperatorsOwn(t *testing.T) {
-	seen := map[string]bool{}
-	for _, reason := range failedStepReasons {
-		if seen[reason] {
-			t.Errorf("failedStepReasons lists %q twice", reason)
-		}
-		seen[reason] = true
-	}
+func TestTheReasonsOfAFailedStepAreNotTheOperatorsOwn(t *testing.T) {
 	// A step that failed with the reason of the operator's own would read as a state of the operator, and a user who
-	// matches on the reason could not tell the two apart.
+	// matches on the reason could not tell the two apart. A reason that failedStepReasons lists twice does not compile.
 	for _, reason := range operatorReasons {
-		if seen[reason.spelling] {
+		if _, listed := failedStepReasons[reason.spelling]; listed {
 			t.Errorf("the reason %q of a failed step is also the operator's reason %s", reason.spelling, reason.name)
 		}
 	}
