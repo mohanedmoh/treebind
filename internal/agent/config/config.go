@@ -88,6 +88,10 @@ const (
 	// (docs/adr/0035). It is not set for the default of the CRD, so that a pod template that never had it does not change, and
 	// the agent has the default of the CRD for it.
 	EnvCommitMaxPerHour = "TREEBIND_COMMIT_MAX_PER_HOUR"
+	// EnvTemplateHash is the hash of the pod template that the agent runs in, which the operator computes over the
+	// template without this variable, so that it is a function of the rest of it. The agent only reports it, so that the
+	// operator can tell which template a report is of. A pod from before the operator set it does not have it.
+	EnvTemplateHash = "TREEBIND_TEMPLATE_HASH"
 
 	EnvStatusAddr     = "TREEBIND_STATUS_ADDR"
 	EnvStatusIssuer   = "TREEBIND_STATUS_ISSUER"
@@ -181,6 +185,9 @@ type Config struct {
 	// CommitMaxPerHour is the most commits that the agent makes in an hour, of the commit step and of the resolutions together
 	// (docs/adr/0035). It is the default when the Treebind does not say.
 	CommitMaxPerHour int
+	// TemplateHash is the hash of the pod template that the agent runs in, as the operator computed it, or empty for a pod
+	// that was started without one.
+	TemplateHash string
 
 	// StatusAddr is the address the status endpoint and the probes listen on.
 	StatusAddr string
@@ -231,6 +238,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		CommitAuthorEmail:     getenv(EnvCommitAuthorEmail),
 		CommitMessageTemplate: getenv(EnvCommitMessageTemplate),
 		CommitMaxPerHour:      commitMaxPerHour,
+		TemplateHash:          get(EnvTemplateHash),
 		StatusAddr:            orDefault(get(EnvStatusAddr), DefaultStatusAddr),
 		StatusIssuer:          get(EnvStatusIssuer),
 		StatusAudience:        get(EnvStatusAudience),
@@ -296,6 +304,9 @@ func (c Config) validate() error {
 	}
 	if err := CheckRepoPath(c.RepoPath); err != nil {
 		problems = append(problems, fmt.Errorf("%s %w", EnvRepoPath, err))
+	}
+	if err := CheckTemplateHash(c.TemplateHash); err != nil {
+		problems = append(problems, fmt.Errorf("%s %w", EnvTemplateHash, err))
 	}
 	problems = append(problems, c.checkRepository()...)
 	if !cleanAbsolute(c.StatusKeysFile) {
@@ -449,6 +460,25 @@ func CheckCommitMaxPerHour(raw string) (int, error) {
 		return 0, fmt.Errorf("must be at most %d", MaxCommitMaxPerHour)
 	}
 	return int(value), nil
+}
+
+// TemplateHashLength is the number of hexadecimal digits of the hash of a pod template, which is a SHA-256.
+const TemplateHashLength = 64
+
+// CheckTemplateHash returns the reason when a value cannot be the hash of a pod template, and nil when it can. An empty
+// one says that the pod was started without a hash. It is the hash as the operator writes it, in lowercase, because the
+// operator compares what the agent reports with its own by equality: a value of another spelling would be the report
+// of no template for as long as the agent runs, and this way the agent says so once, at start.
+func CheckTemplateHash(hash string) error {
+	if hash == "" {
+		return nil
+	}
+	if len(hash) == TemplateHashLength && !strings.ContainsFunc(hash, func(c rune) bool {
+		return (c < '0' || c > '9') && (c < 'a' || c > 'f')
+	}) {
+		return nil
+	}
+	return fmt.Errorf("must be %d lowercase hexadecimal digits", TemplateHashLength)
 }
 
 // CheckSyncDirection returns the reason a value cannot be the direction of a sync. They are the

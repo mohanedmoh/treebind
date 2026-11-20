@@ -638,3 +638,25 @@ func TestRateLimit(t *testing.T) {
 		t.Errorf("after the period: %d held back, %v, want 3 and true", suppressed, ok)
 	}
 }
+
+// The agent reports the hash of its pod template as the operator gave it, so that the operator can tell which spec a
+// report is of.
+func TestReportsTheHashOfThePodTemplateItWasGiven(t *testing.T) {
+	const hash = "27ed59bdbee75da599c2e1f63aa5ca8a94c718e28c03fe67345826eb4ff8bab0"
+	r := start(t, func(o *Options) { o.Config.TemplateHash = hash })
+
+	if got := r.report(t).TemplateHash; got != hash {
+		t.Errorf("the report has the template hash %q, want %q", got, hash)
+	}
+}
+
+// An agent that was started without one, as a pod of the operator before is, reports no hash at all.
+func TestReportsNoHashOfThePodTemplateWhenItWasGivenNone(t *testing.T) {
+	r := start(t, nil)
+
+	_, body := r.get(t, status.Path, "Bearer "+goodToken)
+
+	if strings.Contains(body, "templateHash") {
+		t.Errorf("the report says a template hash that the agent was not given: %s", body)
+	}
+}

@@ -121,6 +121,32 @@ func TestReportFormatAfterTheChecksRan(t *testing.T) {
 	}
 }
 
+// The hash of the pod template says which spec the report is of. It is a field of the report and not a new version of
+// it (docs/adr/0011): it is absent without one, as TestReportFormat shows, and a reader that does not know it ignores it.
+func TestReportFormatWithTheTemplateHash(t *testing.T) {
+	const hash = "27ed59bdbee75da599c2e1f63aa5ca8a94c718e28c03fe67345826eb4ff8bab0"
+	const want = `{"version":1,"treebind":{"namespace":"apps","name":"dashboards"},` +
+		`"startedAt":"2026-11-12T09:00:00Z","templateHash":"` + hash + `","time":"2026-11-12T09:30:00Z","checks":[]}`
+	handler := NewHandler(func() Report {
+		return Report{
+			Treebind:     sampleReport().Treebind,
+			StartedAt:    started,
+			TemplateHash: hash,
+		}
+	}, onlyGoodToken)
+	handler.now = func() time.Time { return reported }
+
+	w := request(handler, http.MethodGet, Path, "Bearer "+goodToken)
+
+	if got := w.Body.String(); got != want {
+		t.Errorf("the report changed:\n got %s\nwant %s", got, want)
+	}
+	var report Report
+	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil || report.TemplateHash != hash {
+		t.Errorf("the reader gets the hash %q, %v, want %q", report.TemplateHash, err, hash)
+	}
+}
+
 func TestHandlerServesTheReport(t *testing.T) {
 	t.Run("an accepted GET gets the report with headers that keep it out of caches", func(t *testing.T) {
 		w := request(newHandler(onlyGoodToken), http.MethodGet, Path, "Bearer "+goodToken)

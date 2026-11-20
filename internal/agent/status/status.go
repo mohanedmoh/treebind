@@ -61,6 +61,9 @@ type Report struct {
 	Treebind Treebind `json:"treebind"`
 	// StartedAt is when the agent process started.
 	StartedAt time.Time `json:"startedAt"`
+	// TemplateHash is the hash of the pod template that the agent runs in, as the operator gave it to the agent, which says
+	// which spec the report is of. It is absent for an agent that was started without one.
+	TemplateHash string `json:"templateHash,omitempty"`
 	// Time is when the report was made, by the agent's clock.
 	Time time.Time `json:"time"`
 	// CheckedAt is when the checks last finished. It is absent until they first
