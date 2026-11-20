@@ -25,6 +25,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -68,12 +69,14 @@ type AgentReader interface {
 }
 
 // StatusPollerReconciler polls the sync agent of every Treebind and says in the
-// AgentUnreachable condition whether it can read its report (docs/adr/0015). It is a
-// controller of its own, apart from the reconcile of the spec, so that an agent that
-// does not answer cannot hold up the creation of anything, and it runs only on the
-// leader like the other. It changes nothing but that condition. It writes the status
-// with the resourceVersion it read, so a copy that the reconcile of the spec has
-// outdated since is a conflict, tried again a second later, and never an overwrite.
+// AgentUnreachable condition whether it can read its report (docs/adr/0015), and in
+// the Synced and Conflict conditions, status.lastSyncedCommit and status.lastSyncTime
+// what the report says of the sync (sync_conditions.go). It is a controller of its
+// own, apart from the reconcile of the spec, so that an agent that does not answer
+// cannot hold up the creation of anything, and it runs only on the leader like the
+// other. It changes nothing but those. It writes them in one write, with the
+// resourceVersion it read, so a copy that the reconcile of the spec has outdated
+// since is a conflict, tried again a second later, and never an overwrite.
 //
 // It also puts the cluster's public keys where the agent reads them as part of each
 // poll, which is cheap when nothing changed, and asks for them to be read again when
@@ -88,6 +91,14 @@ type StatusPollerReconciler struct {
 	// StatusKeys puts the keys where the agents read them.
 	StatusKeys *StatusKeyPublisher
 
+	// AgentImage, StatusIssuer and StatusSubject are the settings that the reconcile
+	// of the spec gives the sync pods, and have to be the TreebindReconciler's. The
+	// poller computes from them the hash of the pod template that the spec gives,
+	// which a report of the current spec carries: with other settings no report would
+	// carry it, and Synced would say AgentOutdated for as long as the operator runs.
+	AgentImage                  string
+	StatusIssuer, StatusSubject string
+
 	// now is time.Now unless a test replaces it.
 	now func() time.Time
 
@@ -96,6 +107,12 @@ type StatusPollerReconciler struct {
 	// again, which only delays True by a few minutes.
 	mu           sync.Mutex
 	failingSince map[types.NamespacedName]time.Time
+}
+
+// agentSettings is what the sync pods are given beside the spec of a Treebind, as the
+// reconcile of the spec gives it.
+func (r *StatusPollerReconciler) agentSettings() agentSettings {
+	return agentSettings{Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject}
 }
 
 func (r *StatusPollerReconciler) clock() time.Time {
@@ -129,8 +146,9 @@ func (r *StatusPollerReconciler) recovered(key types.NamespacedName) {
 	delete(r.failingSince, key)
 }
 
-// Reconcile polls the agent of one Treebind once, writes AgentUnreachable if it
-// changed, and asks to be called again after the time of the next poll.
+// Reconcile polls the agent of one Treebind once, writes AgentUnreachable and what
+// the report says of the sync if they changed, and asks to be called again after the
+// time of the next poll.
 func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -151,6 +169,14 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// be saying nothing true.
 	if treebind.Status.ObservedGeneration == 0 {
 		return ctrl.Result{RequeueAfter: statusPollNotReconciledWait}, nil
+	}
+	// The hash tells a report of the current spec from one of the spec before. It fails
+	// only when the template cannot be encoded as JSON, which no Treebind that the API
+	// server accepted makes it, and the reconcile of the spec fails on the same.
+	specHash, err := agentTemplateHash(treebind, r.agentSettings())
+	if err != nil {
+		log.Error(err, "Cannot compute the hash of the pod template that the spec gives")
+		return ctrl.Result{RequeueAfter: jittered(statusPollRetryInterval)}, nil
 	}
 
 	// The reconcile of the spec logs a failure to put the keys in place. Here it only
@@ -195,7 +221,12 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	previous := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionAgentUnreachable)
 	condition := agentUnreachableCondition(treebind, outcome, previous, failingFor)
-	if meta.SetStatusCondition(&treebind.Status.Conditions, condition) {
+	changed := meta.SetStatusCondition(&treebind.Status.Conditions, condition)
+	// What the poll says of the sync depends on the AgentUnreachable it makes, and goes
+	// into the same write, so that a conflict loses neither and no write shows one
+	// without the other.
+	changed = syncStatusOf(treebind, report, condition.Status, specHash).apply(&treebind.Status) || changed
+	if changed {
 		if err := r.Status().Update(ctx, treebind); err != nil {
 			if apierrors.IsConflict(err) {
 				// The reconcile of the spec wrote the status meanwhile. The next poll starts
@@ -204,8 +235,12 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 			return ctrl.Result{}, fmt.Errorf("update status of Treebind %s: %w", req.NamespacedName, err)
 		}
-		log.Info("Reported whether the sync agent can be read",
-			"unreachable", condition.Status, "reason", condition.Reason)
+		conditions := treebind.Status.Conditions
+		log.Info("Reported what the poll of the sync agent found",
+			"unreachable", condition.Status, "reason", condition.Reason,
+			"synced", conditionSummary(conditions, treebindv1alpha1.ConditionSynced),
+			"conflict", conditionSummary(conditions, treebindv1alpha1.ConditionConflict),
+			"lastSyncedCommit", treebind.Status.LastSyncedCommit)
 	}
 
 	if outcome.failure != nil {
@@ -228,6 +263,15 @@ func countsAsFailing(outcome pollOutcome) bool {
 	}
 }
 
+// conditionSummary is the status and the reason of a condition, for the log.
+func conditionSummary(conditions []metav1.Condition, conditionType string) string {
+	condition := meta.FindStatusCondition(conditions, conditionType)
+	if condition == nil {
+		return ""
+	}
+	return string(condition.Status) + " " + condition.Reason
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *StatusPollerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Agents == nil {
@@ -235,6 +279,11 @@ func (r *StatusPollerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.StatusKeys == nil || r.StatusKeys.Source == nil {
 		return errors.New("a source of the cluster's public signing keys is required")
+	}
+	// The reconcile of the spec refuses to start without them, so a poller without them
+	// would compute the hash of a template that no sync pod runs.
+	if err := r.agentSettings().validate(); err != nil {
+		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		// The polls schedule themselves. A change of the status, which this controller

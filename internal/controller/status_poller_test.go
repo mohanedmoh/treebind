@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -39,6 +41,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
+	"github.com/mohanedmoh/treebind/internal/agent/app"
+	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/status"
 	"github.com/mohanedmoh/treebind/internal/statusclient"
 )
@@ -49,6 +53,9 @@ type fakeAgents struct {
 	mu      sync.Mutex
 	err     error
 	targets []statusclient.Target
+	// report is the answer to a poll that does not fail. When it is nil the answer is
+	// the report of an agent of the release before, which says nothing of the sync.
+	report *status.Report
 	// beforeAnswering runs when a poll is made, before it is answered.
 	beforeAnswering func()
 }
@@ -57,6 +64,13 @@ func (a *fakeAgents) set(err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.err = err
+}
+
+// answer makes the report the answer to the polls that do not fail.
+func (a *fakeAgents) answer(report *status.Report) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.report = report
 }
 
 func (a *fakeAgents) asked() []statusclient.Target {
@@ -68,7 +82,7 @@ func (a *fakeAgents) asked() []statusclient.Target {
 func (a *fakeAgents) Fetch(ctx context.Context, target statusclient.Target) (*status.Report, error) {
 	a.mu.Lock()
 	a.targets = append(a.targets, target)
-	before, err := a.beforeAnswering, a.err
+	before, err, report := a.beforeAnswering, a.err, a.report
 	a.mu.Unlock()
 	if before != nil {
 		before()
@@ -78,6 +92,11 @@ func (a *fakeAgents) Fetch(ctx context.Context, target statusclient.Target) (*st
 	}
 	if err != nil {
 		return nil, err
+	}
+	if report != nil {
+		answered := *report
+		answered.Checks = slices.Clone(report.Checks)
+		return &answered, nil
 	}
 	return &status.Report{Version: status.Version, Treebind: status.Treebind{Namespace: target.Namespace, Name: target.Name}}, nil
 }
@@ -130,6 +149,7 @@ var _ = Describe("The status poller", func() {
 		publisher = &StatusKeyPublisher{Source: keys, now: clock.Now}
 		poller = &StatusPollerReconciler{
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Agents: agents, StatusKeys: publisher, now: clock.Now,
+			AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject,
 		}
 
 		treebind = newTreebind(fmt.Sprintf("poll-%d", counter))
@@ -403,20 +423,34 @@ var _ = Describe("The status poller", func() {
 			meta.SetStatusCondition(&resource.Status.Conditions, condition)
 		}
 		Expect(k8sClient.Status().Update(ctx, resource)).To(Succeed())
-		before := get().Status.Conditions
+		// AgentUnreachable, Synced and Conflict are the poller's.
+		others := func(conditions []metav1.Condition) []metav1.Condition {
+			var kept []metav1.Condition
+			for _, condition := range conditions {
+				switch condition.Type {
+				case treebindv1alpha1.ConditionAgentUnreachable, treebindv1alpha1.ConditionSynced,
+					treebindv1alpha1.ConditionConflict:
+				default:
+					kept = append(kept, condition)
+				}
+			}
+			return kept
+		}
+		before := others(get().Status.Conditions)
+		Expect(before).To(HaveLen(2))
 
 		agents.set(errNoConnection)
 		poll()
 		clock.Advance(statusUnreachableAfter)
 		poll()
+		Expect(meta.FindStatusCondition(get().Status.Conditions, treebindv1alpha1.ConditionSynced)).
+			To(HaveField("Reason", reasonUnreachable))
+		agents.set(nil)
+		agents.answer(currentReport(get(), commitOne))
+		poll()
+		Expect(get().Status.LastSyncedCommit).To(Equal(commitOne))
 
-		var others []metav1.Condition
-		for _, condition := range get().Status.Conditions {
-			if condition.Type != treebindv1alpha1.ConditionAgentUnreachable {
-				others = append(others, condition)
-			}
-		}
-		Expect(others).To(Equal(before), "the poller changed a condition that is not its own")
+		Expect(others(get().Status.Conditions)).To(Equal(before), "the poller changed a condition that is not its own")
 		Expect(get().Status.ObservedGeneration).To(Equal(get().Generation))
 	})
 
@@ -510,21 +544,356 @@ var _ = Describe("The status poller", func() {
 		Expect(result).To(Equal(reconcile.Result{}))
 		Expect(agents.asked()).To(BeEmpty())
 	})
+
+	// What the report says of the sync goes into the same write as AgentUnreachable.
+	// sync_conditions_test.go holds what each report makes; these hold that the poller
+	// writes it, through the API server, and only when it changed.
+	Context("with a report that says how the sync goes", func() {
+		find := func(conditionType string) *metav1.Condition {
+			GinkgoHelper()
+			return meta.FindStatusCondition(get().Status.Conditions, conditionType)
+		}
+		expectSync := func(conditionType string, value metav1.ConditionStatus, reason string) {
+			GinkgoHelper()
+			condition := find(conditionType)
+			Expect(condition).NotTo(BeNil(), "%s is not written", conditionType)
+			Expect(condition.Status).To(Equal(value), "%s: %s %s", conditionType, condition.Reason, condition.Message)
+			Expect(condition.Reason).To(Equal(reason), "%s: %s", conditionType, condition.Message)
+			Expect(condition.ObservedGeneration).To(Equal(get().Generation), conditionType)
+			Expect(condition.Message).NotTo(ContainSubstring(agentText), "%s carries text of the report", conditionType)
+		}
+		// countWrites makes the poller count the writes of the status that it makes.
+		countWrites := func() *atomic.Int32 {
+			GinkgoHelper()
+			var writes atomic.Int32
+			watching, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			poller.Client = interceptor.NewClient(watching, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object,
+					opts ...client.SubResourceUpdateOption,
+				) error {
+					writes.Add(1)
+					return c.SubResource(subResource).Update(ctx, obj, opts...)
+				},
+			})
+			return &writes
+		}
+
+		It("says InSync and writes the commit that the volume and the repository agreed at", func() {
+			agents.answer(currentReport(get(), commitOne))
+
+			poll()
+
+			expectCondition(metav1.ConditionFalse, treebindv1alpha1.ReasonReportReceived)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionFalse, reasonNoConflict)
+			Expect(find(treebindv1alpha1.ConditionSynced).Message).To(ContainSubstring(msgAgreedOne))
+			stored := get().Status
+			Expect(stored.LastSyncedCommit).To(Equal(commitOne))
+			Expect(stored.LastSyncTime).NotTo(BeNil())
+			Expect(stored.LastSyncTime.Time).To(BeTemporally("==", agreedAt))
+		})
+
+		It("writes nothing when the next polls find the same, though the API server keeps whole seconds", func() {
+			writes := countWrites()
+			report := currentReport(get(), commitOne)
+			report.LastSynced.Time = agreedAt.Add(123456789 * time.Nanosecond)
+			agents.answer(report)
+
+			poll()
+			Expect(writes.Load()).To(Equal(int32(1)))
+			written := get()
+			Expect(written.Status.LastSyncTime.Time).To(BeTemporally("==", agreedAt))
+
+			clock.Advance(statusPollInterval)
+			poll()
+			// A pull that finds nothing new reports the same agreement at a later time.
+			later := *report
+			later.Time, later.CheckedAt = report.Time.Add(time.Minute), report.CheckedAt.Add(time.Minute)
+			agents.answer(&later)
+			poll()
+
+			Expect(writes.Load()).To(Equal(int32(1)), "a poll that finds what the last one found writes the status again")
+			Expect(get().ResourceVersion).To(Equal(written.ResourceVersion))
+		})
+
+		It("writes a newer agreement, and only that once", func() {
+			writes := countWrites()
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			newer := currentReport(get(), commitTwo)
+			newer.LastSynced.Time, newer.LastSynced.By = agreedAt.Add(time.Hour), status.ByPush
+			agents.answer(newer)
+
+			poll()
+			poll()
+
+			Expect(writes.Load()).To(Equal(int32(2)))
+			stored := get().Status
+			Expect(stored.LastSyncedCommit).To(Equal(commitTwo))
+			Expect(stored.LastSyncTime.Time).To(BeTemporally("==", agreedAt.Add(time.Hour)))
+			Expect(find(treebindv1alpha1.ConditionSynced).Message).To(ContainSubstring(msgAgreedTwo))
+		})
+
+		It("says False with the reason of the step that failed, and keeps the last agreement", func() {
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			agents.answer(currentReport(get(), commitOne,
+				failedCheck(app.CheckPull, reasonTooManyDeletions), failedCheck(app.CheckConflict, reasonTooManyDeletions)))
+
+			poll()
+
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionFalse, reasonTooManyDeletions)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionTrue, reasonTooManyDeletions)
+			Expect(find(treebindv1alpha1.ConditionSynced).Message).To(ContainSubstring(msgAgreedOne))
+			Expect(get().Status.LastSyncedCommit).To(Equal(commitOne))
+		})
+
+		It("says SyncPending for an agent that has not seen the two agree since it started", func() {
+			agents.answer(currentReport(get(), ""))
+
+			poll()
+
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, reasonPending)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionUnknown, reasonPending)
+			Expect(get().Status.LastSyncedCommit).To(BeEmpty())
+			Expect(get().Status.LastSyncTime).To(BeNil())
+		})
+
+		It("says Unknown for both once the agent is unreachable, and keeps them while the polls only begin to fail", func() {
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			agents.set(errNoConnection)
+
+			poll()
+			expectCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonPollFailing)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionFalse, reasonNoConflict)
+
+			clock.Advance(statusUnreachableAfter)
+			result := poll()
+			expectCondition(metav1.ConditionTrue, treebindv1alpha1.ReasonConnectionFailed)
+			within(result.RequeueAfter, statusPollRetryInterval)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, reasonUnreachable)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionUnknown, reasonUnreachable)
+			Expect(find(treebindv1alpha1.ConditionSynced).Message).To(Equal(msgUnreachable))
+			Expect(get().Status.LastSyncedCommit).To(Equal(commitOne), "a poll that failed cleared the agreement")
+
+			agents.set(nil)
+			poll()
+			expectCondition(metav1.ConditionFalse, treebindv1alpha1.ReasonReportReceived)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+		})
+
+		It("leaves them as they are while the operator cannot tell whether the agent answers", func() {
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			agents.set(&statusclient.Error{Kind: statusclient.KindTokenUnavailable, Message: "no token"})
+
+			clock.Advance(time.Hour)
+			poll()
+
+			expectCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonTokenUnavailable)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+		})
+
+		It("says AgentOutdated for a report of another template, or of none, and takes no agreement from it", func() {
+			report := currentReport(get(), commitOne)
+			report.TemplateHash = hashOfBefore
+			agents.answer(report)
+
+			poll()
+
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, reasonOutdated)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionUnknown, reasonOutdated)
+			Expect(get().Status.LastSyncedCommit).To(BeEmpty())
+
+			// An agent of the release before reports no hash.
+			report.TemplateHash = ""
+			agents.answer(report)
+			poll()
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, reasonOutdated)
+			Expect(get().Status.LastSyncedCommit).To(BeEmpty())
+		})
+
+		It("expects the hash of the new template once the spec changes it, and the generation follows", func() {
+			before := currentReport(get(), commitOne)
+			agents.answer(before)
+			poll()
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+
+			changed := get()
+			changed.Spec.Sync.Interval = &metav1.Duration{Duration: 5 * time.Minute}
+			Expect(k8sClient.Update(ctx, changed)).To(Succeed())
+			Expect(currentReport(get(), commitOne).TemplateHash).NotTo(Equal(before.TemplateHash))
+
+			// The agent still runs in the pod of the template before.
+			poll()
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, reasonOutdated)
+			Expect(get().Status.LastSyncedCommit).To(Equal(commitOne))
+
+			// The pod was replaced.
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+
+			// A change of the spec that the agent does not see replaces no pod, and the report
+			// of the same template is of the new generation.
+			same := get()
+			generation := same.Generation
+			same.Spec.Target.MountPath = defaultMountPath
+			Expect(k8sClient.Update(ctx, same)).To(Succeed())
+			Expect(get().Generation).To(BeNumerically(">", generation))
+			poll()
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+		})
+
+		It("takes a report of the template that the reconcile of the spec wrote", func() {
+			reconciler := &TreebindReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(), AgentImage: testImage,
+				StatusIssuer: testIssuer, StatusSubject: testSubject, StatusKeys: newTestPublisher(),
+			}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			syncObject := types.NamespacedName{Namespace: namespace, Name: name.Name + "-sync"}
+			statefulSet := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, syncObject, statefulSet)).To(Succeed())
+			// envtest has no garbage collector to remove what the Treebind owns.
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, statefulSet)).To(Succeed())
+				Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+					Name: syncObject.Name, Namespace: namespace,
+				}})).To(Succeed())
+			})
+			report := currentReport(get(), commitOne)
+			report.TemplateHash = hashVariableOf(statefulSet.Spec.Template)
+			agents.answer(report)
+
+			poll()
+
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+		})
+
+		It("tries again after someone else wrote the status meanwhile, and loses neither condition", func() {
+			agents.answer(currentReport(get(), commitOne))
+			ready := metav1.Condition{
+				Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionTrue,
+				Reason: treebindv1alpha1.ReasonSyncPodReady, Message: "1 of 1 sync pods ready",
+			}
+			// The reconcile of the spec writes Ready while the poll waits for the agent.
+			agents.beforeAnswering = func() {
+				other := get()
+				ready.ObservedGeneration = other.Generation
+				meta.SetStatusCondition(&other.Status.Conditions, ready)
+				Expect(k8sClient.Status().Update(ctx, other)).To(Succeed())
+			}
+
+			result := poll()
+
+			Expect(result.RequeueAfter).To(Equal(statusPollConflictWait))
+			Expect(unreachable()).To(BeNil())
+			Expect(find(treebindv1alpha1.ConditionSynced)).To(BeNil())
+
+			agents.beforeAnswering = nil
+			clock.Advance(statusPollConflictWait)
+			poll()
+
+			expectCondition(metav1.ConditionFalse, treebindv1alpha1.ReasonReportReceived)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionFalse, reasonNoConflict)
+			Expect(get().Status.LastSyncedCommit).To(Equal(commitOne))
+			Expect(find(treebindv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue), "the other write was lost")
+		})
+	})
 })
+
+// hashVariableOf returns the value of the variable of the agent that holds the hash of the pod template.
+func hashVariableOf(template corev1.PodTemplateSpec) string {
+	GinkgoHelper()
+	for _, variable := range template.Spec.Containers[0].Env {
+		if variable.Name == agentconfig.EnvTemplateHash {
+			return variable.Value
+		}
+	}
+	Fail("the agent is not given the hash of its pod template")
+	return ""
+}
+
+// currentReport returns the report of the agent of the Treebind as syncReport makes it, of the pod template that the
+// reconcile of the spec builds for its spec now, with the settings that the poller of the tests is given.
+func currentReport(treebind *treebindv1alpha1.Treebind, agreed string, given ...status.Check) *status.Report {
+	GinkgoHelper()
+	reconciler := &TreebindReconciler{AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject}
+	statefulSet, err := desiredStatefulSet(treebind, reconciler.agentSettings())
+	Expect(err).NotTo(HaveOccurred())
+	report := syncReport(treebind.Spec.Sync.Direction, agreed, given...)
+	report.Treebind = status.Treebind{Namespace: treebind.Namespace, Name: treebind.Name}
+	report.TemplateHash = hashVariableOf(statefulSet.Spec.Template)
+	return report
+}
 
 func TestThePollerWillNotStartWithoutWhatItNeeds(t *testing.T) {
 	keys := newTestPublisher()
 	for name, poller := range map[string]*StatusPollerReconciler{
-		"no reader of reports": {StatusKeys: keys},
-		"no keys":              {Agents: &fakeAgents{}},
-		"keys of nothing":      {Agents: &fakeAgents{}, StatusKeys: &StatusKeyPublisher{}},
+		"no reader of reports":    {StatusKeys: keys},
+		"no keys":                 {Agents: &fakeAgents{}},
+		"keys of nothing":         {Agents: &fakeAgents{}, StatusKeys: &StatusKeyPublisher{}},
+		"no issuer of the token":  {Agents: &fakeAgents{}, StatusKeys: keys, AgentImage: testImage, StatusSubject: testSubject},
+		"no subject of the token": {Agents: &fakeAgents{}, StatusKeys: keys, AgentImage: testImage, StatusIssuer: testIssuer},
 	} {
 		// The manager is nil, so an error of the controller builder would pass for the
 		// refusal: the text has to be the operator's own.
 		err := poller.SetupWithManager(nil)
 		if err == nil || (!strings.Contains(err.Error(), "reader of the sync agents") &&
-			!strings.Contains(err.Error(), "public signing keys")) {
+			!strings.Contains(err.Error(), "public signing keys") &&
+			!strings.Contains(err.Error(), "issuer and the subject of the operator's token")) {
 			t.Errorf("%s: SetupWithManager returned %v, want the refusal of the operator", name, err)
 		}
+	}
+}
+
+// The poller takes a report for one of the current spec when its hash is the one that the reconcile of the spec gives
+// the agent of that spec. A hash computed in another way, or from other settings, would match no report, and Synced
+// would say AgentOutdated for as long as the operator runs; one that did not follow the spec would take a report of the
+// spec before for one of this spec.
+func TestThePollerExpectsTheHashThatTheReconcileOfTheSpecGivesTheAgent(t *testing.T) {
+	reconciler := &TreebindReconciler{AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject}
+	poller := &StatusPollerReconciler{AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject}
+
+	full := newTreebind(testTreebindName)
+	full.Spec.Target.SubPath = subPathNested
+	full.Spec.Repository.Path = repoPathDashboards
+	full.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef(), KnownHostsConfigMapRef: knownHostsRef()}
+	full.Spec.Sync.Interval = &metav1.Duration{Duration: time.Minute}
+	full.Spec.Paths = &treebindv1alpha1.PathsSpec{Include: []string{pathsJSON}}
+	pullOnly := newTreebind(testTreebindName)
+	pullOnly.Spec.Sync.Direction = treebindv1alpha1.SyncDirectionPull
+	slower := newTreebind(testTreebindName)
+	slower.Spec.Sync.Interval = &metav1.Duration{Duration: 5 * time.Minute}
+
+	seen := map[string]string{}
+	for name, treebind := range map[string]*treebindv1alpha1.Treebind{
+		"the defaults":     newTreebind(testTreebindName),
+		"every setting":    full,
+		"only pulls":       pullOnly,
+		"another interval": slower,
+	} {
+		statefulSet, err := desiredStatefulSet(treebind, reconciler.agentSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		given := templateHashVariable(t, statefulSet)
+
+		expected, err := agentTemplateHash(treebind, poller.agentSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if expected != given {
+			t.Errorf("%s: the poller expects %s, and the reconcile of the spec gives the agent %s", name, expected, given)
+		}
+		if other, taken := seen[expected]; taken {
+			t.Errorf("%s and %s give the same template hash, so a report of one passes for one of the other", name, other)
+		}
+		seen[expected] = name
 	}
 }
