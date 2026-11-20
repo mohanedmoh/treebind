@@ -905,6 +905,83 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(findCondition(treebindv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 		})
 
+		It("keeps Ready True while Synced is False for a reason that waits for the repository", func() {
+			reconcileOnce()
+			makeSyncPodReady()
+
+			for _, reason := range []string{
+				treebindv1alpha1.ReasonFetchFailed, treebindv1alpha1.ReasonPushFailed,
+				treebindv1alpha1.ReasonNonFastForward, treebindv1alpha1.ReasonBlocked,
+			} {
+				reportAs(metav1.Condition{Type: treebindv1alpha1.ConditionSynced, Status: metav1.ConditionFalse, Reason: reason})
+				reconcileOnce()
+
+				Expect(findCondition(treebindv1alpha1.ConditionSynced).Status).To(Equal(metav1.ConditionFalse), reason)
+				ready := findCondition(treebindv1alpha1.ConditionReady)
+				Expect(ready.Status).To(Equal(metav1.ConditionTrue), reason)
+				Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady), reason)
+			}
+
+			By("making the Treebind one that only pulls, for which a push is not the sync and a local edit has no scan")
+			resource := get()
+			resource.Spec.Sync.Direction = treebindv1alpha1.SyncDirectionPull
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			reconcileOnce()
+			makeSyncPodReady()
+			for _, reason := range []string{treebindv1alpha1.ReasonNonFastForward, treebindv1alpha1.ReasonBlocked} {
+				reportAs(metav1.Condition{Type: treebindv1alpha1.ConditionSynced, Status: metav1.ConditionFalse, Reason: reason})
+				reconcileOnce()
+
+				ready := findCondition(treebindv1alpha1.ConditionReady)
+				Expect(ready.Status).To(Equal(metav1.ConditionFalse), reason)
+				Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonNotSynced), reason)
+			}
+
+			By("a host that does not answer, which is no more the data path for a Treebind that only pulls")
+			reportAs(metav1.Condition{
+				Type: treebindv1alpha1.ConditionSynced, Status: metav1.ConditionFalse, Reason: treebindv1alpha1.ReasonFetchFailed,
+			})
+			reconcileOnce()
+			Expect(findCondition(treebindv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("does not take a Synced of the spec before for a failure of this one", func() {
+			reconcileOnce()
+			makeSyncPodReady()
+			failed := metav1.Condition{
+				Type: treebindv1alpha1.ConditionSynced, Status: metav1.ConditionFalse, Reason: treebindv1alpha1.ReasonNotWritable,
+			}
+			reportAs(failed)
+			reconcileOnce()
+			Expect(findCondition(treebindv1alpha1.ConditionReady).Reason).To(Equal(treebindv1alpha1.ReasonNotSynced))
+
+			By("changing the spec, so that the status poller has not yet reported on it")
+			resource := get()
+			resource.Spec.Repository.Branch = "staging"
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			reconcileOnce()
+			makeSyncPodReady()
+			reconcileOnce()
+
+			got := get()
+			Expect(got.Generation).To(BeNumerically(">", findCondition(treebindv1alpha1.ConditionSynced).ObservedGeneration))
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady))
+			Expect(ready.ObservedGeneration).To(Equal(got.Generation))
+			Expect(findCondition(treebindv1alpha1.ConditionSynced).Status).To(Equal(metav1.ConditionFalse),
+				"the reconciler leaves Synced to the status poller")
+
+			By("the status poller reporting the same failure of the new spec")
+			reportAs(failed)
+			reconcileOnce()
+
+			ready = findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonNotSynced))
+			Expect(ready.Message).To(Equal("1 of 1 sync pods ready, but Synced is False: NotWritable"))
+		})
+
 		It("does not recreate the sync objects of a Treebind that is being deleted", func() {
 			const holdFinalizer = "treebind.example.org/test-hold"
 			reconcileOnce()

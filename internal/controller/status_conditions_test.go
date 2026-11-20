@@ -18,9 +18,12 @@ package controller
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -38,7 +41,6 @@ import (
 const (
 	reasonInSync         = "InSync"
 	reasonSyncFailed     = "SyncFailed"
-	reasonBehindRemote   = "BehindRemote"
 	reasonConflictParked = "ConflictParked"
 )
 
@@ -49,8 +51,11 @@ const (
 	messagePodReady     = "1 of 1 sync pods ready"
 )
 
-func syncedCondition(status metav1.ConditionStatus, reason string) *metav1.Condition {
-	return &metav1.Condition{Type: treebindv1alpha1.ConditionSynced, Status: status, Reason: reason}
+// syncedCondition is a Synced condition as the status poller writes it, of the given generation of the Treebind.
+func syncedCondition(status metav1.ConditionStatus, reason string, generation int64) *metav1.Condition {
+	return &metav1.Condition{
+		Type: treebindv1alpha1.ConditionSynced, Status: status, Reason: reason, ObservedGeneration: generation,
+	}
 }
 
 func TestReadyCondition(t *testing.T) {
@@ -71,19 +76,19 @@ func TestReadyCondition(t *testing.T) {
 		},
 		{
 			name:       "no ready pod and Synced Unknown",
-			synced:     syncedCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonAwaitingAgentReport),
+			synced:     syncedCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonAwaitingAgentReport, treebindGeneration),
 			wantStatus: metav1.ConditionFalse, wantReason: treebindv1alpha1.ReasonSyncPodNotReady,
 			wantMessage: messageNoPodReady,
 		},
 		{
 			name:       "no ready pod and Synced True",
-			synced:     syncedCondition(metav1.ConditionTrue, reasonInSync),
+			synced:     syncedCondition(metav1.ConditionTrue, reasonInSync, treebindGeneration),
 			wantStatus: metav1.ConditionFalse, wantReason: treebindv1alpha1.ReasonSyncPodNotReady,
 			wantMessage: messageNoPodReady,
 		},
 		{
 			name:       "no ready pod and Synced False keeps the pod as the reason",
-			synced:     syncedCondition(metav1.ConditionFalse, reasonSyncFailed),
+			synced:     syncedCondition(metav1.ConditionFalse, reasonSyncFailed, treebindGeneration),
 			wantStatus: metav1.ConditionFalse, wantReason: treebindv1alpha1.ReasonSyncPodNotReady,
 			wantMessage: messageNoPodReady,
 		},
@@ -96,36 +101,36 @@ func TestReadyCondition(t *testing.T) {
 		{
 			name:          "a ready pod and Synced Unknown",
 			readyReplicas: 1,
-			synced:        syncedCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonAwaitingAgentReport),
+			synced:        syncedCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonAwaitingAgentReport, treebindGeneration),
 			wantStatus:    metav1.ConditionTrue, wantReason: treebindv1alpha1.ReasonSyncPodReady,
 			wantMessage: messagePodReady,
 		},
 		{
 			name:          "a ready pod and Synced True",
 			readyReplicas: 1,
-			synced:        syncedCondition(metav1.ConditionTrue, reasonInSync),
+			synced:        syncedCondition(metav1.ConditionTrue, reasonInSync, treebindGeneration),
 			wantStatus:    metav1.ConditionTrue, wantReason: treebindv1alpha1.ReasonSyncPodReady,
 			wantMessage: messagePodReady,
 		},
 		{
 			name:          "a ready pod and Synced False names the reason of Synced",
 			readyReplicas: 1,
-			synced:        syncedCondition(metav1.ConditionFalse, reasonSyncFailed),
+			synced:        syncedCondition(metav1.ConditionFalse, reasonSyncFailed, treebindGeneration),
 			wantStatus:    metav1.ConditionFalse, wantReason: treebindv1alpha1.ReasonNotSynced,
 			wantMessage: "1 of 1 sync pods ready, but Synced is False: SyncFailed",
 		},
 		{
-			name:          "a ready pod and Synced False for another reason",
+			name:          "a ready pod and Synced False for another reason that waits for a person",
 			readyReplicas: 1,
-			synced:        syncedCondition(metav1.ConditionFalse, reasonBehindRemote),
+			synced:        syncedCondition(metav1.ConditionFalse, treebindv1alpha1.ReasonNotWritable, treebindGeneration),
 			wantStatus:    metav1.ConditionFalse, wantReason: treebindv1alpha1.ReasonNotSynced,
-			wantMessage: "1 of 1 sync pods ready, but Synced is False: BehindRemote",
+			wantMessage: "1 of 1 sync pods ready, but Synced is False: NotWritable",
 		},
 		{
 			name:                   "a ready count from a stale StatefulSet generation counts as zero",
 			readyReplicas:          1,
 			statefulSetObservedGen: statefulSetGeneration - 1,
-			synced:                 syncedCondition(metav1.ConditionTrue, reasonInSync),
+			synced:                 syncedCondition(metav1.ConditionTrue, reasonInSync, treebindGeneration),
 			wantStatus:             metav1.ConditionFalse, wantReason: treebindv1alpha1.ReasonSyncPodNotReady,
 			wantMessage: messageNoPodReady,
 		},
@@ -133,7 +138,7 @@ func TestReadyCondition(t *testing.T) {
 			name:                   "a stale StatefulSet generation wins over Synced False",
 			readyReplicas:          1,
 			statefulSetObservedGen: statefulSetGeneration - 1,
-			synced:                 syncedCondition(metav1.ConditionFalse, reasonSyncFailed),
+			synced:                 syncedCondition(metav1.ConditionFalse, reasonSyncFailed, treebindGeneration),
 			wantStatus:             metav1.ConditionFalse, wantReason: treebindv1alpha1.ReasonSyncPodNotReady,
 			wantMessage: messageNoPodReady,
 		},
@@ -149,7 +154,7 @@ func TestReadyCondition(t *testing.T) {
 				Status:     appsv1.StatefulSetStatus{ObservedGeneration: observed, ReadyReplicas: tt.readyReplicas},
 			}
 
-			got := readyCondition(statefulSet, tt.synced, treebindGeneration)
+			got := readyCondition(statefulSet, tt.synced, bidirectional, treebindGeneration)
 
 			if got.Type != treebindv1alpha1.ConditionReady {
 				t.Errorf("type = %q, want %q", got.Type, treebindv1alpha1.ConditionReady)
@@ -164,6 +169,100 @@ func TestReadyCondition(t *testing.T) {
 				t.Errorf("observedGeneration = %d, want %d", got.ObservedGeneration, treebindGeneration)
 			}
 		})
+	}
+}
+
+// Ready follows Synced only for the failures of the spec that Synced reports, that wait for a person. The table
+// crosses what Synced says with the direction of the Treebind, whether the report is of the current generation or of
+// one before, and whether the pod is ready.
+func TestReadyConditionFollowsSyncedOfTheCurrentSpec(t *testing.T) {
+	const treebindGeneration = int64(7)
+
+	// Each failure of a step that this release defines waits for a person, except these, which wait for the
+	// repository and which Ready does not act on: always, or for a Treebind that syncs in both directions.
+	// The reason SyncFailed, which an agent of another release gets, waits for a person too.
+	reasonsThatWaitForTheRepository := map[treebindv1alpha1.SyncDirection][]string{
+		pullOnly:      {reasonFetchFailed, reasonPushFailed},
+		bidirectional: {reasonFetchFailed, reasonPushFailed, reasonNonFastForward, reasonBlocked},
+	}
+	failedReasons := append([]string{reasonSyncFailed}, slices.Sorted(maps.Keys(failedStepReasons))...)
+
+	type synced struct {
+		status metav1.ConditionStatus
+		reason string
+		// makesNotReady says whether Synced of the current generation makes a ready pod not ready, for each
+		// direction.
+		makesNotReady func(direction treebindv1alpha1.SyncDirection) bool
+	}
+	never := func(treebindv1alpha1.SyncDirection) bool { return false }
+	unknownReasons := []string{
+		treebindv1alpha1.ReasonAwaitingAgentReport, treebindv1alpha1.ReasonAgentUnreachable,
+		treebindv1alpha1.ReasonSyncPending, treebindv1alpha1.ReasonAgentOutdated,
+	}
+	cases := make([]synced, 0, len(unknownReasons)+1+len(failedReasons))
+	for _, reason := range unknownReasons {
+		cases = append(cases, synced{status: metav1.ConditionUnknown, reason: reason, makesNotReady: never})
+	}
+	cases = append(cases, synced{status: metav1.ConditionTrue, reason: reasonInSync, makesNotReady: never})
+	for _, reason := range failedReasons {
+		cases = append(cases, synced{
+			status: metav1.ConditionFalse, reason: reason,
+			makesNotReady: func(direction treebindv1alpha1.SyncDirection) bool {
+				return !slices.Contains(reasonsThatWaitForTheRepository[direction], reason)
+			},
+		})
+	}
+
+	generations := []struct {
+		name     string
+		observed int64
+	}{
+		{"of the current generation", treebindGeneration},
+		{"of the generation before", treebindGeneration - 1},
+		{"of no generation", 0},
+	}
+	podStates := []struct {
+		name          string
+		readyReplicas int32
+	}{{"ready", 1}, {"not ready", 0}}
+
+	for _, direction := range []treebindv1alpha1.SyncDirection{pullOnly, bidirectional} {
+		for _, c := range cases {
+			for _, generation := range generations {
+				for _, pod := range podStates {
+					name := fmt.Sprintf("%s, Synced %s %s %s, pod %s", direction, c.status, c.reason, generation.name, pod.name)
+					t.Run(name, func(t *testing.T) {
+						statefulSet := &appsv1.StatefulSet{
+							ObjectMeta: metav1.ObjectMeta{Generation: 2},
+							Status:     appsv1.StatefulSetStatus{ObservedGeneration: 2, ReadyReplicas: pod.readyReplicas},
+						}
+						synced := syncedCondition(c.status, c.reason, generation.observed)
+
+						got := readyCondition(statefulSet, synced, direction, treebindGeneration)
+
+						switch {
+						case pod.readyReplicas == 0:
+							assertReady(t, got, metav1.ConditionFalse, treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady)
+						case generation.observed == treebindGeneration && c.makesNotReady(direction):
+							assertReady(t, got, metav1.ConditionFalse, treebindv1alpha1.ReasonNotSynced,
+								"1 of 1 sync pods ready, but Synced is False: "+c.reason)
+						default:
+							assertReady(t, got, metav1.ConditionTrue, treebindv1alpha1.ReasonSyncPodReady, messagePodReady)
+						}
+						if got.ObservedGeneration != treebindGeneration {
+							t.Errorf("observedGeneration = %d, want %d", got.ObservedGeneration, treebindGeneration)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func assertReady(t *testing.T, got metav1.Condition, status metav1.ConditionStatus, reason, message string) {
+	t.Helper()
+	if got.Status != status || got.Reason != reason || got.Message != message {
+		t.Errorf("Ready = %s/%s %q, want %s/%s %q", got.Status, got.Reason, got.Message, status, reason, message)
 	}
 }
 

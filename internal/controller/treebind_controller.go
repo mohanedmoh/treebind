@@ -138,7 +138,7 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		ready = reconcileFailedCondition(ensureErr, treebind.Generation)
 	} else {
 		synced := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionSynced)
-		ready = readyCondition(statefulSet, synced, treebind.Generation)
+		ready = readyCondition(statefulSet, synced, treebind.Spec.Sync.Direction, treebind.Generation)
 	}
 	changed = meta.SetStatusCondition(&treebind.Status.Conditions, ready) || changed
 
@@ -296,14 +296,24 @@ func reconcileFailedCondition(err error, generation int64) metav1.Condition {
 	}
 }
 
-// readyCondition builds the Ready condition from the StatefulSet status and the
-// Synced condition, which is nil while it is absent. A ready count is only
-// trusted once the StatefulSet controller has observed the current generation,
-// because before that it describes the previous template. A ready pod makes
-// Ready False only when Synced is False; Unknown means no report yet and does
-// not. Conflict is not an input: with followRemote the sync keeps running while
-// a conflict waits for attention.
-func readyCondition(statefulSet *appsv1.StatefulSet, synced *metav1.Condition, generation int64) metav1.Condition {
+// readyCondition builds the Ready condition from the StatefulSet status, the Synced condition, which is nil while it
+// is absent, and the sync direction and the generation of the Treebind. A ready count is only trusted once the
+// StatefulSet controller has observed the current generation, because before that it describes the previous template.
+//
+// A ready pod makes Ready False, with NotSynced, only when Synced says that a step of the sync failed, of the current
+// spec, for a reason that waits for a person (docs/adr/0004, docs/adr/0015, docs/adr/0030):
+//   - Unknown means no report yet, or none that says anything of this spec, and does not.
+//   - A Synced of an older generation is the report of the spec before, which a spec change leaves in place until the
+//     status poller writes a new one at its next poll, so it counts as Unknown and does not either.
+//   - A reason that waits for the repository does not, whatever the direction makes of it (WaitsForRepository). Ready is
+//     what kubectl wait and the health checks of a GitOps controller act on, and a Git host that is down would turn it
+//     False for every Treebind that uses the host for as long as it is down, a reason that is not the data path.
+//     Synced says it, with the reason, and the sync tries again by itself.
+//
+// Conflict is not an input: with followRemote the sync keeps running while a conflict waits for attention.
+func readyCondition(
+	statefulSet *appsv1.StatefulSet, synced *metav1.Condition, direction treebindv1alpha1.SyncDirection, generation int64,
+) metav1.Condition {
 	var ready int32
 	if statefulSet.Status.ObservedGeneration >= statefulSet.Generation {
 		ready = statefulSet.Status.ReadyReplicas
@@ -319,7 +329,7 @@ func readyCondition(statefulSet *appsv1.StatefulSet, synced *metav1.Condition, g
 	if ready < 1 {
 		return condition
 	}
-	if synced != nil && synced.Status == metav1.ConditionFalse {
+	if syncFailureWaitsForPerson(synced, direction, generation) {
 		condition.Reason = treebindv1alpha1.ReasonNotSynced
 		condition.Message = fmt.Sprintf("%d of 1 sync pods ready, but Synced is False: %s", ready, synced.Reason)
 		return condition
@@ -327,6 +337,17 @@ func readyCondition(statefulSet *appsv1.StatefulSet, synced *metav1.Condition, g
 	condition.Status = metav1.ConditionTrue
 	condition.Reason = treebindv1alpha1.ReasonSyncPodReady
 	return condition
+}
+
+// syncFailureWaitsForPerson says whether Synced reports, of the Treebind's current generation, a failed step whose
+// reason waits for a person, which is what makes a ready pod not ready.
+func syncFailureWaitsForPerson(
+	synced *metav1.Condition, direction treebindv1alpha1.SyncDirection, generation int64,
+) bool {
+	return synced != nil &&
+		synced.Status == metav1.ConditionFalse &&
+		synced.ObservedGeneration >= generation &&
+		!WaitsForRepository(synced.Reason, direction)
 }
 
 // SetupWithManager sets up the controller with the Manager.
