@@ -12,6 +12,7 @@ A contributor needs a laptop, a container runtime and no cloud account.
 | Docker or Podman | Any current release | Builds images and runs kind |
 | kind | A current release | Local clusters for `make dev` and the end-to-end tests |
 | kubectl | Within one minor version of the cluster | Talks to the cluster |
+| ssh-keygen | Any OpenSSH client | `make dev-ssh` and the end-to-end suite make the deploy key of the ssh remote with it |
 | make | GNU make | Every task has a target |
 | kubebuilder | v4.16, only when you scaffold a new API | Code generation for new types |
 | Helm (optional) | 4.x | Lint and render the chart in `charts/treebind` (`helm lint charts/treebind`) |
@@ -121,6 +122,20 @@ make dev-down
 ```
 
 deletes the cluster.
+
+## The end-to-end tests
+
+`make test-e2e` runs the suite in `test/e2e` on a kind cluster. Besides the specs of the operator itself, it runs the definition
+of the MVP with the real agent: a Treebind that syncs in both directions, a pod that mounts the claim with the same `subPath` as an
+application does, and the ssh remote that `make dev-ssh` starts. A file written in the pod has to be a commit on the remote, a
+commit pushed from Git has to be a file in the pod, and both have to go on after the pod of the sync is deleted with and without its
+grace period and after the leader of the operator is deleted. What `kubectl describe` shows of the outcomes is a pending spec, and
+its output says so, until the operator writes `Synced` from the report of the agent.
+
+The suite builds the agent image with ko into the cluster, as `make dev` does, so `make ko` downloads it the first time. It needs
+the network for what the cluster pulls (the image of the remote, `busybox` for the pod of the application) and for the `apk` that the
+pod of the remote runs when it starts. To run only the definition of done against a cluster that is there, give the focus
+`Definition of done` to the `go test` command that the target runs.
 
 ## Make targets
 
