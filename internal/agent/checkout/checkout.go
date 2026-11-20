@@ -202,13 +202,7 @@ func (o Options) runnerOptions() git.Options { return RunnerOptions(o.Layout, o.
 // directories of the layout, and a look at the Git directory before every command, so that Git
 // is not run against one that holds something the agent did not put there (docs/adr/0019).
 // What else the agent runs against the checkout, the pull for one, takes them from here.
-func RunnerOptions(l layout.Layout, g git.Options) git.Options {
-	g.GitDir = l.GitDir
-	g.WorkTree = l.WorkTree
-	g.AllowGitDirInWorkTree = l.GitDirInWorkTree
-	g.VerifyGitDir = true
-	return g
-}
+func RunnerOptions(l layout.Layout, g git.Options) git.Options { return l.RunnerOptions(g) }
 
 // checkout is one call of Open.
 type checkout struct {
