@@ -159,6 +159,13 @@ it had. The spec checks that `Synced` says `FetchFailed` while `Ready` stays `Tr
 on the other side, added by one commit, within the five minutes that the back-off of the agent's pulls calls for. It needs nothing
 beyond what the other failure specs need.
 
+Another puts a second Treebind on the claim and the `subPath` of the first, which the operator accepts and whose agent
+waits for the writer lock for as long as the first agent holds it, and freezes the first agent with the freezer of cgroup v2 for
+longer than the lock's TTL while the application writes a file. The second agent takes the lock over and commits the file; the
+spec thaws the first as soon as it sees that, checks that it stops without writing and comes back as the standby, and deletes the
+second Treebind, after which the first takes the lock again and syncs in both directions. It adds a pod that mounts the whole claim
+read-only, to read the lock's slots and look for files that a step leaves, which the pod of the application cannot see.
+
 CI runs them in a job of their own, `e2e-failures`, on a kind cluster of its own and in parallel with the `e2e` job, on every pull
 request that changes code, so that a pull request waits for the longer of the two and not for their sum. The nightly workflow runs
 them as well on each Kubernetes version of the support window.
