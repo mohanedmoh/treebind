@@ -5,6 +5,9 @@
 # Usage: hack/inject.sh kill|freeze|thaw <namespace> <pod> [container]
 #        hack/inject.sh kill-at <namespace> <pod> <container> <seconds> <marker>...
 #        hack/inject.sh kill-git-at <namespace> <pod> <container> <seconds> <word> <marker>...
+#        hack/inject.sh tmpfs-mount <node> <name> <mebibytes>
+#        hack/inject.sh tmpfs-fill <node> <name> <bytes-left>
+#        hack/inject.sh tmpfs-free|tmpfs-unmount|tmpfs-df <node> <name>
 #        hack/inject.sh cleanup
 #
 #   kill         sends SIGKILL to the first process of the container, as an out-of-memory kill does. The kubelet starts the
@@ -18,7 +21,15 @@
 #   kill-git-at  does the same to a Git that the first process started and whose arguments hold <word>, from inside the
 #                container with kubectl exec: it stops that Git with SIGSTOP, looks again, and kills it with SIGKILL, or
 #                lets it go on with SIGCONT. The first process runs on, and finds that its Git was killed.
-#   cleanup      removes the privileged pods and their namespace.
+#   tmpfs-mount  mounts a tmpfs of <mebibytes> (at most 64) in the mount namespace of the node, at
+#                /var/lib/treebind-inject/<name>, for a static PersistentVolume to point at: a volume that fills without
+#                filling the disk of the machine that runs the cluster. tmpfs-fill writes zeros into a file at its root
+#                until at most <bytes-left> bytes (rounded up to a block) are free, tmpfs-free removes that file,
+#                tmpfs-unmount unmounts the tmpfs and waits for what the kubelet mounted of it to go, and tmpfs-df says how
+#                big it is and how much is free. A claim of a storage class that makes directories, as local-path does on
+#                kind, is a directory on the disk of the node, which on kind is the disk of the host, and has no size to
+#                fill: never fill one.
+#   cleanup      unmounts every tmpfs that tmpfs-mount made, and removes the privileged pods and their namespace.
 #
 # The container is the first of the pod when none is named. The first process of a container is PID 1 of its PID
 # namespace, and the kernel does not let a process of that namespace send it SIGKILL or SIGSTOP: on kind, `kubectl exec
@@ -35,6 +46,16 @@
 # of the shell's own commands, which start no program, so that a look takes microseconds and a moment of a fraction of
 # a second is seen many times over.
 #
+# The tmpfs verbs are for a volume that fills without filling a disk, and two guards come before any of them writes or
+# unmounts anything, from facts that no argument gives. First, the directory, which the script makes from the name, has to
+# be the mount point of a tmpfs, by the mount table of the node (its PID 1) and by the file system type that statfs reports,
+# and a tmpfs of more than 64 MiB is refused, as a /dev/shm or a fraction of the memory would be. Second, no verb writes
+# more than the tmpfs holds: what it writes comes from the free blocks that statfs reports, in at most five rounds that
+# together never pass the blocks of the tmpfs, and the one file that it writes, .treebind-filler, is at the root of the mount
+# point and is refused when it is a symbolic link. The name is lowercase letters, digits and dashes, so no path leaves the
+# directory. The filler is written by the privileged pod and not through the agent, because the pages of a tmpfs count
+# against the memory of whoever writes them, and the memory of the agent is limited.
+#
 # A privileged pod that kills processes is for a throwaway cluster, so the script refuses to run unless the current
 # context of kubectl is a kind cluster (a name that begins with kind-). INJECT_ANY_CLUSTER=yes lets it run on another.
 # KUBECTL names the kubectl to use, and INJECT_IMAGE the image of the privileged pod (busybox).
@@ -48,6 +69,9 @@ usage() {
   echo "usage: $0 kill|freeze|thaw <namespace> <pod> [container]" >&2
   echo "       $0 kill-at <namespace> <pod> <container> <seconds> <marker>..." >&2
   echo "       $0 kill-git-at <namespace> <pod> <container> <seconds> <word> <marker>..." >&2
+  echo "       $0 tmpfs-mount <node> <name> <mebibytes>" >&2
+  echo "       $0 tmpfs-fill <node> <name> <bytes-left>" >&2
+  echo "       $0 tmpfs-free|tmpfs-unmount|tmpfs-df <node> <name>" >&2
   echo "       $0 cleanup" >&2
   exit 2
 }
@@ -92,8 +116,8 @@ injector() {
     "$KUBECTL" -n "$INJECT_NAMESPACE" delete pod "$pod" --wait=true >&2
   fi
   # The label lets the namespace hold a privileged pod also on a cluster whose Pod Security admission enforces a
-  # level by default. busybox, whose shell, grep, sed and kill the verbs use, is pulled only when it is not on the node.
-  "$KUBECTL" apply -f - >&2 <<POD
+  # level by default.
+  "$KUBECTL" apply -f - >&2 <<NAMESPACE
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -101,7 +125,15 @@ metadata:
   labels:
     app.kubernetes.io/name: treebind-inject
     pod-security.kubernetes.io/enforce: privileged
----
+NAMESPACE
+  # A pod is refused until the namespace has its default service account, which the cluster makes a moment after the
+  # namespace, and that is a moment that the first verb on a cluster that was just made can meet.
+  for _ in $(seq 1 60); do
+    "$KUBECTL" -n "$INJECT_NAMESPACE" get serviceaccount default >/dev/null 2>&1 && break
+    sleep 1
+  done
+  # busybox, whose shell, grep, sed and kill the verbs use, is pulled only when it is not on the node.
+  "$KUBECTL" apply -f - >&2 <<POD
 apiVersion: v1
 kind: Pod
 metadata:
@@ -324,6 +356,192 @@ watch "$@"
 trap - EXIT
 '
 
+# The script that the tmpfs verbs run in the privileged pod, with the verb, the name and the node, and for tmpfs-mount the
+# mebibytes and for tmpfs-fill the bytes to leave. It reaches the files of the node through /proc/1/root, which is the
+# root of the node's mount namespace as the pod sees it, and mounts and unmounts in that namespace with nsenter, so that
+# the kubelet sees the tmpfs. The mount table is read from /proc/1/mountinfo, which is the node's too.
+# shellcheck disable=SC2016
+tmpfs_script='
+set -eu
+verb="$1" name="$2" node="$3"
+shift 3
+base=/var/lib/treebind-inject
+dir="$base/$name"
+node_root=/proc/1/root
+filler=.treebind-filler
+max_bytes=$((64 * 1048576))
+die() {
+  echo "inject: $*" >&2
+  exit 1
+}
+# mount_type prints the type of the last file system mounted at the path $1 in the mount table of the node, or nothing.
+# A line of mountinfo is "<id> <parent> <dev> <root> <mount point> <options> [<tags>...] - <type> <source> <options>".
+mount_type() {
+  found=""
+  while read -r _ _ _ _ point _ rest; do
+    [ "$point" = "$1" ] || continue
+    rest=" $rest"
+    rest="${rest#* - }"
+    found="${rest%% *}"
+  done </proc/1/mountinfo
+  echo "$found"
+}
+check_name() {
+  case "$name" in
+  "" | -* | *[!a-z0-9-]*) die "the name \"$name\" is not of lowercase letters, digits and dashes, or begins with a dash" ;;
+  esac
+}
+# measure sets blocks, avail and bs from the file system of the mount point, as statfs reports them now, and size and
+# free in bytes from them.
+measure() {
+  read -r blocks avail bs <<MEASURE
+$(stat -f -c "%b %a %S" "$node_root$dir")
+MEASURE
+  size=$((blocks * bs))
+  free=$((avail * bs))
+}
+# guard refuses, before anything is written or unmounted, a directory that is not the mount point of a tmpfs of a size that
+# this script fills: it is the mount table and the file system that say so, and not the caller.
+guard() {
+  check_name
+  type="$(mount_type "$dir")"
+  if [ "$type" != tmpfs ]; then
+    mounted="nothing is mounted there"
+    [ -z "$type" ] || mounted="a file system of type $type is mounted there"
+    die "$dir on the node $node is not the mount point of a tmpfs ($mounted), and nothing is written or unmounted there"
+  fi
+  [ ! -L "$node_root$dir" ] || die "$dir on the node $node is a symbolic link"
+  fs="$(stat -f -c "%T" "$node_root$dir")"
+  [ "$fs" = tmpfs ] || die "$dir on the node $node is on a file system of type \"$fs\", not a tmpfs"
+  measure
+  [ "$size" -le "$max_bytes" ] ||
+    die "the tmpfs at $dir on the node $node holds $size bytes, more than the $((max_bytes / 1048576)) MiB that this script fills"
+}
+# the file that is written is made here, at the root of the mount point, and is not followed when it is a link.
+filler_path() {
+  path="$node_root$dir/$filler"
+  [ ! -L "$path" ] && { [ ! -e "$path" ] || [ -f "$path" ]; } ||
+    die "$dir/$filler on the node $node is not a regular file, and is not written or removed"
+}
+filler_size() {
+  if [ -e "$path" ]; then stat -c %s "$path"; else echo 0; fi
+}
+# mounts_of prints the mount points, in the mount table of the node, of the tmpfs that tmpfs-mount made for the name $1: its
+# own, and the ones that the kubelet makes of it for the pods that use a volume on it, which are gone only when those pods
+# are cleaned up, a moment after they are deleted. The memory of the tmpfs is not freed before the last of them.
+mounts_of() {
+  while read -r _ _ _ _ point _ rest; do
+    rest=" $rest"
+    rest="${rest#* - }"
+    case "$rest" in
+    "tmpfs treebind-inject-$1 "*) echo "$point" ;;
+    esac
+  done </proc/1/mountinfo
+}
+# unmount unmounts the tmpfs at $dir, and waits for the mounts of it that the kubelet made to be gone as well, so that
+# nothing of it is left on the node.
+unmount() {
+  if nsenter -t 1 -m -- umount "$dir"; then
+    echo "unmounted $dir on the node $node"
+  else
+    # Something holds it, such as a container that still has a file open in it: it is detached now and goes when the last
+    # of them lets go, so that it is not left in the mount table of the node.
+    nsenter -t 1 -m -- umount -l "$dir"
+    echo "unmounted $dir on the node $node lazily, because it was busy"
+  fi
+  rmdir "$node_root$dir" 2>/dev/null || :
+  for _ in $(seq 1 60); do
+    [ -z "$(mounts_of "$name")" ] && return 0
+    sleep 0.5
+  done
+  die "the tmpfs of $name on the node $node is still mounted at $(mounts_of "$name" | tr "\n" " ") by what uses it"
+}
+case "$verb" in
+tmpfs-mount)
+  mib="$1"
+  check_name
+  case "$mib" in
+  "" | 0* | *[!0-9]*) die "the size \"$mib\" is not a whole number of mebibytes above 0" ;;
+  esac
+  [ "$mib" -le $((max_bytes / 1048576)) ] ||
+    die "a tmpfs of $mib MiB is more than the $((max_bytes / 1048576)) MiB that this script mounts"
+  [ -z "$(mount_type "$dir")" ] || die "$dir on the node $node already has a file system mounted"
+  nsenter -t 1 -m -- mkdir -p "$dir"
+  nsenter -t 1 -m -- mount -t tmpfs -o "size=${mib}m,mode=1777" "treebind-inject-$name" "$dir"
+  guard
+  echo "mounted a tmpfs at $dir on the node $node: size=$size available=$free"
+  ;;
+tmpfs-fill)
+  left="$1"
+  case "$left" in
+  "" | *[!0-9]*) die "the bytes to leave, \"$left\", are not a whole number" ;;
+  esac
+  guard
+  filler_path
+  [ "$left" -le "$size" ] || die "the $left bytes to leave are more than the $size bytes of the tmpfs at $dir"
+  keep=$(((left + bs - 1) / bs))
+  # Never more than the tmpfs holds, in all of the rounds together; a round writes what is free beyond what is to be left.
+  budget=$blocks wrote=0
+  for _ in 1 2 3 4 5; do
+    measure
+    n=$((avail - keep))
+    [ "$n" -gt 0 ] || break
+    [ "$n" -le "$budget" ] || n=$budget
+    [ "$n" -gt 0 ] || break
+    # The write stops at the first block the file system refuses, which is what a fill to the last block comes to.
+    dd if=/dev/zero bs="$bs" count="$n" >>"$path" 2>/dev/null || :
+    budget=$((budget - n))
+    wrote=$((wrote + n))
+  done
+  measure
+  [ "$avail" -le "$keep" ] ||
+    die "the tmpfs at $dir on the node $node has $free bytes free after the fill, more than the $left asked for"
+  echo "filled the tmpfs at $dir on the node $node: size=$size available=$free filler=$(filler_size) (blocks written: $wrote)"
+  ;;
+tmpfs-free)
+  guard
+  filler_path
+  before="$(filler_size)"
+  rm -f "$path"
+  measure
+  echo "freed the filler of $before bytes in the tmpfs at $dir on the node $node: size=$size available=$free"
+  ;;
+tmpfs-df)
+  guard
+  filler_path
+  echo "the tmpfs at $dir on the node $node: size=$size available=$free filler=$(filler_size)"
+  ;;
+tmpfs-unmount)
+  check_name
+  type="$(mount_type "$dir")"
+  if [ -z "$type" ]; then
+    rmdir "$node_root$dir" 2>/dev/null || :
+    echo "nothing is mounted at $dir on the node $node"
+    exit 0
+  fi
+  [ "$type" = tmpfs ] ||
+    die "$dir on the node $node has a file system of type \"$type\" mounted, not a tmpfs, and it is not unmounted"
+  unmount
+  ;;
+tmpfs-unmount-all)
+  # What cleanup does: every tmpfs under the directory of this script, as the mount table of the node has it.
+  mounted=""
+  while read -r _ _ _ _ point _ rest; do
+    case "$point" in
+    "$base"/*) mounted="$mounted $point" ;;
+    esac
+  done </proc/1/mountinfo
+  for point in $mounted; do
+    [ "$(mount_type "$point")" = tmpfs ] || die "$point on the node $node is not a tmpfs, and is not unmounted"
+    name="${point#"$base"/}"
+    dir="$point"
+    unmount
+  done
+  [ -n "$mounted" ] || echo "no tmpfs of this script is mounted on the node $node"
+  ;;
+esac
+'
+
 # target reads the node of a pod and the ID of its container, which the verbs that act from the node need.
 target() {
   namespace="$1" pod="$2" container="${3:-}"
@@ -344,7 +562,29 @@ case "$verb" in
 cleanup)
   [ $# -eq 1 ] || usage
   check_cluster
+  # The tmpfs are unmounted first, from the pods that mounted them: a pod that is gone cannot, and its node keeps them
+  # until the cluster is.
+  status=0
+  pods="$("$KUBECTL" -n "$INJECT_NAMESPACE" get pods -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' \
+    --ignore-not-found 2>/dev/null || true)"
+  while read -r pod; do
+    [ -n "$pod" ] || continue
+    "$KUBECTL" -n "$INJECT_NAMESPACE" exec "$pod" -- sh -c "$tmpfs_script" sh tmpfs-unmount-all - "${pod#inject-}" || status=1
+  done <<<"$pods"
   "$KUBECTL" delete namespace "$INJECT_NAMESPACE" --ignore-not-found --wait=true --timeout=3m
+  exit "$status"
+  ;;
+tmpfs-mount | tmpfs-fill | tmpfs-free | tmpfs-unmount | tmpfs-df)
+  if [ "$verb" = tmpfs-mount ] || [ "$verb" = tmpfs-fill ]; then
+    [ $# -eq 4 ] || usage
+  else
+    [ $# -eq 3 ] || usage
+  fi
+  [[ "$2" =~ ^[a-z0-9.-]+$ ]] || fail "the node '$2' is not a node name"
+  check_cluster
+  "$KUBECTL" get node "$2" >/dev/null || fail "the cluster has no node '$2'"
+  injecting="$(injector "$2")"
+  "$KUBECTL" -n "$INJECT_NAMESPACE" exec "$injecting" -- sh -c "$tmpfs_script" sh "$verb" "$3" "$2" "${@:4}"
   ;;
 kill | freeze | thaw)
   [ $# -eq 3 ] || [ $# -eq 4 ] || usage

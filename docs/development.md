@@ -159,17 +159,24 @@ it had. The spec checks that `Synced` says `FetchFailed` while `Ready` stays `Tr
 on the other side, added by one commit, within the five minutes that the back-off of the agent's pulls calls for. It needs nothing
 beyond what the other failure specs need.
 
+Another fills the volume of a Treebind until its agent cannot write to it, and frees it again. Its claim is on a tmpfs of 16 MiB
+that the privileged pod mounts on the node, so it needs a node where that pod can mount a tmpfs, as the node of a kind cluster is, and
+it never fills the node's disk: a claim of local-path is a directory on that disk, and the script writes only into a tmpfs, and never
+more than the tmpfs holds.
+
 CI runs them in a job of their own, `e2e-failures`, on a kind cluster of its own and in parallel with the `e2e` job, on every pull
 request that changes code, so that a pull request waits for the longer of the two and not for their sum. The nightly workflow runs
 them as well on each Kubernetes version of the support window.
 
-`hack/inject.sh` is what kills and freezes, and you can run it against `make dev` to see a failure yourself:
+`hack/inject.sh` is what kills, freezes and fills, and you can run it against `make dev` to see a failure yourself:
 `hack/inject.sh kill <namespace> <pod of the sync>` kills the agent, `freeze` and `thaw` stop and start it, and
-`hack/inject.sh cleanup` removes the privileged pod. It refuses a kubectl context that is not a kind cluster.
+`hack/inject.sh cleanup` unmounts the tmpfs and removes the privileged pod. It refuses a kubectl context that is not a kind cluster.
 `hack/inject.sh kill-at <namespace> <pod> agent <seconds> +/work/.treebind/updating` kills the agent in a moment that files on
 its volume mark (`+` for a file that has to be there, `-` for one that must not): it freezes the container when they all hold, and
 kills it only when they still hold once it is frozen. `kill-git-at` does the same to a Git that the agent started, from inside its
-container, and the agent runs on.
+container, and the agent runs on. `tmpfs-mount <node> <name> <mebibytes>` mounts a tmpfs on a node for a static PersistentVolume of type
+`local` to point at, `tmpfs-fill <node> <name> <bytes-left>` fills it with zeros until that many bytes are free, and `tmpfs-free`,
+`tmpfs-df` and `tmpfs-unmount` take the filler away, say how much is free and unmount it.
 
 ## Make targets
 

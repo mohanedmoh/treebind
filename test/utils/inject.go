@@ -51,8 +51,35 @@ func ThawContainer(namespace, pod, container string) (string, error) {
 	return inject("thaw", namespace, pod, container)
 }
 
-// RemoveInjector removes the privileged pods that the verbs start, with their namespace, and waits for
-// them to be gone.
+// TmpfsDir is where hack/inject.sh mounts the tmpfs of a name on a node, the directory that a PersistentVolume of
+// type local points at.
+func TmpfsDir(name string) string { return "/var/lib/treebind-inject/" + name }
+
+// MountTmpfs mounts a tmpfs of a few mebibytes (at most 64) on a node, in the node's mount namespace at
+// TmpfsDir(name). It is a volume that fills without filling the disk of the machine that runs the cluster: the
+// claims of a storage class that makes directories, as local-path does on kind, are directories on that disk and
+// have no size to fill.
+func MountTmpfs(node, name string, mebibytes int) (string, error) {
+	return injectVerb("tmpfs-mount", node, name, strconv.Itoa(mebibytes))
+}
+
+// FillTmpfs writes zeros into a file at the root of the tmpfs until at most the bytes given are free, rounded up to a
+// block. It never writes more than the tmpfs holds, and refuses a directory that is not the mount point of a tmpfs.
+func FillTmpfs(node, name string, bytesLeft int64) (string, error) {
+	return injectVerb("tmpfs-fill", node, name, strconv.FormatInt(bytesLeft, 10))
+}
+
+// FreeTmpfs removes the file that FillTmpfs wrote. It is not an error that there is none.
+func FreeTmpfs(node, name string) (string, error) { return injectVerb("tmpfs-free", node, name) }
+
+// TmpfsStatus says how big the tmpfs is and how much of it is free, in the words "size=<bytes> available=<bytes>".
+func TmpfsStatus(node, name string) (string, error) { return injectVerb("tmpfs-df", node, name) }
+
+// UnmountTmpfs unmounts the tmpfs that MountTmpfs mounted. It is not an error that none is mounted.
+func UnmountTmpfs(node, name string) (string, error) { return injectVerb("tmpfs-unmount", node, name) }
+
+// RemoveInjector unmounts the tmpfs that MountTmpfs mounted, removes the privileged pods that the verbs start, with
+// their namespace, and waits for them to be gone.
 func RemoveInjector() error {
 	_, err := Run(exec.Command("hack/inject.sh", "cleanup"))
 	return err
@@ -164,6 +191,10 @@ func seconds(timeout time.Duration) string {
 }
 
 func inject(verb, namespace, pod, container string) (string, error) {
-	output, err := Run(exec.Command("hack/inject.sh", verb, namespace, pod, container))
+	return injectVerb(verb, namespace, pod, container)
+}
+
+func injectVerb(args ...string) (string, error) {
+	output, err := Run(exec.Command("hack/inject.sh", args...))
 	return strings.TrimSpace(output), err
 }
