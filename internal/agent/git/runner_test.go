@@ -923,11 +923,13 @@ func TestCheckVersion(t *testing.T) {
 	tests := []struct {
 		name, output, want string
 	}{
-		{"the oldest that works", "git version 2.40.0", ""},
+		{"the oldest that works", "git version 2.41.0", ""},
 		{"a newer one", "git version 2.56.1", ""},
 		{"a newer major", "git version 3.0.0", ""},
 		{"a vendor suffix", "git version 2.44.0.windows.1", ""},
-		{"one before", "git version 2.39.5", msgOlder},
+		{"the release before, its last", "git version 2.40.1", msgOlder},
+		{"the release before, its first", "git version 2.40.0", msgOlder},
+		{"two before", "git version 2.39.5", msgOlder},
 		{"a much older one", "git version 2.34.1", msgOlder},
 		{"an older major", "git version 1.9.0", msgOlder},
 		{"something else", "not git", "cannot read a version"},
