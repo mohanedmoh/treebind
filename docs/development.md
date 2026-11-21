@@ -152,6 +152,10 @@ it was down ([#55](https://github.com/mohanedmoh/treebind/issues/55)). The next 
 in the middle of the files of an update, and kill a Git that the agent started in the middle of `git add`, each on a burst of 3000
 small files, which with their objects take about 25 MB of the node's disk until the spec removes its claim and its repository.
 
+CI runs them in a job of their own, `e2e-failures`, on a kind cluster of its own and in parallel with the `e2e` job, on every pull
+request that changes code, so that a pull request waits for the longer of the two and not for their sum. The nightly workflow runs
+them as well on each Kubernetes version of the support window.
+
 `hack/inject.sh` is what kills and freezes, and you can run it against `make dev` to see a failure yourself:
 `hack/inject.sh kill <namespace> <pod of the sync>` kills the agent, `freeze` and `thaw` stop and start it, and
 `hack/inject.sh cleanup` removes the privileged pod. It refuses a kubectl context that is not a kind cluster.
