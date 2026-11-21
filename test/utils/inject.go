@@ -78,7 +78,9 @@ func KillAt(namespace, pod, container string, timeout time.Duration, markers ...
 
 // KillGitAt starts kill-git-at, which kills a Git that the first process of a container started, and whose arguments
 // hold the word, in the moment that the markers say, from inside the container. It returns once the script watches.
-func KillGitAt(namespace, pod, container string, timeout time.Duration, word string, markers ...string) (*Watch, error) {
+func KillGitAt(
+	namespace, pod, container string, timeout time.Duration, word string, markers ...string,
+) (*Watch, error) {
 	return startWatch(append([]string{"kill-git-at", namespace, pod, container, seconds(timeout), word}, markers...))
 }
 
