@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-14
 - Issue: #33
+- Extended by: #241, on 2026-11-21, which says what a loss of the lock ends with when the agent was told to stop as
+  well: the exit code 3 and the line that says the lock was lost, and never the code 0 of a stop on request
 
 ## Context
 
