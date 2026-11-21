@@ -155,6 +155,8 @@ func failureInjection() {
 	})
 
 	killMidStep()
+
+	Context("when the remote is taken away and brought back", remoteDown)
 }
 
 // killBetweenSteps kills the agent of a Treebind that has nothing to do, as an out-of-memory kill does, while the application writes a

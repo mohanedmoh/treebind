@@ -152,6 +152,13 @@ it was down ([#55](https://github.com/mohanedmoh/treebind/issues/55)). The next 
 in the middle of the files of an update, and kill a Git that the agent started in the middle of `git add`, each on a burst of 3000
 small files, which with their objects take about 25 MB of the node's disk until the spec removes its claim and its repository.
 
+Another takes the ssh remote away while the application writes a file and a commit is pushed from Git in the pod of the remote, and
+brings it back. The remote keeps its repositories in an `emptyDir` and makes its host keys when it starts, so it is not stopped:
+its Service is given a selector that matches no pod, so that kube-proxy refuses the connections of the agent, and then the selector
+it had. The spec checks that `Synced` says `FetchFailed` while `Ready` stays `True`, and that once the remote is back each change is
+on the other side, added by one commit, within the five minutes that the back-off of the agent's pulls calls for. It needs nothing
+beyond what the other failure specs need.
+
 `hack/inject.sh` is what kills and freezes, and you can run it against `make dev` to see a failure yourself:
 `hack/inject.sh kill <namespace> <pod of the sync>` kills the agent, `freeze` and `thaw` stop and start it, and
 `hack/inject.sh cleanup` removes the privileged pod. It refuses a kubectl context that is not a kind cluster.
