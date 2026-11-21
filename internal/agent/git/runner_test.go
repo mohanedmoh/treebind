@@ -234,7 +234,7 @@ func TestTheEnvironmentIsBuiltFromNothing(t *testing.T) {
 		"GIT_PAGER":           "cat",
 		envSSHCommand: "/usr/bin/ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes " +
 			"-o UpdateHostKeys=no -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/hosts/known " +
-			"-o IdentitiesOnly=yes -i /keys/id",
+			"-o IdentitiesOnly=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -i /keys/id",
 		"GIT_ALLOW_PROTOCOL":     "ssh:https",
 		"GIT_ATTR_SOURCE":        emptyTree,
 		"GIT_NO_REPLACE_OBJECTS": "1",
@@ -282,6 +282,17 @@ func TestSSHCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("a remote that stops answering ends the connection", func(t *testing.T) {
+		// Each option is looked for by itself, so that dropping one fails by its name. Without them ssh waits
+		// on its own defaults, which is for ever for a peer that went silent (#229).
+		fields := strings.Fields(sshCommand(SSH{Program: sshName}))
+		for _, want := range []string{"ConnectTimeout=30", "ServerAliveInterval=15", "ServerAliveCountMax=4"} {
+			if i := slices.Index(fields, want); i < 1 || fields[i-1] != "-o" {
+				t.Errorf("the ssh command does not hold -o %s: %v", want, fields)
+			}
+		}
+	})
+
 	t.Run("what ssh makes of it", func(t *testing.T) {
 		if _, err := exec.LookPath(sshName); err != nil {
 			t.Skip("ssh is not installed")
@@ -318,6 +329,9 @@ func TestSSHCommand(t *testing.T) {
 			"identitiesonly":        "yes",
 			"identityfile":          key,
 			"updatehostkeys":        wantFalse,
+			"connecttimeout":        "30",
+			"serveraliveinterval":   "15",
+			"serveralivecountmax":   "4",
 		} {
 			if !slices.Contains(effective[key], want) {
 				t.Errorf("%s is %q, want %q", key, effective[key], want)
