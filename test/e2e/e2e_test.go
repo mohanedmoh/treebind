@@ -800,6 +800,10 @@ var _ = Describe("Manager", Ordered, func() {
 
 	// The definition of done runs last: it gives the operator the agent image, which replaces its pods.
 	Context("Definition of done", definitionOfDone)
+
+	// The specs that cause a failure come after it, because they need the agent image too, and carry the label failure, so that
+	// make test-e2e leaves them out and make test-e2e-failures runs only them (test/e2e/setup_test.go).
+	Context("Failure injection", Label(failureLabel), failureInjection)
 })
 
 // throwawayPrivateKey returns a PEM encoded private key that is generated for one

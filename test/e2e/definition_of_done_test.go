@@ -129,6 +129,12 @@ const seedScript = `git init -q --initial-branch=` + dodBranch + ` /tmp/seed && 
 git config user.name dev && git config user.email dev@example.com &&
 echo hello > ` + dodSeedFile + ` && git add -A && git commit -q -m first && git push -q ` + remoteRepository + ` ` + dodBranch
 
+// dod is what the definition of done syncs, and the helpers below are the ones of syncTarget for it.
+var dod = syncTarget{
+	namespace: dodNamespace, name: dodName, appPod: dodAppPod, appMount: dodAppMount,
+	repository: remoteRepository, branch: dodBranch, clone: "/tmp/seed",
+}
+
 // agentImage is the sync agent image that ko built into the cluster for these specs, which are the ones that run an agent. It is
 // built when they begin, by installAgentImage, so that a run that is focused on other specs needs neither ko nor the network for it.
 var agentImage string
@@ -362,11 +368,7 @@ func remoteShell(script string) (string, error) {
 }
 
 // remoteFiles lists the files of the branch of the repository of the remote.
-func remoteFiles(g Gomega) []string {
-	output, err := remoteShell("git -C " + remoteRepository + " ls-tree -r --name-only " + dodBranch)
-	g.Expect(err).NotTo(HaveOccurred(), "Failed to list the files of the repository")
-	return utils.GetNonEmptyLines(output)
-}
+func remoteFiles(g Gomega) []string { return dod.remoteFiles(g) }
 
 // remoteFile is the content of a file of the branch of the repository of the remote.
 func remoteFile(name string) string {
@@ -382,37 +384,17 @@ func remoteLastCommit(g Gomega) string {
 	return output
 }
 
-// remoteTip is the full id of the tip of the branch of the repository of the remote.
-func remoteTip(g Gomega) string {
-	output, err := remoteShell("git -C " + remoteRepository + " rev-parse --verify refs/heads/" + dodBranch)
-	g.Expect(err).NotTo(HaveOccurred(), "Failed to read the tip of the repository")
-	return output
-}
-
 // shellQuote makes a word of a shell of a string, whatever it holds: in single quotes, with each single quote closed, escaped and opened.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // pushFromGit makes a commit with a file in the clone that the seeding made, after taking what the repository has, and pushes it.
-func pushFromGit(name, content string) {
-	_, err := remoteShell("cd /tmp/seed && git pull -q " + remoteRepository + " " + dodBranch + " && echo " + shellQuote(content) + " > " +
-		shellQuote(name) + " && git add -A && git commit -q -m " + shellQuote("from git: "+name) + " && git push -q " +
-		remoteRepository + " " + dodBranch)
-	Expect(err).NotTo(HaveOccurred(), "Failed to push from Git")
-}
+func pushFromGit(name, content string) { dod.pushFromGit(name, content) }
 
 // appWrite writes a file in the directory of the claim that the pod of the application mounts, as the application does.
-func appWrite(name, content string) {
-	_, err := utils.Run(exec.Command("kubectl", "-n", dodNamespace, "exec", dodAppPod, "--", "sh", "-c",
-		"echo "+shellQuote(content)+" > "+shellQuote(dodAppMount+"/"+name)))
-	Expect(err).NotTo(HaveOccurred(), "Failed to write a file in the pod of the application")
-}
+func appWrite(name, content string) { dod.appWrite(name, content) }
 
 // appFile is the content of a file in the pod of the application, without the newline at the end.
-func appFile(g Gomega, name string) string {
-	output, err := utils.Run(exec.Command("kubectl", "-n", dodNamespace, "exec", dodAppPod, "--", "cat", dodAppMount+"/"+name))
-	g.Expect(err).NotTo(HaveOccurred(), "The file is not in the pod of the application yet")
-	return strings.TrimSpace(output)
-}
+func appFile(g Gomega, name string) string { return dod.appFile(g, name) }
 
 // treebindCondition is the status of the condition Ready of the Treebind.
 func treebindCondition(g Gomega) string { return treebindConditionOf(g, "Ready") }
@@ -425,71 +407,11 @@ func treebindConditionOf(g Gomega, conditionType string) string {
 	return strings.TrimSpace(output)
 }
 
-// treebindSyncState is what one read of the status of the Treebind says of the sync: the conditions that the operator writes from the
-// report of the agent, with their reasons, and the two fields of the status. A condition or a field that is not there is empty.
-type treebindSyncState struct {
-	ready, synced, syncedReason, conflict, conflictReason, lastSyncedCommit, lastSyncTime string
-}
-
-// treebindSync reads the status of the Treebind once, so that what it says of the sync is of one moment.
-func treebindSync(g Gomega) treebindSyncState {
-	condition := func(conditionType, field string) string {
-		return `{.status.conditions[?(@.type=="` + conditionType + `")].` + field + `}`
-	}
-	fields := []string{
-		condition("Ready", "status"),
-		condition("Synced", "status"), condition("Synced", "reason"),
-		condition("Conflict", "status"), condition("Conflict", "reason"),
-		"{.status.lastSyncedCommit}", "{.status.lastSyncTime}",
-	}
-	output, err := utils.Run(exec.Command("kubectl", "get", "treebind", dodName, "-n", dodNamespace,
-		"-o", "jsonpath="+strings.Join(fields, "|")))
-	g.Expect(err).NotTo(HaveOccurred(), "Failed to read the Treebind")
-	values := strings.Split(strings.TrimSpace(output), "|")
-	g.Expect(values).To(HaveLen(len(fields)), "kubectl answered %q", output)
-	return treebindSyncState{
-		ready: values[0], synced: values[1], syncedReason: values[2], conflict: values[3], conflictReason: values[4],
-		lastSyncedCommit: values[5], lastSyncTime: values[6],
-	}
-}
-
 // expectSyncedAtTip expects the status of the Treebind to say, in one read, that the volume and the repository agree at the tip of
-// the remote, and returns that tip: Synced is True with the reason InSync, status.lastSyncedCommit is the full id of the tip, and
-// status.lastSyncTime is not before the time given, which is the time before the change that made the tip, because the agreement
-// at a tip is seen after it was made. Conflict is False, with the reason NoConflict or, when an earlier spec had the agent resolve a
-// conflict, ConflictResolved, and Ready is True.
+// the remote, and returns that tip (syncTarget.expectSyncedAtTip).
 func expectSyncedAtTip(g Gomega, notBefore time.Time) string {
-	state := treebindSync(g)
-	tip := remoteTip(g)
-	g.Expect(state.synced).To(Equal("True"), "Synced is %q with the reason %q", state.synced, state.syncedReason)
-	g.Expect(state.syncedReason).To(Equal("InSync"))
-	g.Expect(state.lastSyncedCommit).To(Equal(tip), "status.lastSyncedCommit is not the tip of the remote")
-	// The operator keeps the time in whole seconds, as the API server does.
-	agreed, err := time.Parse(time.RFC3339, state.lastSyncTime)
-	g.Expect(err).NotTo(HaveOccurred(), "status.lastSyncTime is %q", state.lastSyncTime)
-	g.Expect(agreed).To(BeTemporally(">=", notBefore.Truncate(time.Second)), "status.lastSyncTime is older than the change")
-	g.Expect(state.conflict).To(Equal("False"), "Conflict is %q with the reason %q", state.conflict, state.conflictReason)
-	// The Conflict check keeps the last resolution since the agent started, and the specs before this one write on both sides close
-	// together, so that a pull may have resolved a conflict: what matters is that no conflict waits.
-	g.Expect(state.conflictReason).To(Or(Equal("NoConflict"), Equal("ConflictResolved")))
-	g.Expect(state.ready).To(Equal("True"), "Ready is %q", state.ready)
-	return tip
-}
-
-// syncPodState is what one read of the pod of the sync says of it.
-type syncPodState struct {
-	// uid is empty when there is no such pod.
-	uid string
-	// ready is whether its container is ready, and terminating whether it is being deleted.
-	ready, terminating bool
+	return dod.expectSyncedAtTip(g, notBefore)
 }
 
 // syncPod reads the pod of the sync once, so that the uid, the readiness and the deletion are of the same pod.
-func syncPod(g Gomega) syncPodState {
-	output, err := utils.Run(exec.Command("kubectl", "get", "pod", dodSyncPod, "-n", dodNamespace, "--ignore-not-found",
-		"-o", "jsonpath={.metadata.uid}|{.status.containerStatuses[0].ready}|{.metadata.deletionTimestamp}"))
-	g.Expect(err).NotTo(HaveOccurred(), "Failed to read the pod of the sync")
-	uid, rest, _ := strings.Cut(strings.TrimSpace(output), "|")
-	ready, deleted, _ := strings.Cut(rest, "|")
-	return syncPodState{uid: uid, ready: ready == "true", terminating: deleted != ""}
-}
+func syncPod(g Gomega) syncPodState { return dod.syncPod(g) }
