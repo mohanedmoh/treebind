@@ -3,6 +3,9 @@
 - Status: accepted
 - Date: 2026-11-13
 - Issue: #81
+- Corrected by: #207, on 2026-11-20, which raises the oldest Git that `CheckVersion` accepts from 2.40 to 2.41. The
+  variable `GIT_ATTR_SOURCE` is in the source of Git from the tag v2.41.0 and not at v2.40.1, so the release that this
+  record names for it is 2.41 and not 2.40
 
 ## Context
 

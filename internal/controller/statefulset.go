@@ -295,27 +295,28 @@ func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSett
 		{Name: agentconfig.EnvNamespace, ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 		}},
-		{Name: agentconfig.EnvMountPath, Value: mountPath},
+		// The mount itself takes the path as it is, and the variable is expanded by the kubelet (escapeForTheKubelet).
+		{Name: agentconfig.EnvMountPath, Value: escapeForTheKubelet(mountPath)},
 	}
 	// The variable is left out when the whole claim is synced, so that a pod template
 	// that never had a sub path does not change, and its pod is not replaced, when the
 	// operator learns to pass one on.
 	if subPath := treebind.Spec.Target.SubPath; subPath != "" {
-		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSubPath, Value: subPath})
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvSubPath, Value: escapeForTheKubelet(subPath)})
 	}
 	// The repository, with the files the credentials are in (docs/adr/0018). Never the
 	// credentials themselves: they stay in the Secret and the ConfigMap that are mounted, and
-	// the operator does not read them.
-	env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoURL, Value: treebind.Spec.Repository.URL})
+	// the operator does not read them. The address and the branch may hold a '$', which is written
+	// for the kubelet like the sub path, the mount path and the path of the repository.
+	env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoURL, Value: escapeForTheKubelet(treebind.Spec.Repository.URL)})
 	if branch := treebind.Spec.Repository.Branch; branch != "" {
-		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoBranch, Value: branch})
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoBranch, Value: escapeForTheKubelet(branch)})
 	}
 	// The directory of the repository whose files are the synced directory (docs/adr/0036). The variable is left out when the
 	// whole repository is synced, so that a pod template that never had it does not change, and its pod is not replaced, when
-	// the operator learns to pass it on. The kubelet expands $(NAME) and $$ in the value of a variable, and the CRD takes a
-	// path with a '$' in it, so each one is written as $$, which the kubelet turns back into one.
+	// the operator learns to pass it on. The CRD takes a path with a '$' in it, which is written for the kubelet.
 	if repoPath := treebind.Spec.Repository.Path; repoPath != "" {
-		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoPath, Value: strings.ReplaceAll(repoPath, "$", "$$")})
+		env = append(env, corev1.EnvVar{Name: agentconfig.EnvRepoPath, Value: escapeForTheKubelet(repoPath)})
 	}
 	// How to sync, and who the pod is, for the writer lock (docs/adr/0021). Without an interval the
 	// agent uses the default of the CRD, which is what the API server fills in.
@@ -455,12 +456,19 @@ func pathsEnv(paths *treebindv1alpha1.PathsSpec) ([]corev1.EnvVar, error) {
 	return env, nil
 }
 
+// escapeForTheKubelet returns a setting of the spec as it is written in the value of a plain environment variable. The
+// kubelet expands $(NAME) and $$ in that value (#179), so a '$' of the spec would reach the agent as another value, and
+// each '$' is written as '$$', which the kubelet turns back into one: the agent reads the setting as the spec writes
+// it. It is the same for every '$', in front of a '(' or not, so there is no case to tell apart, and a value without a
+// '$' is returned as it is, so that the pod template of a Treebind whose settings have none does not change.
+func escapeForTheKubelet(value string) string {
+	return strings.ReplaceAll(value, "$", "$$")
+}
+
 // commitEnv returns the variables of the settings of spec.commit that the spec has (docs/adr/0031). One that
 // is empty is left out, so that a pod template that has none does not change, and its pod is not replaced, when
-// the operator learns to pass them on, and the agent has a default for each. The kubelet expands $(NAME) and $$
-// in the value of a variable (#179), and a name or a message template may hold a '$', so each '$' is written as
-// '$$', which the kubelet turns back into one: the value that the agent reads is the one of the spec, as it is
-// written. It is the same for every '$', in front of a '(' or not, so there is no case to tell apart.
+// the operator learns to pass them on, and the agent has a default for each. A name or a message template may
+// hold a '$', which is written for the kubelet.
 func commitEnv(commit *treebindv1alpha1.CommitSpec) []corev1.EnvVar {
 	if commit == nil {
 		return nil
@@ -474,7 +482,7 @@ func commitEnv(commit *treebindv1alpha1.CommitSpec) []corev1.EnvVar {
 		if setting.value == "" {
 			continue
 		}
-		env = append(env, corev1.EnvVar{Name: setting.name, Value: strings.ReplaceAll(setting.value, "$", "$$")})
+		env = append(env, corev1.EnvVar{Name: setting.name, Value: escapeForTheKubelet(setting.value)})
 	}
 	// The limit of commits in an hour is a number, and is left out when it is the default of the CRD and of the agent, as the
 	// conflict policy is, so that the pod template of a Treebind that has the default filled in by the API server is the one
