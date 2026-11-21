@@ -17,6 +17,7 @@ limitations under the License.
 package git
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -156,14 +157,34 @@ func (r *Runner) environment() []string {
 	return env
 }
 
+// The bounds that the ssh command puts on a remote that stops answering (#229). Without them ssh waits on its
+// own defaults, which are the TCP timeout of the system for a connection that gets no answer and for ever for
+// one that was open and went silent, so only the timeout of the Git call ends it: 2 minutes for ls-remote and
+// 30 for a fetch or a push, and the report says nothing is wrong until then. They are fixed, like the rest of
+// the Runner's configuration, and have no setting.
+//
+// They have to be short against those 30 minutes and long enough for a slow link and a big pack. A keep-alive
+// counts only the silence of the peer and not the length of a transfer, so a pack that takes an hour to send
+// never trips it while the peer answers a probe, and the values need no room for a big pack. ConnectTimeout
+// bounds the connection and the handshake after it (a host that is slow to answer finishes both in seconds).
+// A peer that is silent for ServerAliveInterval is probed, and the connection ends when more than
+// ServerAliveCountMax probes in a row get no answer, which is after (count + 1) intervals, 75 seconds.
+const (
+	sshConnectTimeout      = 30
+	sshServerAliveInterval = 15
+	sshServerAliveCountMax = 4
+)
+
 // sshCommand is the command Git runs as ssh. A repository config cannot change
 // it, because GIT_SSH_COMMAND comes before core.sshCommand. The host is verified
 // only against the known hosts file that was given, and a connection to a host
 // that it does not list fails: with no file given the list is empty, so a
 // mistake in the setup fails closed (ADR 0005). Nothing is read from the system
 // or the user's ssh configuration (-F), no key comes from an agent or the home
-// directory (IdentitiesOnly), no question is asked (BatchMode), and the known
-// hosts are never written (UpdateHostKeys).
+// directory (IdentitiesOnly), no question is asked (BatchMode), the known
+// hosts are never written (UpdateHostKeys), and a remote that stops answering
+// ends the connection in 30 to 75 seconds (ConnectTimeout, ServerAliveInterval and
+// ServerAliveCountMax).
 func sshCommand(s SSH) string {
 	known := s.KnownHostsFile
 	if known == "" {
@@ -178,6 +199,9 @@ func sshCommand(s SSH) string {
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "UserKnownHostsFile=" + known,
 		"-o", "IdentitiesOnly=yes",
+		"-o", "ConnectTimeout=" + strconv.Itoa(sshConnectTimeout),
+		"-o", "ServerAliveInterval=" + strconv.Itoa(sshServerAliveInterval),
+		"-o", "ServerAliveCountMax=" + strconv.Itoa(sshServerAliveCountMax),
 	}
 	if s.IdentityFile != "" {
 		args = append(args, "-i", s.IdentityFile)

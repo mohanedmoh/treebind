@@ -250,7 +250,8 @@ func TestSSHRunsTheFixedCommand(t *testing.T) {
 	called := readFile(t, log)
 	for _, want := range []string{
 		"-F /dev/null", "BatchMode=yes", "StrictHostKeyChecking=yes", "UserKnownHostsFile=" + known,
-		"GlobalKnownHostsFile=/dev/null", "IdentitiesOnly=yes", "-i " + key,
+		"GlobalKnownHostsFile=/dev/null", "IdentitiesOnly=yes", "ConnectTimeout=30", "ServerAliveInterval=15",
+		"ServerAliveCountMax=4", "-i " + key,
 	} {
 		if !strings.Contains(called, want) {
 			t.Errorf("ssh was called without %q: %s", want, called)

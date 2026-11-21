@@ -6,6 +6,13 @@
 - Corrected by: #207, on 2026-11-20, which raises the oldest Git that `CheckVersion` accepts from 2.40 to 2.41. The
   variable `GIT_ATTR_SOURCE` is in the source of Git from the tag v2.41.0 and not at v2.40.1, so the release that this
   record names for it is 2.41 and not 2.40
+- Extended by: #229, on 2026-11-21, which adds `-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`
+  to the ssh command, after `IdentitiesOnly=yes` and before the key. Without them ssh waited on its own defaults for a
+  remote that stopped answering, so only the timeout of the Git call ended it, 2 minutes for `ls-remote` and 30 for a
+  fetch or a push. Now a connection that gets no answer, or no banner, ends after 30 seconds, and one that goes silent
+  after it was open ends after 75, five intervals of 15 seconds. A long transfer does not trip it, because a keep-alive
+  counts the silence of the peer and not the time of a transfer. The values are fixed, like the rest of the Runner's
+  configuration, and have no setting. A condition that says a host cannot be reached is #77 and is separate
 
 ## Context
 
