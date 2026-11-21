@@ -142,8 +142,17 @@ pod of the remote runs when it starts. To run only the definition of done agains
 
 The specs that cause a failure on purpose carry the Ginkgo label `failure`. `make test-e2e` leaves them out, and
 `make test-e2e-failures` runs only them, on a kind cluster that it creates and removes as `make test-e2e` does, with a timeout of
-an hour. They need more of the cluster than the other specs do: the specs that are added for
-[#55](https://github.com/mohanedmoh/treebind/issues/55) say what they need here.
+an hour. They need more of the cluster than the other specs do. The agent is the first process of its container, which no process
+of the container can kill or stop, so they kill and freeze it from its node, through a privileged pod with `hostPID` that runs
+`busybox`: the cluster has to admit such a pod, as kind does, and the node has to use cgroup v2, whose freezer they use, as
+GitHub's runners and current Linux distributions do. The specs remove that pod when they end. The first of them kills the agent
+between two steps, as an out-of-memory kill does, and checks that its container comes back in the same pod, waits a TTL of the
+writer lock that the killed agent did not give up, takes it with a higher epoch, and brings in what was written on both sides while
+it was down ([#55](https://github.com/mohanedmoh/treebind/issues/55)).
+
+`hack/inject.sh` is what kills and freezes, and you can run it against `make dev` to see a failure yourself:
+`hack/inject.sh kill <namespace> <pod of the sync>` kills the agent, `freeze` and `thaw` stop and start it, and
+`hack/inject.sh cleanup` removes the privileged pod. It refuses a kubectl context that is not a kind cluster.
 
 ## Make targets
 
