@@ -148,11 +148,17 @@ of the container can kill or stop, so they kill and freeze it from its node, thr
 GitHub's runners and current Linux distributions do. The specs remove that pod when they end. The first of them kills the agent
 between two steps, as an out-of-memory kill does, and checks that its container comes back in the same pod, waits a TTL of the
 writer lock that the killed agent did not give up, takes it with a higher epoch, and brings in what was written on both sides while
-it was down ([#55](https://github.com/mohanedmoh/treebind/issues/55)).
+it was down ([#55](https://github.com/mohanedmoh/treebind/issues/55)). The next ones kill the agent in the middle of `git add` and
+in the middle of the files of an update, and kill a Git that the agent started in the middle of `git add`, each on a burst of 3000
+small files, which with their objects take about 25 MB of the node's disk until the spec removes its claim and its repository.
 
 `hack/inject.sh` is what kills and freezes, and you can run it against `make dev` to see a failure yourself:
 `hack/inject.sh kill <namespace> <pod of the sync>` kills the agent, `freeze` and `thaw` stop and start it, and
 `hack/inject.sh cleanup` removes the privileged pod. It refuses a kubectl context that is not a kind cluster.
+`hack/inject.sh kill-at <namespace> <pod> agent <seconds> +/work/.treebind/updating` kills the agent in a moment that files on
+its volume mark (`+` for a file that has to be there, `-` for one that must not): it freezes the container when they all hold, and
+kills it only when they still hold once it is frozen. `kill-git-at` does the same to a Git that the agent started, from inside its
+container, and the agent runs on.
 
 ## Make targets
 

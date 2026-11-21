@@ -153,6 +153,8 @@ func failureInjection() {
 			killBetweenSteps(target)
 		})
 	})
+
+	killMidStep()
 }
 
 // killBetweenSteps kills the agent of a Treebind that has nothing to do, as an out-of-memory kill does, while the application writes a
