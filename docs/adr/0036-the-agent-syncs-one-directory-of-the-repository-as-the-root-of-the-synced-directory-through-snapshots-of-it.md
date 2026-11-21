@@ -142,7 +142,8 @@ the tip with no commit (ADR 0035).
 
 The operator passes `TREEBIND_REPO_PATH` only when the spec sets the path, so that no sync pod is replaced for a Treebind that does
 not, and a Treebind that does has its pod replaced once, as for every setting. Each `$` is written as `$$`, which the kubelet turns
-back into one. The agent reads the path as it is written and judges it with the rules of the CRD, which a test holds together for a
+back into one, and so it is for the sub path, the mount path, the branch and the address of the repository since #208.
+The agent reads the path as it is written and judges it with the rules of the CRD, which a test holds together for a
 list of paths, and exits with code 2 on one that it cannot use. The field is not immutable: removing it is the way back for a
 Treebind that sets it today, and an immutability rule would make it delete and recreate its Treebind. The text of the field says
 where the files are written. `PathNotFound` and `PathMismatch` are new reasons and are API (ADR 0004).
