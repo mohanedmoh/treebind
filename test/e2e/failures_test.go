@@ -157,6 +157,8 @@ func failureInjection() {
 	killMidStep()
 
 	Context("when the remote is taken away and brought back", remoteDown)
+
+	Context("when the agent that holds the writer lock is frozen under a second one", frozenHolder)
 }
 
 // killBetweenSteps kills the agent of a Treebind that has nothing to do, as an out-of-memory kill does, while the application writes a
