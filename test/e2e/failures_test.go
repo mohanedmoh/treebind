@@ -156,6 +156,8 @@ func failureInjection() {
 
 	killMidStep()
 
+	Context("when the volume is full and is freed again", fullVolume)
+
 	Context("when the remote is taken away and brought back", remoteDown)
 
 	Context("when the agent that holds the writer lock is frozen under a second one", frozenHolder)
