@@ -22,8 +22,10 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -878,6 +880,9 @@ func TestCheckWhenTheVolumeFails(t *testing.T) {
 // then takes no data for it, as a full one does. The slot counts all the same.
 func TestARecordThatCannotBeWritten(t *testing.T) {
 	t.Run("a slot whose record could not be written is still the holder's", func(t *testing.T) {
+		if !inChildProcess(t) {
+			return
+		}
 		dir := lockDir(t)
 		l := mustAcquire(t, testConfig(dir, "sync-0", newFakeClock(epochStart)))
 
@@ -902,6 +907,9 @@ func TestARecordThatCannotBeWritten(t *testing.T) {
 	})
 
 	t.Run("a release whose record could not be written still ends the lock", func(t *testing.T) {
+		if !inChildProcess(t) {
+			return
+		}
 		dir := lockDir(t)
 		holderClock := newFakeClock(epochStart)
 		l := mustAcquire(t, testConfig(dir, "sync-0", holderClock))
@@ -928,6 +936,9 @@ func TestARecordThatCannotBeWritten(t *testing.T) {
 	})
 
 	t.Run("a tenure does not begin with a slot whose record could not be written", func(t *testing.T) {
+		if !inChildProcess(t) {
+			return
+		}
 		dir := lockDir(t)
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -953,11 +964,52 @@ func refuseWrites(t *testing.T, dir string) {
 	t.Cleanup(func() { allowWrites(t, dir) })
 }
 
+// childEnv marks a copy of the test binary that runs one test for inChildProcess.
+const childEnv = "TREEBIND_LOCK_TEST_CHILD"
+
+// inChildProcess is for a test that limits the whole process (refuseFileData). It
+// runs the test again in a child process, a copy of the test binary that is given
+// that one test to run, and reports whether the caller is that copy and has to go
+// on. In the parent it waits for the child, fails the test if the child failed or
+// ran no test, and returns false.
+//
+// The limit must not reach the test binary that the go command started: that one
+// records the files and variables that the tests look at in a log file, through a
+// buffer, and writes the buffer when it is full. A write that comes while the
+// limit is set fails, the harness keeps the error and reports it when the binary
+// ends, so the package fails after every test has passed, and only when the
+// buffer happens to fill in the window. The child has no such log.
+func inChildProcess(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv(childEnv) != "" {
+		return true
+	}
+	parts := strings.Split(t.Name(), "/")
+	for i, part := range parts {
+		parts[i] = "^" + regexp.QuoteMeta(part) + "$"
+	}
+	cmd := exec.Command(os.Args[0], "-test.run="+strings.Join(parts, "/"), "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), childEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the test failed in its child process: %v\n%s", err, output)
+	}
+	// A filter that matches nothing ends well too, and would pass the test without running it.
+	if !strings.Contains(string(output), "--- PASS: "+t.Name()+" ") {
+		t.Fatalf("the child process did not run %s:\n%s", t.Name(), output)
+	}
+	return false
+}
+
 // refuseFileData makes the kernel refuse to put data into any file of this
 // process, the way a full volume does: a file can still be created, but nothing
-// can be written to it. The function it returns lifts the limit again.
+// can be written to it. The function it returns lifts the limit again. It limits
+// the whole process, so it runs only in the child process of inChildProcess.
 func refuseFileData(t *testing.T) (allow func()) {
 	t.Helper()
+	if os.Getenv(childEnv) == "" {
+		t.Fatal("refuseFileData limits the whole process and has to run in a child process (inChildProcess)")
+	}
 	var limit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
 		t.Fatal(err)
