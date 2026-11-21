@@ -159,6 +159,10 @@ it had. The spec checks that `Synced` says `FetchFailed` while `Ready` stays `Tr
 on the other side, added by one commit, within the five minutes that the back-off of the agent's pulls calls for. It needs nothing
 beyond what the other failure specs need.
 
+CI runs them in a job of their own, `e2e-failures`, on a kind cluster of its own and in parallel with the `e2e` job, on every pull
+request that changes code, so that a pull request waits for the longer of the two and not for their sum. The nightly workflow runs
+them as well on each Kubernetes version of the support window.
+
 `hack/inject.sh` is what kills and freezes, and you can run it against `make dev` to see a failure yourself:
 `hack/inject.sh kill <namespace> <pod of the sync>` kills the agent, `freeze` and `thaw` stop and start it, and
 `hack/inject.sh cleanup` removes the privileged pod. It refuses a kubectl context that is not a kind cluster.

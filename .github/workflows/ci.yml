@@ -360,13 +360,25 @@ jobs:
       contents: read
     uses: ./.github/workflows/e2e.yml
 
+  # The specs that cause a failure on purpose (kill the agent, take the remote away) run on a cluster of their own, in
+  # parallel with the job above.
+  e2e-failures:
+    name: e2e-failures
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      failures: true
+
   # The only required check besides dco. A required job that a path filter
   # skips would stay pending and block the merge; this gate treats a skipped
   # job as passing and fails only on a failure or a cancellation.
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e]
+    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e, e2e-failures]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled
