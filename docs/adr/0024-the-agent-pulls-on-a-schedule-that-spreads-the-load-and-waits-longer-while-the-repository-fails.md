@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-15
 - Issue: #33
+- Extended by: #232, on 2026-11-21, which makes the first pull of a start that finds the journal of an update that was
+  cut off (ADR 0028) come at once and not after the phase: the commit step waits for that pull to put the update right
 
 ## Context
 

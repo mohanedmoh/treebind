@@ -30,8 +30,9 @@ kubectl describe treebind <name>
   `refs/treebind/recovery/<n>`, so that removed files can be got back. The same page says how.
 - **It undoes an update that was cut off.** A Git that is killed in the middle of the files of an update leaves some of
   them written. The pull that follows puts back the ones that are the agent's own, says so in the check, and applies the
-  update again. A file that is yours is left, and the pull is `Blocked` by it. It makes the index again when it cannot
-  be read. See [the Git directory](git-directory.md).
+  update again. A file that is yours is left, and the pull is `Blocked` by it. Until then nothing is committed, and the
+  first pull after a start that finds such an update comes at once. It makes the index again when it cannot be read.
+  See [the Git directory](git-directory.md).
 - **It does not cut off an update that is writing files.** When the agent is told to stop, the update that is
   being applied has up to 10 seconds to finish. Git that is stopped is told to end first, so that it removes its
   own lock files, and the agent removes the ones that a Git that was killed left before each pull and says so in
@@ -77,7 +78,7 @@ with no restart.
 ## Things to know
 
 - **The first pull is up to one interval after the checkout.** It is not a delay of the checkout: the checkout
-  has just fetched the branch.
+  has just fetched the branch. After a start that finds an update that was cut off, it comes at once.
 - **Commits on the branch that remove files remove them from your directory**, up to 100 files in one update.
   The commit your directory was at is kept, and [the deletion guard](deletion-guard.md) says how to get files
   back from it.

@@ -3,6 +3,11 @@
 - Status: accepted
 - Date: 2026-11-16
 - Issue: #181, #39
+- Extended by: #232, on 2026-11-21, which makes the repair of the next pull come before any commit. The scan takes the
+  files that a cut-off update wrote for changes of the application, and the first pull of a start came after its phase,
+  so a settle time shorter than the phase had them committed first, a half file among them. The commit step now commits
+  nothing while `updating` is in the state directory, with the `Commit` check `Skipped` and `NotChecked` and saying why,
+  whatever the timing and whether the repository answers, and the first pull of a start that finds it comes at once
 
 ## Context
 

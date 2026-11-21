@@ -3,6 +3,9 @@
 - Status: accepted
 - Date: 2026-11-18
 - Issue: #36
+- Extended by: #232, on 2026-11-21, which makes the commit step commit nothing while the journal of an update that was
+  cut off is in the state directory (ADR 0028), and the `Commit` check `Skipped` with `NotChecked` meanwhile: the files
+  that the update wrote are the agent's until the next pull has put them back
 
 ## Context
 
