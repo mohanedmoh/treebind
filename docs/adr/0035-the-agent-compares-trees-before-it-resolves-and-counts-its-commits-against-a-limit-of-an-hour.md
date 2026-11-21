@@ -4,6 +4,8 @@
 - Date: 2026-11-19
 - Issue: #41
 - Extends: [0029](0029-the-agent-looks-for-local-changes-with-a-scan-and-events-only-make-it-scan-sooner.md), [0031](0031-the-agent-commits-the-files-that-have-settled-as-literal-paths-in-one-commit-by-one-author.md), [0033](0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md), [0034](0034-the-agent-resolves-a-conflict-by-the-policy-of-the-treebind-one-file-at-a-time-in-the-update-of-a-pull.md)
+- Corrected by: #207, on 2026-11-20, which raises the oldest Git that `CheckVersion` accepts to 2.41 and corrects ADR 0013
+  to say so, so the consequence below about a Git before 2.41 no longer has a `CheckVersion` that says 2.40
 
 ## Context
 

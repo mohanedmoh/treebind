@@ -301,7 +301,7 @@ func armMerge(r *repo, key, value string) armed {
 // needAttrSource skips a test on a Git that cannot read attributes from a tree.
 func needAttrSource(t *testing.T) {
 	t.Helper()
-	needGit(t, 2, 40, "added GIT_ATTR_SOURCE")
+	needGit(t, 2, 41, "added GIT_ATTR_SOURCE")
 }
 
 // plantFilter defines a filter for the given driver, "clean" or "smudge", that

@@ -57,7 +57,7 @@ const (
 	urlGitProto    = "git://127.0.0.1:1/r.git"
 	msgNoPrompt    = "terminal prompts disabled"
 	msgNotAllowed  = "not allowed"
-	msgOlder       = "older than 2.40"
+	msgOlder       = "older than 2.41"
 	gitPath        = "/usr/bin/git"
 	fakeWorkDir    = "/work"
 	cmdLsRemote    = "ls-remote"
