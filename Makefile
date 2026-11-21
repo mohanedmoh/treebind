@@ -87,9 +87,18 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
+# The specs that cause a failure on purpose carry the Ginkgo label "failure" (test/e2e/setup_test.go). test-e2e leaves them out and
+# test-e2e-failures runs only them, which takes longer, so the two have their own timeouts.
+E2E_GO_TEST = KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests, but not the ones that cause a failure. Expected an isolated environment using Kind.
+	$(E2E_GO_TEST) -ginkgo.label-filter='!failure' -timeout 30m
+	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-failures
+test-e2e-failures: setup-test-e2e manifests generate fmt vet ## Run only the e2e tests that cause a failure (label failure). Expected an isolated environment using Kind.
+	$(E2E_GO_TEST) -ginkgo.label-filter=failure -timeout 60m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

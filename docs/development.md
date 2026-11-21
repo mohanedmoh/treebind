@@ -140,6 +140,11 @@ the network for what the cluster pulls (the image of the remote, `busybox` for t
 pod of the remote runs when it starts. To run only the definition of done against a cluster that is there, give the focus
 `Definition of done` to the `go test` command that the target runs.
 
+The specs that cause a failure on purpose carry the Ginkgo label `failure`. `make test-e2e` leaves them out, and
+`make test-e2e-failures` runs only them, on a kind cluster that it creates and removes as `make test-e2e` does, with a timeout of
+an hour. They need more of the cluster than the other specs do: the specs that are added for
+[#55](https://github.com/mohanedmoh/treebind/issues/55) say what they need here.
+
 ## Make targets
 
 | Target | What it does | Status |
@@ -148,7 +153,8 @@ pod of the remote runs when it starts. To run only the definition of done agains
 | `make lint` | golangci-lint (`make lint-config` checks its configuration) | Available |
 | `make dev-ssh` | Starts an ssh Git remote in the dev cluster with a deploy key and known hosts, and prints a Treebind for it | Available |
 | `make generate manifests` | Regenerates deepcopy code, CRDs, the chart's copy of the CRD and RBAC from the Go types | Available |
-| `make test-e2e` | End-to-end suite on a kind cluster, created if missing | Available |
+| `make test-e2e` | End-to-end suite on a kind cluster, created if missing, without the specs that cause a failure | Available |
+| `make test-e2e-failures` | Only the end-to-end specs that cause a failure (label `failure`), on a kind cluster, created if missing | Available |
 | `make cleanup-test-e2e` | Deletes the kind cluster used by the e2e suite | Available |
 | `make install` / `make uninstall` | Installs or removes the CRD in the current cluster | Available |
 | `make build` | Builds the operator (`cmd/operator`) and agent (`cmd/agent`) binaries into `bin/` | Available |

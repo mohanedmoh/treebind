@@ -130,45 +130,24 @@ git config user.name dev && git config user.email dev@example.com &&
 echo hello > ` + dodSeedFile + ` && git add -A && git commit -q -m first && git push -q ` + remoteRepository + ` ` + dodBranch
 
 // agentImage is the sync agent image that ko built into the cluster for these specs, which are the ones that run an agent. It is
-// built when they begin, so that a run that is focused on other specs needs neither ko nor the network for it.
+// built when they begin, by installAgentImage, so that a run that is focused on other specs needs neither ko nor the network for it.
 var agentImage string
 
 // definitionOfDone is the Context of the specs below. It is called from the Describe of the manager, whose BeforeAll deploys the
 // operator, and it comes last: it gives the operator the agent image, which replaces its pods.
 func definitionOfDone() {
 	BeforeAll(func() {
-		By("building the sync agent image with ko and loading it on Kind")
-		var err error
-		agentImage, err = utils.BuildAgentImage()
-		Expect(err).NotTo(HaveOccurred(), "Failed to build the sync agent image")
-		_, _ = fmt.Fprintf(GinkgoWriter, "sync agent image: %s\n", agentImage)
+		installAgentImage()
+		startRemoteFor(dodNamespace)
 
-		By("giving the operator the agent image")
-		_, err = utils.Run(exec.Command("kubectl", "-n", namespace, "set", "env",
-			"deployment/treebind-controller-manager", "AGENT_IMAGE="+agentImage))
-		Expect(err).NotTo(HaveOccurred(), "Failed to set the agent image on the operator")
-		_, err = utils.Run(exec.Command("kubectl", "-n", namespace, "rollout", "status",
-			"deployment/treebind-controller-manager", "--timeout=180s"))
-		Expect(err).NotTo(HaveOccurred(), "The operator did not roll out with the agent image")
-		Eventually(func(g Gomega) {
-			g.Expect(readyControllerPods(g)).To(HaveLen(controllerReplicas))
-		}).Should(Succeed())
-
-		By("making the namespace of the Treebind")
-		_, err = utils.Run(exec.Command("kubectl", "create", "namespace", dodNamespace))
-		Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace")
-
-		By("starting the ssh remote, with a deploy key and the host key, and seeding its repository")
-		cmd := exec.Command("hack/dev-ssh.sh", dodNamespace)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to start the ssh remote")
-		_, err = remoteShell(seedScript)
+		By("seeding the repository of the remote")
+		_, err := remoteShell(seedScript)
 		Expect(err).NotTo(HaveOccurred(), "Failed to seed the repository")
 
 		// The pod of the application is in the manifest with the Treebind, as a user's would be, and may start before the pod of the
 		// sync: the kubelet then makes the directory of the subPath, which it makes world-writable (tried: the agent clones into it).
 		By("applying the one manifest: the claim, the Treebind and the pod of the application")
-		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = strings.NewReader(dodManifest)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the manifest")
