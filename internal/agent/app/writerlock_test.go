@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -415,6 +416,136 @@ func TestStopsWithTheLossOfTheLockWhenAnotherAgentTakesItAndStopsTheCheckout(t *
 	}
 	if n := r.logs.count("the writer lock was lost to another agent"); n != 1 {
 		t.Errorf("the loss was logged %d times, want once\n%s", n, r.logs.String())
+	}
+}
+
+// waiting is an agent that has only what waitToStop needs, and the log that it writes.
+func waiting() (*agent, *safeBuffer) {
+	logs := &safeBuffer{}
+	return &agent{Options: Options{Logger: slog.New(slog.NewTextHandler(logs, nil))}, lost: make(chan error, 1)}, logs
+}
+
+// The two are ready before the select, as they are when a frozen container wakes up with the SIGTERM of its kubelet
+// and a lock that another agent took meanwhile. A select picks either at random, so the test asks many times: a
+// loss that is said only half of the time is a bug that a single run shows half of the time.
+func TestSaysTheLossOfTheLockEveryTimeThatItComesWithAStop(t *testing.T) {
+	for i := range 200 {
+		a, logs := waiting()
+		ctx, stop := context.WithCancel(context.Background())
+		stop()
+		a.lose(lock.ErrLost)
+
+		serveErr, lostErr := a.waitToStop(ctx, make(chan error))
+
+		if serveErr != nil || !errors.Is(lostErr, lock.ErrLost) {
+			t.Fatalf("round %d: waitToStop returned %v and %v, want the loss of the lock: it was lost whatever else was asked",
+				i, serveErr, lostErr)
+		}
+		if n := logs.count("the writer lock was lost to another agent, and this one stops"); n != 1 {
+			t.Fatalf("round %d: the loss was logged %d times, want once\n%s", i, n, logs.String())
+		}
+		if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), lock.ErrLost.Error()) {
+			t.Fatalf("round %d: the loss is not logged as an error with its cause\n%s", i, logs.String())
+		}
+		if len(a.lost) != 0 {
+			t.Fatalf("round %d: the loss was left to be said again", i)
+		}
+	}
+}
+
+func TestSaysNothingOfTheLockWhenOnlyToldToStop(t *testing.T) {
+	a, logs := waiting()
+	ctx, stop := context.WithCancel(context.Background())
+	stop()
+
+	serveErr, lostErr := a.waitToStop(ctx, make(chan error))
+
+	if serveErr != nil || lostErr != nil {
+		t.Errorf("waitToStop returned %v and %v, want neither for a stop that was only asked", serveErr, lostErr)
+	}
+	if logs.String() != "" {
+		t.Errorf("a plain stop logged:\n%s", logs.String())
+	}
+}
+
+func TestSaysTheLossOfTheLockWhenItComesAlone(t *testing.T) {
+	a, logs := waiting()
+	a.lose(lock.ErrLost)
+
+	serveErr, lostErr := a.waitToStop(context.Background(), make(chan error))
+
+	if serveErr != nil || !errors.Is(lostErr, lock.ErrLost) {
+		t.Errorf("waitToStop returned %v and %v, want the loss of the lock", serveErr, lostErr)
+	}
+	if n := logs.count("the writer lock was lost to another agent"); n != 1 {
+		t.Errorf("the loss was logged %d times, want once\n%s", n, logs.String())
+	}
+}
+
+func TestReturnsAFailureOfTheEndpointWithNoLoss(t *testing.T) {
+	a, logs := waiting()
+	failure := errors.New("the endpoint failed")
+	served := make(chan error, 1)
+	served <- failure
+
+	serveErr, lostErr := a.waitToStop(context.Background(), served)
+
+	if !errors.Is(serveErr, failure) || lostErr != nil || logs.String() != "" {
+		t.Errorf("waitToStop returned %v and %v, and logged %q, want the failure and no loss", serveErr, lostErr, logs.String())
+	}
+}
+
+// The keeper that ends with the stop does not see a loss that is there by then, and the release of the lock does.
+// The agent of the test is told to stop with the lock taken over, and nothing but the release can say so.
+func TestStopsWithTheLossOfTheLockWhenAnotherAgentHasTakenItAndTheStopWasAsked(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	r := start(t, func(o *Options) {
+		takesTheLock(root, cloned)(o)
+		// The clock of this agent does not move, so it makes no heartbeat, and another agent sees the lock unchanged
+		// for a whole TTL and takes it over.
+		o.LockClock = newFakeClock()
+	})
+	eventually(t, "the lock in the report", func() bool {
+		got, _ := lockCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+	thief, err := lock.Acquire(context.Background(), lock.Config{Dir: lockDir, Holder: lockOther, TTL: lockTTL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = thief.Release() })
+
+	r.cancel()
+	err = r.waitStopped(t)
+
+	if !errors.Is(err, ErrLockLost) || !errors.Is(err, lock.ErrLost) {
+		t.Errorf("Run returned %v, want ErrLockLost: the lock was lost, and the stop does not change that", err)
+	}
+	if n := r.logs.count("the writer lock was lost to another agent, and this one stops"); n != 1 {
+		t.Errorf("the loss was logged %d times, want once\n%s", n, r.logs.String())
+	}
+	if n := r.logs.count("could not be given up"); n != 0 {
+		t.Errorf("the release said that the lock would be taken over after its TTL, and another agent holds it\n%s",
+			r.logs.String())
+	}
+}
+
+func TestStopsWithNothingToSayOfTheLockWhenToldToStopAndItIsStillHeld(t *testing.T) {
+	root, _ := claimWithState(t)
+	r := start(t, takesTheLock(root, cloned))
+	eventually(t, "the lock in the report", func() bool {
+		got, _ := lockCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+
+	r.cancel()
+	err := r.waitStopped(t)
+
+	if err != nil {
+		t.Errorf("Run returned %v, want nil for a stop that was asked", err)
+	}
+	if n := r.logs.count("lost to another agent"); n != 0 {
+		t.Errorf("a stop that was asked logged a loss of the lock\n%s", r.logs.String())
 	}
 }
 

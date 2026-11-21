@@ -156,7 +156,8 @@ func lockFailed(err error) *preflight.Result {
 
 // keepLock renews the lock until the agent stops, and gives it up then, so that the agent that takes the
 // place of this one does not have to wait for a TTL. A lock that was lost is said to Run, which stops the
-// agent: nothing is written without it (NFR-1).
+// agent: nothing is written without it (NFR-1). That includes a loss that the release finds, when the agent was told
+// to stop first.
 func (a *agent) keepLock(ctx context.Context, held *lock.Lock) {
 	if err := held.Keep(ctx); err != nil {
 		a.lose(err)
@@ -165,7 +166,12 @@ func (a *agent) keepLock(ctx context.Context, held *lock.Lock) {
 	// The agent was told to stop. What it writes with may still be stopping, so the lock is given up
 	// once that has ended. If it does not end in the grace period, the lock is left to run out.
 	<-a.idle
-	if err := held.Release(); err != nil {
+	if err := held.Release(); errors.Is(err, lock.ErrLost) {
+		// Another agent took the lock over while this one was stopping, or before it was told to and this keeper
+		// ended with the stop before it saw it. That is a loss like any other, and Run answers for it with the
+		// exit code of one, as it does for a loss that the keeper finds while the agent runs.
+		a.lose(err)
+	} else if err != nil {
 		a.Logger.Warn("the writer lock could not be given up, and is taken over after its TTL", "error", err)
 	}
 }

@@ -164,6 +164,11 @@ func TestRunStopsOnRequestWithCodeZero(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the agent did not stop")
 	}
+	// A stop that was asked says so, and says nothing of a lost lock: a lost one ends with the code 3 instead.
+	logged := stderr.String()
+	if !strings.Contains(logged, "the agent stopped on request") || strings.Contains(logged, "lost to another agent") {
+		t.Errorf("the agent did not log a stop on request and nothing else:\n%s", logged)
+	}
 }
 
 func TestRunFailsWhenItCannotServe(t *testing.T) {
