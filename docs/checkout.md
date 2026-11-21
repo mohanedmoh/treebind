@@ -4,8 +4,9 @@ When the sync pod starts, the agent first checks the volume (the checks `Mount`,
 `GitDir`, see [the Git directory](git-directory.md)). Once those pass it takes the writer lock of the
 volume, which waits while another agent holds it (the check `Lock`), and then makes the checkout of the
 repository on your claim, or opens the one that is there. An agent that loses the lock to another stops
-with the exit code 3, and its pod's restart waits for the lock again. The rules never write over data the agent
-did not put there. The decisions behind them are in
+with the exit code 3, and its pod's restart waits for the lock again. It does so also when it was told to stop at the
+same time, and says in its log that the lock was lost: a lost lock is never reported as a stop on request. The rules
+never write over data the agent did not put there. The decisions behind them are in
 [ADR 0017](adr/0017-the-first-checkout-never-writes-over-data-it-did-not-put-there.md) and
 [ADR 0018](adr/0018-the-operator-tells-the-agent-which-repository-to-sync-with.md).
 

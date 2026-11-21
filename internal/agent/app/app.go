@@ -195,7 +195,8 @@ type checked struct {
 
 // Run serves the status endpoint and checks the volume until ctx is done, and then
 // stops cleanly: requests that are being answered finish and the checks stop.
-// It returns an error only when the endpoint cannot be served.
+// It returns an error when the endpoint cannot be served, and ErrLockLost when the writer lock was lost, also
+// when the agent was told to stop as well: a lost lock is never reported as a clean stop (docs/adr/0023).
 func Run(ctx context.Context, options Options) error {
 	a := &agent{Options: options, lost: make(chan error, 1), idle: make(chan struct{})}
 	a.fillDefaults()
@@ -231,13 +232,7 @@ func Run(ctx context.Context, options Options) error {
 		a.beats.Finish()
 	})
 
-	var serveErr, lostErr error
-	select {
-	case <-ctx.Done():
-	case serveErr = <-served:
-	case lostErr = <-a.lost:
-		a.Logger.Error("the writer lock was lost to another agent, and this one stops", "error", lostErr)
-	}
+	serveErr, lostErr := a.waitToStop(ctx, served)
 
 	// The endpoint stops taking requests first. A volume check that does not return
 	// is given the rest of the grace period and then left behind, so that a hung
@@ -263,6 +258,14 @@ func Run(ctx context.Context, options Options) error {
 		a.Logger.Warn("a volume check did not stop in time and was left behind")
 	}
 
+	// The keeper gives the lock up once the work has stopped, and finds there that another agent holds it, which
+	// it says before it ends. The wait above is for its end, so a loss is seen here unless the grace period ran
+	// out and the keeper was left behind: then the exit code is the best that is known. A failure of the endpoint
+	// is not asked: it is the fault of the pod, and it has the code and the message of its own.
+	if lostErr == nil && serveErr == nil {
+		lostErr = a.takeLost()
+	}
+
 	if lostErr != nil {
 		return fmt.Errorf("%w: %w", ErrLockLost, lostErr)
 	}
@@ -270,6 +273,38 @@ func Run(ctx context.Context, options Options) error {
 		return fmt.Errorf("serve the status endpoint: %w", serveErr)
 	}
 	return nil
+}
+
+// waitToStop waits for the first reason to stop: the agent was told to, the endpoint failed, or the writer lock
+// was lost. A stop and a loss may be ready together, as they are when a frozen container wakes up with the SIGTERM
+// of its kubelet and a lock that another agent took in the meantime, and a select picks either at random. The
+// loss goes before the stop then: the lock was lost whatever else was asked, and an agent that lost it and ends
+// as if it was only stopped looks like a clean stop to whoever reads its exit code (docs/adr/0023).
+func (a *agent) waitToStop(ctx context.Context, served <-chan error) (serveErr, lostErr error) {
+	select {
+	case <-ctx.Done():
+		lostErr = a.takeLost()
+	case serveErr = <-served:
+	case lostErr = <-a.lost:
+		a.logLost(lostErr)
+	}
+	return serveErr, lostErr
+}
+
+// takeLost takes the loss of the writer lock that was said to Run and is not taken yet, without waiting, and logs
+// it. It returns nil when none was said.
+func (a *agent) takeLost() error {
+	select {
+	case err := <-a.lost:
+		a.logLost(err)
+		return err
+	default:
+		return nil
+	}
+}
+
+func (a *agent) logLost(err error) {
+	a.Logger.Error("the writer lock was lost to another agent, and this one stops", "error", err)
 }
 
 func (a *agent) fillDefaults() {

@@ -53,7 +53,8 @@ const (
 	// exitConfig is for a pod that is set up wrongly, which a restart does not cure.
 	exitConfig = 2
 	// exitLockLost is for an agent that lost the writer lock to another one. It has stopped what it
-	// was doing, and the restart of its pod waits for the lock again.
+	// was doing, and the restart of its pod waits for the lock again. It is the code of a lost lock also when
+	// the agent was told to stop as well, so that a loss never looks like a clean stop.
 	exitLockLost = 3
 )
 
