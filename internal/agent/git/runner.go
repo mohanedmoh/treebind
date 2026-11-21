@@ -501,12 +501,13 @@ func signsShort(arg string) bool {
 }
 
 // MinGitMajor and MinGitMinor are the oldest Git release whose options the Runner
-// relies on: GIT_ATTR_SOURCE came with 2.40. An older Git ignores what it does not
-// know, so the protections would be missing without a failure. The image of the
-// agent carries a newer one, and CheckVersion asks the Git that is run.
+// relies on: GIT_ATTR_SOURCE came with 2.41 (its source has the variable from the
+// tag v2.41.0 and not at v2.40.1). An older Git ignores what it does not know, so
+// the protections would be missing without a failure. The image of the agent
+// carries a newer one, and CheckVersion asks the Git that is run.
 const (
 	MinGitMajor = 2
-	MinGitMinor = 40
+	MinGitMinor = 41
 )
 
 var gitVersion = regexp.MustCompile(`^git version (\d+)\.(\d+)`)
