@@ -50,6 +50,9 @@ type TreebindReconciler struct {
 	StatusIssuer, StatusSubject string
 	// StatusKeys puts the cluster's public signing keys where the agents read them.
 	StatusKeys *StatusKeyPublisher
+	// Metrics holds the metrics of the Treebinds, which the status poller shares. The reconcile records in it the
+	// conditions that it owns, Ready and SpecSupported (metrics.go).
+	Metrics *Metrics
 }
 
 // agentSettings is what the sync pods are given beside the spec of a Treebind.
@@ -104,6 +107,7 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	treebind := &treebindv1alpha1.Treebind{}
 	if err := r.Get(ctx, req.NamespacedName, treebind); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.Metrics.forget(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get Treebind %s: %w", req.NamespacedName, err)
@@ -112,6 +116,7 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Foreground deletion keeps the Treebind while the garbage collector removes
 	// the sync objects. Recreating them here would fight the collector.
 	if !treebind.DeletionTimestamp.IsZero() {
+		r.Metrics.forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -156,6 +161,7 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		log.Info("Reported status", "supported", len(fields) == 0, "unimplementedFields", fields,
 			"ready", ready.Status, "reason", ready.Reason)
 	}
+	r.Metrics.recordConditions(treebind, treebindv1alpha1.ConditionReady, treebindv1alpha1.ConditionSpecSupported)
 
 	if ensureErr != nil {
 		return ctrl.Result{}, ensureErr
@@ -360,6 +366,9 @@ func (r *TreebindReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.StatusKeys == nil || r.StatusKeys.Source == nil {
 		return errors.New("a source of the cluster's public signing keys is required")
+	}
+	if r.Metrics == nil {
+		return errors.New("the metrics of the Treebinds are required")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&treebindv1alpha1.Treebind{}).

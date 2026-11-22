@@ -93,9 +93,11 @@ type StatusPollerReconciler struct {
 	// StatusKeys puts the keys where the agents read them.
 	StatusKeys *StatusKeyPublisher
 
-	// Recorder records an event on the Treebind for each change of Synced and Conflict that the poller writes
-	// (sync_events.go).
+	// Recorder records an event on the Treebind for each change of Synced and Conflict that the poller writes, and
+	// Metrics holds the metrics of what the poller writes (sync_events.go, metrics.go). Both are shared with nothing
+	// but the reconcile of the spec, which records its own conditions in the same Metrics.
 	Recorder events.EventRecorder
+	Metrics  *Metrics
 
 	// AgentImage, StatusIssuer and StatusSubject are the settings that the reconcile
 	// of the spec gives the sync pods, and have to be the TreebindReconciler's. The
@@ -158,7 +160,8 @@ func (r *StatusPollerReconciler) recovered(key types.NamespacedName) {
 
 // Reconcile polls the agent of one Treebind once, writes AgentUnreachable and what
 // the report says of the sync if they changed, records an event for each change of
-// Synced and Conflict, and asks to be called again after the time of the next poll.
+// Synced and Conflict, updates the metrics, and asks to be called again after the
+// time of the next poll.
 func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -166,12 +169,14 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.Get(ctx, req.NamespacedName, treebind); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.recovered(req.NamespacedName)
+			r.Metrics.forget(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get Treebind %s: %w", req.NamespacedName, err)
 	}
 	if !treebind.DeletionTimestamp.IsZero() {
 		r.recovered(req.NamespacedName)
+		r.Metrics.forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 	// The reconcile of the spec creates the Service and the StatefulSet. Until it has
@@ -256,7 +261,7 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			"conflict", conditionSummary(conditions, treebindv1alpha1.ConditionConflict),
 			"lastSyncedCommit", treebind.Status.LastSyncedCommit)
 	}
-	r.report(treebind, before)
+	r.report(treebind, before, polled.synced)
 
 	if outcome.failure != nil {
 		return ctrl.Result{RequeueAfter: jittered(statusPollRetryInterval)}, nil
@@ -265,15 +270,22 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 // report records an event for each change of Synced and Conflict from the conditions before the poll to the ones of
-// the status now. It is called once the status that the poll made is stored, or when the poll changed nothing, so that
-// the change is one that the next poll reads back and does not make again.
-func (r *StatusPollerReconciler) report(treebind *treebindv1alpha1.Treebind, before []metav1.Condition) {
+// the status now, and counts it, and makes the metrics say what the status says. It is called once the status that
+// the poll made is stored, or when the poll changed nothing, so that the change is one that the next poll reads back and
+// does not make again. polled is the Synced condition that the poll made from the agent's report, nil when it made none.
+func (r *StatusPollerReconciler) report(
+	treebind *treebindv1alpha1.Treebind, before []metav1.Condition, polled *metav1.Condition,
+) {
 	for _, change := range syncEventsOf(before, treebind.Status.Conditions) {
 		if r.Recorder != nil {
 			// The note is text of its own and not a format.
 			r.Recorder.Eventf(treebind, nil, change.eventType, change.reason, change.condition, "%s", change.note)
 		}
+		r.Metrics.recordOutcomeChange(treebind, change)
 	}
+	r.Metrics.recordConditions(treebind, treebindv1alpha1.ConditionSynced, treebindv1alpha1.ConditionConflict,
+		treebindv1alpha1.ConditionAgentUnreachable)
+	r.Metrics.recordSync(treebind, polled, r.clock())
 }
 
 // countsAsFailing says whether a failed poll is the agent failing to answer, which
@@ -312,9 +324,12 @@ func (r *StatusPollerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := r.agentSettings().validate(); err != nil {
 		return err
 	}
-	// Without it a change of the sync outcome would be a condition only (NFR-6).
+	// Without them a change of the sync outcome would be a condition only (NFR-6).
 	if r.Recorder == nil {
 		return errors.New("a recorder of the events of the sync outcome is required")
+	}
+	if r.Metrics == nil {
+		return errors.New("the metrics of the Treebinds are required")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		// The polls schedule themselves. A change of the status, which this controller

@@ -32,7 +32,7 @@ import (
 // EventReporter is the name of the operator in the events that it records.
 const EventReporter = "treebind-operator"
 
-// syncEvent is an event that a change of Synced or Conflict makes.
+// syncEvent is an event that a change of Synced or Conflict makes, and that the counter of the changes counts.
 type syncEvent struct {
 	// eventType is Normal or Warning.
 	eventType string
