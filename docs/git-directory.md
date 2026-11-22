@@ -177,6 +177,19 @@ names it, as for any local edit: revert it or remove it, and the next pull goes 
 as it is. [ADR 0028](adr/0028-the-agent-stops-git-gently-and-removes-the-lock-files-that-a-stopped-git-leaves.md) has the
 rule for each state, the links, and the files too large to compare.
 
+Until a pull has put the update right, a `bidirectional` Treebind commits nothing. The files that the update wrote look
+like changes to the scan, and some may be half written, so they are not taken for yours: the check `Commit` is `Skipped`
+with `NotChecked` and says that it waits for the update to be put right, and the files that are still changes after the
+pull, which are yours, are committed then. The first pull after a start that finds `.treebind/updating` comes at once, and
+not at the point of the interval that spreads the pulls, and it puts the update right before it asks the repository
+anything, so the wait is short even when the repository does not answer. A pull that cannot put it right is a failed `Pull`
+check that says why, and the commits wait for one that can.
+
+Two limits of that wait. An update that fails in the middle of its files while the agent runs, as on a full volume, leaves the
+journal too, and the commits then wait for the next pull, which comes after the interval or, while the pulls fail, after the wait
+that grows up to ten minutes. And a journal that the pull cannot remove, because the state directory refuses it, is told in the
+note of the `Pull` check, which passes, while the commits keep waiting: look at `.treebind/updating`.
+
 If the index cannot be read, the agent makes it again from the commit the checkout is at before a pull, and says so. It
 does the same reset when the index holds files that are staged, which nothing here leaves for long. Your files are not
 touched: an edit stays an edit, as a change that is not staged.

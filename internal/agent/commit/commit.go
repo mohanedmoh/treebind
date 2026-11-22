@@ -34,6 +34,11 @@ limitations under the License.
 //
 // The writer lock is checked once, immediately before the first write. A commit that fails leaves the index as
 // HEAD, so that a pull is not blocked by what it staged.
+//
+// Nothing is committed while the journal of an update that was cut off is in the state directory (docs/adr/0028):
+// the files that the update had written are what the scan lists as changes, and they are the agent's, half written
+// for some, and not the application's. The repair at the start of the next pull puts them back and applies the
+// update again, and the files that are still changes after it are committed then, by a scan that follows.
 package commit
 
 import (
@@ -52,6 +57,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/commitmsg"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
+	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
 )
 
@@ -84,6 +90,10 @@ const (
 	// NothingToCommit means the changes that were given came to nothing: they were all gone, or were changed
 	// back, so that the index equals HEAD. It is not a failure, and nothing was committed.
 	NothingToCommit Outcome = "NothingToCommit"
+	// Deferred means nothing was looked at and nothing was committed, because an update of the checkout was cut off and
+	// a pull has not put it right yet (pull.UpdateCutOff). It is not a failure: the changes are given again by the scans
+	// that follow, and are committed once the pull has put back the files of the update.
+	Deferred Outcome = "Deferred"
 )
 
 // Result is what a commit did.
@@ -170,8 +180,20 @@ func New(o Options) (*Committer, error) {
 }
 
 // Commit commits the changes, which are the paths of a scan. It makes one commit, or none when they come to
-// nothing. A commit that could not be made is an *Error.
+// nothing or an update that was cut off waits for a pull. A commit that could not be made is an *Error.
 func (c *Committer) Commit(ctx context.Context, changes []scan.Change) (Result, error) {
+	// Before anything else, whatever the changes are and however long they have settled: a scan cannot tell a file
+	// that the update had written from one that the application wrote, and the journal can. The pull is the one
+	// writer of the journal, and runs in the same loop as the commits and never beside one, so a look here holds
+	// until the commit has been made.
+	cut, err := pull.UpdateCutOff(c.o.Layout)
+	if err != nil {
+		return Result{}, c.fail(err, "nothing was committed, because the state directory cannot be looked at for an update "+
+			"that was cut off: %v", err)
+	}
+	if cut {
+		return Result{Outcome: Deferred}, nil
+	}
 	list, gone, err := c.pathsOf(changes)
 	if err != nil {
 		return Result{}, c.fail(err, "the changes cannot be committed: %v", err)

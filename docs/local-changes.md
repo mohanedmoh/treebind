@@ -91,6 +91,7 @@ It is after `Changes`, and it says what came of the last commit, until the next 
 | `Failed` | `TooManyCommits` | The agent made as many commits in the last hour as `spec.commit.maxPerHour` allows, 60 by default, so it makes none until one of them is an hour old. The changes stay on the volume, and the next scan tries again. See [echo loops](echo-loops.md) |
 | `Failed` | `GitDirUnsafe` | The Git directory holds something that the agent did not put there. See [the Git directory](git-directory.md) |
 | `Skipped` | `NotChecked` | No file has settled yet, or the checkout is not made, or the scan cannot be set up |
+| `Skipped` | `NotChecked` | `not tried, because an update of the checkout was cut off and a pull has not put it right yet`: a Git that was killed in the middle of an update left files that look like changes, some of them half written, and they are the agent's and not yours. Nothing is committed until the pull has put them back, and the files that are still changes after it, yours, are committed then. The `Pull` check says how that goes. See [the Git directory](git-directory.md#when-an-update-was-cut-off-in-the-middle-of-its-files) |
 
 ## It pushes, as a fast-forward, and never forces
 

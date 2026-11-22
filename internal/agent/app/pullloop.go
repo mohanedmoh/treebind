@@ -48,6 +48,19 @@ const CheckConflict = "Conflict"
 // exists.
 const conflictNotResolved = "no conflict has been resolved since the agent started"
 
+// firstPullDue is when the first pull of a start comes, and what the Pull check says of it until then: after the phase, or at
+// once when the journal of an update that a kill cut off is in the state directory. That update is put right by the first
+// thing a pull does, before it asks the repository anything, and the commit step commits nothing until then (docs/adr/0028), so
+// the commits of the application wait for no more than that pull. A journal at a start is what a kill leaves, which is rare, and
+// the pull that comes at once is one question to the Git host outside the spread that the phase is for (R-19). A state directory
+// that cannot be looked at is not a journal: the phase stays, and the commit step says that it cannot look (commit.Commit).
+func firstPullDue(l layout.Layout, phase time.Duration) (time.Duration, string) {
+	if cut, err := pull.UpdateCutOff(l); err == nil && cut {
+		return 0, "waiting: the first pull is due at once, because an update of the checkout was cut off, and it puts the update right"
+	}
+	return phase, fmt.Sprintf("waiting: the first pull is due in %s", phase.Round(time.Second))
+}
+
 // Puller pulls into the checkout once. The Puller of package pull is one.
 type Puller interface {
 	Pull(ctx context.Context) (pull.Result, error)
@@ -88,7 +101,8 @@ func (a *agent) pullLoop(ctx context.Context, p *progress, done checkedOut) {
 		p.conflict = notTried(CheckConflict, conflictNotResolved)
 	}
 
-	p.pulling = notTried(CheckPull, fmt.Sprintf("waiting: the first pull is due in %s", phase.Round(time.Second)))
+	phase, due := firstPullDue(options.Layout, phase)
+	p.pulling = notTried(CheckPull, due)
 	a.publish(p)
 	loop := syncloop.Options{Interval: interval, Phase: phase, Clock: a.SyncClock, Random: a.SyncRandom, Pull: l.once, Beat: a.beat}
 	if a.scansFollow() {

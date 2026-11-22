@@ -28,8 +28,10 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/breaker"
 	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
+	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
+	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/push"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
 	"github.com/mohanedmoh/treebind/internal/agent/settle"
@@ -48,6 +50,17 @@ const CheckCommit = "Commit"
 // CheckPush is the name of the check that says what came of the last push of the commits of the checkout. It is in
 // the report after the commit, for a Treebind that syncs in both directions and pushes.
 const CheckPush = "Push"
+
+const (
+	// commitNotSettled is what the Commit check says before a file has settled.
+	commitNotSettled = "not tried, because no file has settled yet"
+	// commitWaitsForRepair is what the Commit check says while the commit step commits nothing because an update of the
+	// checkout was cut off (docs/adr/0028). It lasts until a pull has put the update right, and the Pull check says how
+	// that goes: a repair that fails is a failed pull, with its reason, and the wait after it.
+	commitWaitsForRepair = "not tried, because an update of the checkout was cut off and a pull has not put it right yet: " +
+		"the files that it had written are the agent's and not the application's, and nothing is committed until the pull " +
+		"has put them back. The Pull check says how that goes"
+)
 
 // Pusher pushes the commits of the checkout to the branch that it follows. The Pusher of package push is one.
 type Pusher interface {
@@ -116,10 +129,12 @@ type scans struct {
 	// committer is what commits the settled changes. It is nil when it could not be made, which the Commit
 	// check says, and when the agent has none.
 	committer Committer
-	gitDir    string
+	layout    layout.Layout
 	// loggedCommit is the last result of the Commit check that was logged, so that a commit that fails in the same
 	// way at every scan is one line of the log.
 	loggedCommit []string
+	// waiting is true while the Commit check says that the last commit was deferred for an update that was cut off.
+	waiting bool
 	// watcher is nil when there are no events: none was given, or it could not be made, and watchErr says why.
 	watcher  Watcher
 	watchErr error
@@ -158,9 +173,9 @@ func (a *agent) startScans(p *progress, done checkedOut, gate breaker.Gate) *sca
 		})
 		return nil
 	}
-	s.gitDir = l.GitDir
+	s.layout = l
 	if a.commitsFollow() {
-		p.commit = notTried(CheckCommit, "not tried, because no file has settled yet")
+		p.commit = notTried(CheckCommit, commitNotSettled)
 		committer, err := a.NewCommitter(commit.Options{
 			Layout: l, Git: done.options.Git, Fence: a.fence,
 			AuthorName: a.Config.CommitAuthorName, AuthorEmail: a.Config.CommitAuthorEmail,
@@ -254,8 +269,11 @@ func (s *scans) once(ctx context.Context, now time.Time) time.Duration {
 	committed := false
 	if len(seen.Settled) > 0 {
 		committed = s.commitSettled(ctx, seen.Settled)
-	} else if len(result.Changes) == 0 {
-		s.forgetFailedCommit()
+	} else {
+		if len(result.Changes) == 0 {
+			s.forgetFailedCommit()
+		}
+		s.endWait()
 	}
 	// The push is of what the turn committed, in the same turn, and never beside a pull (docs/adr/0024).
 	s.pushStep(ctx, now, committed)
@@ -360,9 +378,27 @@ func (s *scans) forgetFailedCommit() {
 	if s.committer == nil || s.p.commit == nil || s.p.commit.Outcome != preflight.Failed {
 		return
 	}
-	s.p.commit = notTried(CheckCommit, "not tried, because no file has settled yet")
+	s.p.commit = notTried(CheckCommit, commitNotSettled)
 	s.a.publish(s.p)
 	// The same failure that comes back is a new line of the log.
+	s.loggedCommit = nil
+}
+
+// endWait takes the wait for an update that was cut off out of the Commit check once its journal is gone, at a scan that
+// commits nothing, so that the check does not say that the commits wait for a pull that has put the update right. A scan
+// that finds files settled asks the committer, which says whether they still wait. It is one stat, and only while the
+// check says that the commits wait.
+func (s *scans) endWait() {
+	if !s.waiting {
+		return
+	}
+	if cut, err := pull.UpdateCutOff(s.layout); err != nil || cut {
+		return
+	}
+	s.waiting = false
+	s.p.commit = notTried(CheckCommit, commitNotSettled)
+	s.a.publish(s.p)
+	// An update that is cut off again is a new line of the log.
 	s.loggedCommit = nil
 }
 
@@ -375,7 +411,7 @@ func (s *scans) commitSettled(ctx context.Context, settled []scan.Change) (commi
 	}
 	// A Git command that was stopped in the middle of a write leaves a lock file that fails every command after
 	// it. The writer lock is held and no command runs, so what is there is stale (docs/adr/0028).
-	cleared, err := clearLocks(ctx, s.gitDir, s.a.fence)
+	cleared, err := clearLocks(ctx, s.layout.GitDir, s.a.fence)
 	var result commit.Result
 	if err == nil {
 		result, err = s.committer.Commit(ctx, settled)
@@ -383,6 +419,7 @@ func (s *scans) commitSettled(ctx context.Context, settled []scan.Change) (commi
 	if ctx.Err() != nil {
 		return false
 	}
+	s.waiting = err == nil && result.Outcome == commit.Deferred
 	s.reportCommit(commitResult(result, err, cleared))
 	return err == nil && result.Outcome == commit.Committed
 }
@@ -399,13 +436,18 @@ func (s *scans) reportCommit(result preflight.Result) {
 // that were removed before it.
 func commitResult(result commit.Result, err error, cleared []string) preflight.Result {
 	checked := preflight.Result{Check: CheckCommit, Outcome: preflight.Passed}
-	if err != nil {
+	switch {
+	case err != nil:
 		reason := commit.ReasonCommitFailed
 		if failure, ok := errors.AsType[*commit.Error](err); ok {
 			reason = failure.Reason
 		}
 		checked = preflight.Result{Check: CheckCommit, Outcome: preflight.Failed, Reason: reason, Message: shortened(err.Error())}
-	} else {
+	case result.Outcome == commit.Deferred:
+		// Not a failure and no reason of its own: a commit that waits, as one does before a file settles. What is wrong,
+		// when the wait does not end, is the pull's, and its check says it with its own reason.
+		checked = *notTried(CheckCommit, commitWaitsForRepair)
+	default:
 		switch result.Outcome {
 		case commit.Committed:
 			checked.Message = fmt.Sprintf("committed %s as %s", plural(result.Files, "file", "files"), shortOf(result.Commit))

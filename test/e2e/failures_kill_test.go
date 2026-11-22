@@ -99,22 +99,23 @@ func killMidStep() {
 	})
 
 	Context("when the agent is killed in the middle of the files of an update", func() {
-		// The first scan of a start comes at once and the first pull after a phase that is drawn from the name of the Treebind
-		// (syncloop.Phase), and it is the pull that undoes an update that was cut off. When the phase is longer than the settle
-		// time, the scan finds the files that the update had written and commits them as the application's first: on kind, with
-		// the name mid-update and its phase of 3.9s, the new agent committed the 12 files that the update had written, the last of
-		// them half, and its pull resolved a conflict by followRemote and removed the journal without undoing anything. That is
-		// for the agent to put right (#232), and when it is the name of this Treebind needs no short phase. This spec is for the
-		// undo, so the phase of its name is under the settle time.
-		target := failureTarget("kill-update")
+		// The first scan of a start comes at once, and the first pull after a phase that is drawn from the name of the Treebind
+		// (syncloop.Phase); it is the pull that undoes an update that was cut off. Before #232 was fixed, a phase longer than the
+		// settle time let the scan find the files that the update had written and commit them as the application's first: on kind,
+		// with this name and its phase of 3.9s, the new agent committed the 12 files that the update had written, the last of them
+		// half, and its pull resolved a conflict by followRemote and removed the journal without undoing anything. The agent now
+		// commits nothing while the journal of the update is there, and its first pull after such a start does not wait for the
+		// phase (docs/adr/0028). The spec checks that the phase of the name is longer than the settle time, so that it holds by
+		// that order and not by the luck of the name, and that nothing was committed before the update was undone.
+		target := failureTarget("mid-update")
 		BeforeAll(func() {
-			expectPullBeforeSettle(target)
+			expectPullAfterSettle(target)
 			setUpFailure(target)
 		})
 		AfterAll(func() { tearDownFailure(target) })
 		AfterEach(func() { afterKill(target) })
 
-		It("should undo the update when it starts again and apply it whole", func() {
+		It("should commit none of its files when it starts again, undo the update and apply it whole", func() {
 			killInUpdate(target)
 		})
 	})
@@ -155,7 +156,8 @@ func killInGitAdd(t syncTarget) {
 
 // killInUpdate kills the agent, from the node, while the fast-forward of a pull writes a burst of files that was pushed from Git,
 // with the first of them written and the last not yet, and checks that the container comes back once in the same pod, that the
-// new agent undoes the update that was cut off and applies it again, and that each file in the pod of the application is whole.
+// new agent commits nothing before it undoes the update that was cut off and applies it again, and that each file in the pod of
+// the application is whole.
 func killInUpdate(t syncTarget) {
 	before := syncedAtSeed(t)
 
@@ -170,10 +172,18 @@ func killInUpdate(t syncTarget) {
 
 	t.restartedOnceAfterKill(before)
 
-	By("checking in its log that the new agent found the update cut off and undid it before it applied it again")
-	match := updateUndone.FindStringSubmatch(t.agentLog(Default))
-	Expect(match).NotTo(BeNil(), "the new agent did not say that it undid an update that was cut off")
-	removed, err := strconv.Atoi(match[1])
+	By("checking in its log that the new agent committed nothing, and found the update cut off and undid it before it applied it again")
+	logs := t.agentLog(Default)
+	undone := updateUndone.FindStringSubmatchIndex(logs)
+	beforeUndone := logs
+	if undone != nil {
+		beforeUndone = logs[:undone[0]]
+	}
+	// What a commit before the undo holds is the files that the update had written, committed as the application's (#232).
+	Expect(commitPassed.FindAllString(beforeUndone, -1)).To(BeEmpty(),
+		"the new agent committed files before it undid the update that was cut off")
+	Expect(undone).NotTo(BeNil(), "the new agent did not say that it undid an update that was cut off")
+	removed, err := strconv.Atoi(logs[undone[2]:undone[3]])
 	Expect(err).NotTo(HaveOccurred())
 	// The files that the update had written, and the one it was writing, were the agent's own, and were removed.
 	Expect(removed).To(BeNumerically(">", 0), "the update that was cut off had written no file")
@@ -245,15 +255,17 @@ func syncedAtSeed(t syncTarget) syncPodState {
 	return before
 }
 
-// expectPullBeforeSettle checks that the first pull of the Treebind's agent comes before a file that its first scan finds has
-// settled.
-func expectPullBeforeSettle(t syncTarget) {
+// expectPullAfterSettle checks that the phase of the first pull of the Treebind's agent, by its name, is longer than the settle
+// time, so that a file that its first scan finds settles before the first pull would come if the agent waited for the phase. A
+// spec of a start after an update that was cut off then shows that the agent commits nothing of the update before the pull puts
+// it right (#232), which a short phase would let it do by luck.
+func expectPullAfterSettle(t syncTarget) {
 	interval, err := time.ParseDuration(dodInterval)
 	Expect(err).NotTo(HaveOccurred())
 	settle, err := time.ParseDuration(dodSettleTime)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(syncloop.Phase(t.namespace, t.name, interval)).To(BeNumerically("<", settle),
-		"the first pull of %s comes after its first scan has committed the files of an update that was cut off", t.name)
+	Expect(syncloop.Phase(t.namespace, t.name, interval)).To(BeNumerically(">", settle),
+		"the phase of the first pull of %s is shorter than the settle time, and the spec would hold by the luck of the name", t.name)
 }
 
 // awaitStrike waits for a watch of hack/inject.sh to strike, and logs what it saw.

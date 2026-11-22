@@ -79,15 +79,17 @@ const (
 
 // fullVolume is the Context of the full volume, which failureInjection calls.
 func fullVolume() {
-	// The agent that starts again scans the volume before its first pull, and the pull is what undoes an update that was cut off. When
-	// the first pull comes later than the settle time, the scan finds the half of the file that the update wrote, takes it for a change
-	// of the application and commits it (#232). The first pull of a start comes after a phase that is drawn from the name of the
-	// Treebind (syncloop.Phase), and this name's is the shortest of the names that say what the spec does. The scan already took that
-	// half file for a change in the first second after the update failed, and the volume being full is all that stopped its commit.
-	target := failureTarget("full-space")
+	// The update that the full volume cuts off leaves the half of the file, which the scans take for a change of the application from
+	// the first second after it, and the journal of the update, and the pull is what undoes the update. Before #232 was fixed, the
+	// volume being full was all that stopped the agent that ran from committing that half, and the agent that starts again scanned
+	// before its first pull, which comes after a phase that is drawn from the name of the Treebind (syncloop.Phase): a name whose phase
+	// was longer than the settle time would have had the half file committed, so this Context had a name with a short one. The agent
+	// now commits nothing while the journal is there, and its first pull after such a start does not wait for the phase
+	// (docs/adr/0028), and the phase of this name is longer than the settle time, so that the spec holds by that order.
+	target := failureTarget("full-claim")
 	var node string
 	BeforeAll(func() {
-		expectPullBeforeSettle(target)
+		expectPullAfterSettle(target)
 		node = setUpFullVolume(target)
 	})
 	// The filler is freed whether the spec passed or not, once a spec that failed has said how the volume was, and then the claim, the
