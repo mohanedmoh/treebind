@@ -101,6 +101,11 @@ test-e2e-failures: setup-test-e2e manifests generate fmt vet ## Run only the e2e
 	$(E2E_GO_TEST) -ginkgo.label-filter=failure -timeout 60m
 	$(MAKE) cleanup-test-e2e
 
+.PHONY: test-chart
+test-chart: setup-test-e2e ko ## Install the Helm chart on a Kind cluster, with images built from the checkout, and sync a Treebind through it. Expected an isolated environment using Kind.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) KO=$(KO) KUBECTL=$(KUBECTL) hack/test-chart.sh
+	$(MAKE) cleanup-test-e2e
+
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)

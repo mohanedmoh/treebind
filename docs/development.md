@@ -15,7 +15,7 @@ A contributor needs a laptop, a container runtime and no cloud account.
 | ssh-keygen | Any OpenSSH client | `make dev-ssh` and the end-to-end suite make the deploy key of the ssh remote with it |
 | make | GNU make | Every task has a target |
 | kubebuilder | v4.16, only when you scaffold a new API | Code generation for new types |
-| Helm (optional) | 4.x | Lint and render the chart in `charts/treebind` (`helm lint charts/treebind`) |
+| Helm (optional) | Pinned in `release.yml` | Lint and render the chart in `charts/treebind` (`helm lint charts/treebind`). `make test-chart` downloads the pinned version into `bin/` itself (linux/amd64, checked against its SHA-256) |
 | ko | Pinned in the Makefile and `release.yml` | `make dev` downloads it into `bin/`; the release workflow pins the same version |
 | cosign | Pinned in `release.yml` | Used only by the release workflow; see [releasing.md](releasing.md) |
 
@@ -185,6 +185,47 @@ container, and the agent runs on. `tmpfs-mount <node> <name> <mebibytes>` mounts
 `local` to point at, `tmpfs-fill <node> <name> <bytes-left>` fills it with zeros until that many bytes are free, and `tmpfs-free`,
 `tmpfs-df` and `tmpfs-unmount` take the filler away, say how much is free and unmount it.
 
+## The Helm chart
+
+`make test-chart` installs the chart in `charts/treebind` on a kind cluster that it creates and deletes, as `make test-e2e` does, and
+proves that a Treebind syncs through it: what the definition of done above proves for the kustomize deployment. The script is
+`hack/test-chart.sh`, and CI runs it as the job `chart-install`, with the same node image as `e2e`, so a contributor runs the same
+thing as CI. It needs Docker, kind, `kubectl`, `ssh-keygen`, the network, and `make ko` (it downloads ko into `bin/`).
+
+It downloads the Helm that `release.yml` pins, by version and SHA-256, into `bin/`, so it needs no Helm of its own; on a machine that is
+not linux/amd64, set `HELM` to a Helm of that version. It builds the operator and the agent image from the checkout with ko into the
+nodes of the cluster, as `make dev` does, and installs the chart with `--set` for both images, since a release has not published them.
+It then checks that the operator rolls out as two replicas, that the CRD is `Established` and that the operator has the agent image
+(`AGENT_IMAGE`, from `agent.image`), starts the ssh remote of `make dev-ssh`, and waits until a Treebind that syncs in both directions
+is `Ready` and `Synced` with the commit that the remote has. A file that the remote was seeded with has to be in a pod that mounts the
+claim, and a file that this pod writes has to be a commit on the remote, which is the pull and the push. A `helm upgrade` with the
+same values must not replace the operator's pods. After `helm uninstall` the operator is gone, and the CRD, the Treebind and its sync
+pod are still there, because the chart keeps the CRD (`crd.keep`): the script checks that and installs the chart again over what was
+kept. It takes about four minutes on a machine with a warm Go cache, and most of that is the kind cluster, the two image builds and the wait
+for the status of the Treebind, which the operator reads from the agent every 30 seconds. Cleanup is always done, and a failure prints
+the state of the cluster before it.
+
+The cluster has to be fresh: the script stops if the Treebind CRD or the namespace `treebind-system` is there, as they are after
+`make deploy` or `make dev`.
+
+To install the chart in a cluster of your own from a checkout, build the two images into it and pass them to the chart. No release has
+published the default images yet, so without them the operator, and the sync pods that it makes, cannot pull theirs. ko prints
+`kind.local/<name>:<tag>`, which the chart takes as a repository and a tag:
+
+```sh
+make ko
+export KO_DOCKER_REPO=kind.local KIND_CLUSTER_NAME=kind   # the name of your kind cluster
+operator="$(bin/ko build --base-import-paths --platform="linux/$(go env GOARCH)" ./cmd/operator)"
+agent="$(bin/ko build --base-import-paths --platform="linux/$(go env GOARCH)" ./cmd/agent)"
+helm install treebind charts/treebind --namespace treebind-system --create-namespace \
+  --set manager.image.repository="${operator%:*}" --set manager.image.tag="${operator##*:}" \
+  --set agent.image.repository="${agent%:*}" --set agent.image.tag="${agent##*:}"
+kubectl -n treebind-system rollout status deployment/treebind-controller-manager
+```
+
+A release publishes both images with the tag `v<chart version>`, which the chart uses when `manager.image.tag` and `agent.image.tag` are
+not set, so an install from the released chart needs no `--set`.
+
 ## Make targets
 
 | Target | What it does | Status |
@@ -195,6 +236,7 @@ container, and the agent runs on. `tmpfs-mount <node> <name> <mebibytes>` mounts
 | `make generate manifests` | Regenerates deepcopy code, CRDs, the chart's copy of the CRD and RBAC from the Go types | Available |
 | `make test-e2e` | End-to-end suite on a kind cluster, created if missing, without the specs that cause a failure | Available |
 | `make test-e2e-failures` | Only the end-to-end specs that cause a failure (label `failure`), on a kind cluster, created if missing | Available |
+| `make test-chart` | Installs the Helm chart on a kind cluster, created if missing and deleted after, and syncs a Treebind through it (`hack/test-chart.sh`) | Available |
 | `make cleanup-test-e2e` | Deletes the kind cluster used by the e2e suite | Available |
 | `make install` / `make uninstall` | Installs or removes the CRD in the current cluster | Available |
 | `make build` | Builds the operator (`cmd/operator`) and agent (`cmd/agent`) binaries into `bin/` | Available |
@@ -216,8 +258,10 @@ by hand. `make test` compares it with `config/manager/manager.yaml` and names
 the field that differs, so change both when you change one: the arguments, the
 probes and ports, the security contexts, the resources, the replica count, the
 rolling update strategy and the topology spread. It does the same for the
-PodDisruptionBudget and the leader election role. It does not look at the agent
-image or the metrics flags.
+PodDisruptionBudget and the leader election role. It checks that the chart sets
+`AGENT_IMAGE` from `agent.image` and that the default repository is the one in
+`config/manager`, and it does not look at the metrics flags. `make test-chart`
+installs the chart for real.
 
 ## Working with Git
 
