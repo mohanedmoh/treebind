@@ -11,6 +11,9 @@ metadata:
 spec:
   endpoints:
     - path: /metrics
+      # The metrics of a Treebind carry the namespace of the Treebind, which has to win over the namespace of
+      # the operator that Prometheus gives a target (docs/metrics-and-events.md).
+      honorLabels: true
       port: https # Ensure this is the name of the port that exposes HTTPS metrics
       scheme: https
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token

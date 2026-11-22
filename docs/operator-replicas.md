@@ -21,7 +21,10 @@ Both replicas serve the health probes and the metrics endpoint, and a standby
 reports ready: `/readyz` does not depend on holding the lease. A ready pod therefore
 does not tell you who leads; the lease does (see [Checking](#checking)). The metrics
 Service selects both pods, so a request through the Service reaches either one, and
-only the leader's reconcile counters move.
+only the leader's reconcile counters move. The metrics of the Treebinds, and their
+events, come from the leader alone: the standby serves none of them, and a new leader
+makes them again at its first poll of each Treebind
+([metrics and events](metrics-and-events.md#metrics)).
 
 ## How failover works
 
