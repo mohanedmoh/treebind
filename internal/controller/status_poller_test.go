@@ -34,6 +34,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -135,6 +136,7 @@ var _ = Describe("The status poller", func() {
 		agents    *fakeAgents
 		keys      *refreshableKeys
 		publisher *StatusKeyPublisher
+		recorder  *capturedEvents
 		poller    *StatusPollerReconciler
 		treebind  *treebindv1alpha1.Treebind
 		name      types.NamespacedName
@@ -147,9 +149,11 @@ var _ = Describe("The status poller", func() {
 		keys = &refreshableKeys{}
 		keys.set(testKeySet(), nil)
 		publisher = &StatusKeyPublisher{Source: keys, now: clock.Now}
+		recorder = &capturedEvents{}
 		poller = &StatusPollerReconciler{
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Agents: agents, StatusKeys: publisher, now: clock.Now,
 			AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject,
+			Recorder: recorder,
 		}
 
 		treebind = newTreebind(fmt.Sprintf("poll-%d", counter))
@@ -805,7 +809,101 @@ var _ = Describe("The status poller", func() {
 			Expect(find(treebindv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue), "the other write was lost")
 		})
 	})
+
+	// sync_events_test.go holds what each change makes. These hold that the poller makes it from what it writes
+	// through the API server, once for each change.
+	Context("with events", func() {
+		It("records an event for each change that it writes, and none for a poll that finds the same", func() {
+			agents.answer(currentReport(get(), ""))
+			poll()
+			poll()
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			poll()
+			agents.answer(currentReport(get(), commitOne, failedCheck(app.CheckPush, reasonPushRejected)))
+			poll()
+			clock.Advance(statusPollInterval)
+			poll()
+
+			Expect(recorder.summaries()).To(Equal([]string{
+				"Normal SyncPending Synced",
+				"Normal InSync Synced",
+				"Warning PushRejected Synced",
+			}))
+			stored := get()
+			last := recorder.taken()[2]
+			Expect(last.note).To(HavePrefix("Synced is False: The last push failed"))
+			Expect(last.note).NotTo(ContainSubstring(agentText))
+			Expect(last.regarding).To(Equal(name), "the event is not on the Treebind")
+			Expect(last.resourceVersion).To(Equal(stored.ResourceVersion),
+				"the event is not of the status that the poll wrote")
+		})
+
+		It("records the event of a change that lost a conflict with the poll that writes it", func() {
+			agents.answer(currentReport(get(), commitOne))
+			agents.beforeAnswering = func() {
+				other := get()
+				meta.SetStatusCondition(&other.Status.Conditions, metav1.Condition{
+					Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionTrue,
+					Reason: treebindv1alpha1.ReasonSyncPodReady, Message: messagePodReady,
+					ObservedGeneration: other.Generation,
+				})
+				Expect(k8sClient.Status().Update(ctx, other)).To(Succeed())
+			}
+
+			Expect(poll().RequeueAfter).To(Equal(statusPollConflictWait))
+			Expect(recorder.summaries()).To(BeEmpty())
+
+			agents.beforeAnswering = nil
+			poll()
+			poll()
+
+			Expect(recorder.summaries()).To(Equal([]string{"Normal InSync Synced"}))
+		})
+	})
 })
+
+// capturedEvent is an event as the poller recorded it.
+type capturedEvent struct {
+	eventType, reason, action, note string
+	regarding                       types.NamespacedName
+	resourceVersion                 string
+}
+
+// capturedEvents records the events that it is given, as the recorder of the manager sends them to the API server.
+type capturedEvents struct {
+	mu     sync.Mutex
+	events []capturedEvent
+}
+
+func (c *capturedEvents) Eventf(regarding runtime.Object, _ runtime.Object, eventType, reason, action, note string,
+	args ...any,
+) {
+	object := regarding.(client.Object)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, capturedEvent{
+		eventType: eventType, reason: reason, action: action, note: fmt.Sprintf(note, args...),
+		regarding:       client.ObjectKeyFromObject(object),
+		resourceVersion: object.GetResourceVersion(),
+	})
+}
+
+func (c *capturedEvents) taken() []capturedEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.events)
+}
+
+// summaries are the type, the reason and the action of each event.
+func (c *capturedEvents) summaries() []string {
+	taken := c.taken()
+	got := make([]string, 0, len(taken))
+	for _, event := range taken {
+		got = append(got, event.eventType+" "+event.reason+" "+event.action)
+	}
+	return got
+}
 
 // hashVariableOf returns the value of the variable of the agent that holds the hash of the pod template.
 func hashVariableOf(template corev1.PodTemplateSpec) string {
@@ -849,6 +947,20 @@ func TestThePollerWillNotStartWithoutWhatItNeeds(t *testing.T) {
 			!strings.Contains(err.Error(), "issuer and the subject of the operator's token")) {
 			t.Errorf("%s: SetupWithManager returned %v, want the refusal of the operator", name, err)
 		}
+	}
+}
+
+// Without a recorder a change of the sync outcome would be a condition only (NFR-6), so the poller does not start
+// without one.
+func TestThePollerWillNotStartWithoutARecorderOfEvents(t *testing.T) {
+	poller := &StatusPollerReconciler{
+		Agents: &fakeAgents{}, StatusKeys: newTestPublisher(), AgentImage: testImage,
+		StatusIssuer: testIssuer, StatusSubject: testSubject,
+	}
+	// The manager is nil, so an error of the controller builder would pass for the refusal: the text has to be the
+	// operator's own.
+	if err := poller.SetupWithManager(nil); err == nil || !strings.Contains(err.Error(), "recorder of the events") {
+		t.Errorf("SetupWithManager returned %v, want the refusal that names the recorder", err)
 	}
 }
 

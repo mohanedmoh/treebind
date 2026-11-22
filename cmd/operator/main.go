@@ -284,6 +284,7 @@ func main() {
 			Client: mgr.GetClient(), Namespace: operatorNamespace, ServiceAccount: operatorAccount,
 		}),
 		StatusKeys: statusKeys,
+		Recorder:   mgr.GetEventRecorder(controller.EventReporter),
 		// The settings of the reconcile of the spec, from which the poller computes the
 		// hash of the pod template that the spec gives.
 		AgentImage:    agentImage,
