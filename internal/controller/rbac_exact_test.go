@@ -35,7 +35,9 @@ import (
 //   - CreateOrUpdate of a StatefulSet and of a Service: get, create, update;
 //   - Create and a JSON Patch of a ConfigMap (docs/adr/0015), and no read of one;
 //   - the owner reference that the children carry, which sets blockOwnerDeletion and so asks for update
-//     on the finalizers of the owner.
+//     on the finalizers of the owner;
+//   - the events of a change of Synced and Conflict, which the recorder of the events.k8s.io API creates, and
+//     patches when it counts one again (docs/adr/0038).
 //
 // It deletes nothing: the garbage collector removes what a deleted Treebind owns.
 const (
@@ -58,6 +60,7 @@ var managerGrants = map[string][]string{
 	appsGroup + "/statefulsets":              {verbCreate, verbGet, verbList, verbUpdate, verbWatch},
 	"/services":                              {verbCreate, verbGet, verbList, verbUpdate, verbWatch},
 	"/" + configMaps:                         {verbCreate, verbPatch},
+	"events.k8s.io/events":                   {verbCreate, verbPatch},
 }
 
 // volumeReadGrants is what the optional role reads: the volumes and the storage classes that the status of a

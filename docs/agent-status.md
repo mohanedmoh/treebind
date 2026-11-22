@@ -46,6 +46,8 @@ From the same report the operator writes two more conditions and two fields of t
 `AgentUnreachable` and only when something changed. `kubectl describe treebind <name>` shows them, and `kubectl get treebind`
 shows `Ready`, `Synced` and `Conflict`. The decisions behind them are in
 [ADR 0037](adr/0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md).
+Each change of `Synced` and `Conflict` is also an event on the Treebind, and every condition is a metric:
+[metrics and events](metrics-and-events.md).
 
 ```
 kubectl get treebind <name> -o jsonpath='{.status.conditions[?(@.type=="Synced")]}'

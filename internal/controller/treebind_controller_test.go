@@ -26,6 +26,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -58,6 +59,7 @@ var _ = Describe("Treebind Controller", func() {
 		keysNamespacedName := types.NamespacedName{Name: resourceName + "-sync-keys", Namespace: resourceNamespace}
 		treebind := &treebindv1alpha1.Treebind{}
 		var controllerReconciler *TreebindReconciler
+		var registry *prometheus.Registry
 
 		reconcileOnce := func() {
 			GinkgoHelper()
@@ -132,6 +134,9 @@ var _ = Describe("Treebind Controller", func() {
 		}
 
 		BeforeEach(func() {
+			registry = prometheus.NewRegistry()
+			metrics, err := NewMetrics(registry)
+			Expect(err).NotTo(HaveOccurred())
 			controllerReconciler = &TreebindReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
@@ -140,10 +145,11 @@ var _ = Describe("Treebind Controller", func() {
 				StatusIssuer:  testIssuer,
 				StatusSubject: testSubject,
 				StatusKeys:    newTestPublisher(),
+				Metrics:       metrics,
 			}
 
 			By("creating the custom resource for the Kind Treebind")
-			err := k8sClient.Get(ctx, typeNamespacedName, treebind)
+			err = k8sClient.Get(ctx, typeNamespacedName, treebind)
 			if err != nil && errors.IsNotFound(err) {
 				Expect(k8sClient.Create(ctx, newTreebind(resourceName))).To(Succeed())
 			}
@@ -164,6 +170,31 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 				Name: keysNamespacedName.Name, Namespace: keysNamespacedName.Namespace,
 			}}))).To(Succeed())
+		})
+
+		It("records Ready and SpecSupported in the metrics, and nothing of them once the Treebind is gone", func() {
+			series := func(conditionType, value, reason string) string {
+				return "condition=" + conditionType + ",name=" + resourceName + ",namespace=" + resourceNamespace +
+					",reason=" + reason + ",status=" + value
+			}
+			reconcileOnce()
+			Expect(gatheredSeries(registry, metricCondition)).To(Equal(map[string]float64{
+				series(treebindv1alpha1.ConditionReady, "False", treebindv1alpha1.ReasonSyncPodNotReady):  1,
+				series(treebindv1alpha1.ConditionSpecSupported, "True", treebindv1alpha1.ReasonSupported): 1,
+			}), "the reconcile records the conditions that it owns, and only those")
+
+			makeSyncPodReady()
+			reconcileOnce()
+			Expect(gatheredSeries(registry, metricCondition)).To(HaveKey(
+				series(treebindv1alpha1.ConditionReady, "True", treebindv1alpha1.ReasonSyncPodReady)))
+			Expect(gatheredSeries(registry, metricCondition)).To(HaveLen(2))
+
+			Expect(k8sClient.Delete(ctx, get())).To(Succeed())
+			reconcileOnce()
+			Expect(gatheredSeries(registry, metricCondition)).To(BeEmpty())
+
+			// The cleanup expects the Treebind.
+			Expect(k8sClient.Create(ctx, newTreebind(resourceName))).To(Succeed())
 		})
 
 		It("reports a spec with only implemented fields as supported", func() {

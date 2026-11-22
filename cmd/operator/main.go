@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -258,6 +259,13 @@ func main() {
 
 	// One publisher serves both controllers, so that what it wrote is remembered once.
 	statusKeys := &controller.StatusKeyPublisher{Source: controller.NewKeyFetcher(controller.APIGetter(get))}
+	// The metrics of the Treebinds are served on the metrics endpoint of the manager, with its own. Both controllers
+	// record in them, each the conditions that it owns.
+	treebindMetrics, err := controller.NewMetrics(metrics.Registry)
+	if err != nil {
+		setupLog.Error(err, "Failed to register the metrics of the Treebinds")
+		os.Exit(1)
+	}
 	if err := (&controller.TreebindReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
@@ -266,6 +274,7 @@ func main() {
 		StatusIssuer:  status.Issuer,
 		StatusSubject: status.Subject,
 		StatusKeys:    statusKeys,
+		Metrics:       treebindMetrics,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind")
 		os.Exit(1)
@@ -284,6 +293,8 @@ func main() {
 			Client: mgr.GetClient(), Namespace: operatorNamespace, ServiceAccount: operatorAccount,
 		}),
 		StatusKeys: statusKeys,
+		Recorder:   mgr.GetEventRecorder(controller.EventReporter),
+		Metrics:    treebindMetrics,
 		// The settings of the reconcile of the spec, from which the poller computes the
 		// hash of the pod template that the spec gives.
 		AgentImage:    agentImage,

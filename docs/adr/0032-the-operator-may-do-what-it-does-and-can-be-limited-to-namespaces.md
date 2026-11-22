@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-18
 - Issue: #30
+- Extended by: [0038](0038-the-operator-records-an-event-and-a-metric-where-it-writes-a-condition-of-the-sync.md), which adds `create` and `patch`
+  on `events` of `events.k8s.io` to the manager role, for the events of the sync outcome
 
 ## Context
 

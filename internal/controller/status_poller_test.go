@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -29,11 +30,13 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -135,6 +138,8 @@ var _ = Describe("The status poller", func() {
 		agents    *fakeAgents
 		keys      *refreshableKeys
 		publisher *StatusKeyPublisher
+		recorder  *capturedEvents
+		registry  *prometheus.Registry
 		poller    *StatusPollerReconciler
 		treebind  *treebindv1alpha1.Treebind
 		name      types.NamespacedName
@@ -147,9 +152,13 @@ var _ = Describe("The status poller", func() {
 		keys = &refreshableKeys{}
 		keys.set(testKeySet(), nil)
 		publisher = &StatusKeyPublisher{Source: keys, now: clock.Now}
+		recorder, registry = &capturedEvents{}, prometheus.NewRegistry()
+		metrics, err := NewMetrics(registry)
+		Expect(err).NotTo(HaveOccurred())
 		poller = &StatusPollerReconciler{
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Agents: agents, StatusKeys: publisher, now: clock.Now,
 			AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject,
+			Recorder: recorder, Metrics: metrics,
 		}
 
 		treebind = newTreebind(fmt.Sprintf("poll-%d", counter))
@@ -805,7 +814,176 @@ var _ = Describe("The status poller", func() {
 			Expect(find(treebindv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue), "the other write was lost")
 		})
 	})
+
+	// sync_events_test.go and metrics_test.go hold what each change makes. These hold that the poller makes it from
+	// what it writes through the API server, once for each change, and drops what it made of a Treebind that is gone.
+	Context("with events and metrics", func() {
+		conditionSeries := func() []string {
+			GinkgoHelper()
+			return slices.Sorted(maps.Keys(gatheredSeries(registry, metricCondition)))
+		}
+		series := func(conditionType, value, reason string) string {
+			return "condition=" + conditionType + ",name=" + name.Name + ",namespace=" + name.Namespace +
+				",reason=" + reason + ",status=" + value
+		}
+
+		It("records an event for each change that it writes, and none for a poll that finds the same", func() {
+			agents.answer(currentReport(get(), ""))
+			poll()
+			poll()
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			poll()
+			agents.answer(currentReport(get(), commitOne, failedCheck(app.CheckPush, reasonPushRejected)))
+			poll()
+			clock.Advance(statusPollInterval)
+			poll()
+
+			Expect(recorder.summaries()).To(Equal([]string{
+				"Normal SyncPending Synced",
+				"Normal InSync Synced",
+				"Warning PushRejected Synced",
+			}))
+			stored := get()
+			last := recorder.taken()[2]
+			Expect(last.note).To(HavePrefix("Synced is False: The last push failed"))
+			Expect(last.note).NotTo(ContainSubstring(agentText))
+			Expect(last.regarding).To(Equal(name), "the event is not on the Treebind")
+			Expect(last.resourceVersion).To(Equal(stored.ResourceVersion),
+				"the event is not of the status that the poll wrote")
+
+			Expect(gatheredSeries(registry, metricOutcomeChanges)).To(Equal(map[string]float64{
+				series(treebindv1alpha1.ConditionSynced, "Unknown", reasonPending):    1,
+				series(treebindv1alpha1.ConditionSynced, "True", reasonInSync):        1,
+				series(treebindv1alpha1.ConditionSynced, "False", reasonPushRejected): 1,
+			}))
+			Expect(conditionSeries()).To(Equal([]string{
+				series(treebindv1alpha1.ConditionAgentUnreachable, "False", treebindv1alpha1.ReasonReportReceived),
+				series(treebindv1alpha1.ConditionConflict, "False", reasonNoConflict),
+				series(treebindv1alpha1.ConditionSynced, "False", reasonPushRejected),
+			}))
+		})
+
+		It("records the event of a change that lost a conflict with the poll that writes it", func() {
+			agents.answer(currentReport(get(), commitOne))
+			agents.beforeAnswering = func() {
+				other := get()
+				meta.SetStatusCondition(&other.Status.Conditions, metav1.Condition{
+					Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionTrue,
+					Reason: treebindv1alpha1.ReasonSyncPodReady, Message: messagePodReady,
+					ObservedGeneration: other.Generation,
+				})
+				Expect(k8sClient.Status().Update(ctx, other)).To(Succeed())
+			}
+
+			Expect(poll().RequeueAfter).To(Equal(statusPollConflictWait))
+			Expect(recorder.summaries()).To(BeEmpty())
+			Expect(gatheredSeries(registry, metricOutcomeChanges)).To(BeEmpty())
+
+			agents.beforeAnswering = nil
+			poll()
+			poll()
+
+			Expect(recorder.summaries()).To(Equal([]string{"Normal InSync Synced"}))
+		})
+
+		It("says when it last read a report that said InSync, and how often the agent pulls", func() {
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			seen := clock.Now()
+			clock.Advance(statusPollInterval)
+			agents.answer(currentReport(get(), commitOne, failedCheck(app.CheckPull, reasonFetchFailed)))
+			poll()
+
+			labels := "name=" + name.Name + ",namespace=" + name.Namespace
+			Expect(gatheredSeries(registry, metricInSyncSeen)).To(Equal(map[string]float64{labels: seconds(seen)}))
+			Expect(gatheredSeries(registry, metricInterval)).To(Equal(map[string]float64{labels: 30}))
+			Expect(gatheredSeries(registry, metricLastSynced)).To(Equal(map[string]float64{
+				labels: float64(get().Status.LastSyncTime.Unix()),
+			}))
+		})
+
+		It("drops every series of a Treebind that is gone", func() {
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			Expect(conditionSeries()).NotTo(BeEmpty())
+
+			Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
+			poll()
+
+			for _, family := range []string{
+				metricCondition, metricOutcomeChanges, metricInterval, metricLastSynced, metricInSyncSeen,
+			} {
+				Expect(gatheredSeries(registry, family)).To(BeEmpty(), family)
+			}
+		})
+
+		It("drops every series of a Treebind that is being deleted", func() {
+			agents.answer(currentReport(get(), commitOne))
+			poll()
+			held := get()
+			controllerutil.AddFinalizer(held, "test.example.org/hold")
+			Expect(k8sClient.Update(ctx, held)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, held)).To(Succeed())
+
+			poll()
+
+			Expect(conditionSeries()).To(BeEmpty())
+			Expect(gatheredSeries(registry, metricInSyncSeen)).To(BeEmpty())
+			release := get()
+			controllerutil.RemoveFinalizer(release, "test.example.org/hold")
+			Expect(k8sClient.Update(ctx, release)).To(Succeed())
+		})
+	})
 })
+
+// capturedEvent is an event as the poller recorded it.
+type capturedEvent struct {
+	eventType, reason, action, note string
+	regarding                       types.NamespacedName
+	resourceVersion                 string
+}
+
+// capturedEvents records the events that it is given, as the recorder of the manager sends them to the API server.
+type capturedEvents struct {
+	mu     sync.Mutex
+	events []capturedEvent
+}
+
+func (c *capturedEvents) Eventf(regarding runtime.Object, _ runtime.Object, eventType, reason, action, note string,
+	args ...any,
+) {
+	object := regarding.(client.Object)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, capturedEvent{
+		eventType: eventType, reason: reason, action: action, note: fmt.Sprintf(note, args...),
+		regarding:       client.ObjectKeyFromObject(object),
+		resourceVersion: object.GetResourceVersion(),
+	})
+}
+
+func (c *capturedEvents) taken() []capturedEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.events)
+}
+
+// summaries are the type, the reason and the action of each event.
+func (c *capturedEvents) summaries() []string {
+	taken := c.taken()
+	got := make([]string, 0, len(taken))
+	for _, event := range taken {
+		got = append(got, event.eventType+" "+event.reason+" "+event.action)
+	}
+	return got
+}
+
+// gatheredSeries is what gathered returns, for a Ginkgo spec.
+func gatheredSeries(registry prometheus.Gatherer, family string) map[string]float64 {
+	GinkgoHelper()
+	return gathered(GinkgoT(), registry, family)
+}
 
 // hashVariableOf returns the value of the variable of the agent that holds the hash of the pod template.
 func hashVariableOf(template corev1.PodTemplateSpec) string {
@@ -848,6 +1026,41 @@ func TestThePollerWillNotStartWithoutWhatItNeeds(t *testing.T) {
 			!strings.Contains(err.Error(), "public signing keys") &&
 			!strings.Contains(err.Error(), "issuer and the subject of the operator's token")) {
 			t.Errorf("%s: SetupWithManager returned %v, want the refusal of the operator", name, err)
+		}
+	}
+}
+
+// Without a recorder or the metrics a change of the sync outcome would be a condition only (NFR-6), so neither
+// controller starts without what it records in.
+func TestTheControllersWillNotStartWithoutTheirEventsAndMetrics(t *testing.T) {
+	metrics, err := NewMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller := func() *StatusPollerReconciler {
+		return &StatusPollerReconciler{
+			Agents: &fakeAgents{}, StatusKeys: newTestPublisher(), AgentImage: testImage,
+			StatusIssuer: testIssuer, StatusSubject: testSubject, Recorder: &capturedEvents{}, Metrics: metrics,
+		}
+	}
+	noRecorder, noMetrics := poller(), poller()
+	noRecorder.Recorder, noMetrics.Metrics = nil, nil
+	reconciler := &TreebindReconciler{
+		AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject, StatusKeys: newTestPublisher(),
+	}
+
+	for name, setup := range map[string]struct {
+		err  error
+		want string
+	}{
+		"a poller with no recorder":               {noRecorder.SetupWithManager(nil), "recorder of the events"},
+		"a poller with no metrics":                {noMetrics.SetupWithManager(nil), "metrics of the Treebinds"},
+		"a reconcile of the spec with no metrics": {reconciler.SetupWithManager(nil), "metrics of the Treebinds"},
+	} {
+		// The manager is nil, so an error of the controller builder would pass for the refusal: the text has to be
+		// the operator's own.
+		if setup.err == nil || !strings.Contains(setup.err.Error(), setup.want) {
+			t.Errorf("%s: SetupWithManager returned %v, want the refusal that names the %s", name, setup.err, setup.want)
 		}
 	}
 }

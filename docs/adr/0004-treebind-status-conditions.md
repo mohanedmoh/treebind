@@ -6,6 +6,8 @@
 - Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
   writes `Synced` and `Conflict` from the agent's report, names their reasons, and makes `Ready` `False` with
   `NotSynced` only for a failure that waits for a person
+- Extended by: [0038](0038-the-operator-records-an-event-and-a-metric-where-it-writes-a-condition-of-the-sync.md), which records an event and a
+  metric for each change of `Synced` and `Conflict`, and exports the state of every condition as a metric
 
 ## Context
 
