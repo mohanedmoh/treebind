@@ -58,12 +58,13 @@ kubectl describe treebind <name>
 ## When it does not work
 
 The agent stays up, says why in the `Pull` check, and tries again. It carries on once the cause is put right,
-with no restart.
+with no restart. [Recovering from a conflict or a rejected push](recovering-from-a-conflict-or-a-rejected-push.md) starts
+from the conditions of the Treebind and says what to do.
 
 | Reason | What it means | What to do | The next pull |
 | :-- | :-- | :-- | :-- |
 | `Blocked` | A file that the update changes has a local edit, or an untracked file is in its way. The message names some of them. Nothing was written | Commit, revert or remove the files. The next pull goes on | At the interval |
-| `Diverged` | Your directory and the branch each have commits that the other lacks, and the Treebind only pulls, so it has no policy to say which side wins. The message says how many. Nothing was written. A branch that was force-pushed looks like this | Nothing is lost. Decide which side is right | At the interval |
+| `Diverged` | Your directory and the branch each have commits that the other lacks, and the Treebind only pulls, so it has no policy to say which side wins. The message says how many. Nothing was written. A branch that was force-pushed looks like this | Nothing is lost. Decide which side is right: [recovering from a conflict or a rejected push](recovering-from-a-conflict-or-a-rejected-push.md#a-branch-that-was-rewritten-under-a-treebind-that-only-pulls) says how to make the volume follow the branch | At the interval |
 | `BranchGone` | The repository has no such branch any more | Put the branch back, or set `spec.repository.branch` to one it has | At the interval |
 | `PathNotFound` | The branch has something at `spec.repository.path` that is not a directory. A directory that the repository removed is an update that removes its files, which [the deletion guard](deletion-guard.md) judges. Nothing was written | Put the directory back, or check `spec.repository.path` | Longer, up to ten minutes |
 | `PathMismatch` | The checkout was made for another directory, or for the whole repository: see [the directory of the repository](repository-path.md). Nothing was written | Remove or set back `spec.repository.path`, or start again | Longer, up to ten minutes |

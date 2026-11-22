@@ -60,6 +60,12 @@ Deleting a Treebind removes its sync pod and Service. It never touches your
 volume or the data on it; see
 [docs/deleting-a-treebind.md](docs/deleting-a-treebind.md).
 
+## When the sync stops
+
+A conflict that the agent cannot resolve, or a push that the Git host refuses, shows in the conditions `Synced` and `Conflict`. How to
+read them, what the agent does by itself and what to do are in
+[docs/recovering-from-a-conflict-or-a-rejected-push.md](docs/recovering-from-a-conflict-or-a-rejected-push.md).
+
 ## Contributing
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and
