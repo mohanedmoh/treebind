@@ -38,7 +38,12 @@ import (
 // get wrong with no error at all: a name of a metric, a label or a value of a label that the operator does not make finds
 // nothing, and an alert on nothing never fires.
 
-const metricsPage = "metrics-and-events.md"
+const (
+	metricsPage = "metrics-and-events.md"
+
+	// blockNotInSync is the block of the alert of R-29, which both pages have.
+	blockNotInSync = "promql-not-in-sync"
+)
 
 // pageOf returns a page of docs/.
 func pageOf(t *testing.T, page string) string {
@@ -248,8 +253,9 @@ func promqlExpressions(block string) []string {
 func TestTheExpressionsOfThePagesUseMetricsLabelsAndValuesThatTheOperatorMakes(t *testing.T) {
 	exported := exportedFamilies(t)
 	for _, block := range []struct{ page, name string }{
-		{metricsPage, "promql-not-in-sync"},
+		{metricsPage, blockNotInSync},
 		{metricsPage, "promql-others"},
+		{recoveryPage, blockNotInSync},
 	} {
 		expressions := promqlExpressions(fencedIn(t, block.page, "tested", block.name, "promql"))
 		if len(expressions) == 0 {
@@ -258,6 +264,12 @@ func TestTheExpressionsOfThePagesUseMetricsLabelsAndValuesThatTheOperatorMakes(t
 		for _, expression := range expressions {
 			checkExpression(t, block.page+" "+block.name, expression, exported)
 		}
+	}
+	// The alert of R-29 is written once on each page, and it is the same alert.
+	metrics := promqlExpressions(fencedIn(t, metricsPage, "tested", blockNotInSync, "promql"))
+	recovery := promqlExpressions(fencedIn(t, recoveryPage, "tested", blockNotInSync, "promql"))
+	if !slices.Equal(metrics, recovery) {
+		t.Errorf("the pages give two alerts for a sync that has not succeeded: %q and %q", metrics, recovery)
 	}
 }
 
@@ -311,7 +323,7 @@ func TestThePrometheusRuleOfThePageAlertsWithTheExpressionsOfThePage(t *testing.
 	}
 	exported := exportedFamilies(t)
 	written := map[string]bool{}
-	for _, block := range []string{"promql-not-in-sync", "promql-others"} {
+	for _, block := range []string{blockNotInSync, "promql-others"} {
 		for _, expression := range promqlExpressions(fencedIn(t, metricsPage, "tested", block, "promql")) {
 			written[strings.Join(strings.Fields(expression), " ")] = true
 		}
@@ -383,7 +395,7 @@ func TestTheCommandsThatListTheEventsNameTheTreebindAsKubectlKnowsIt(t *testing.
 		t.Fatal(err)
 	}
 	forTreebind := regexp.MustCompile(`kubectl events (?:-n <namespace> )?--for ([a-z]+)/<name>`)
-	for _, page := range []string{metricsPage} {
+	for _, page := range []string{metricsPage, recoveryPage} {
 		block := fencedIn(t, page, "tested", "read-the-events", "sh")
 		match := forTreebind.FindStringSubmatch(block)
 		if match == nil {

@@ -43,7 +43,16 @@ AgentUnreachable	False	ReportReceived	The operator read the sync agent's report
 ```
 
 The second command prints the full id of that commit, a tab and the time. `kubectl describe treebind <name>` shows the same
-conditions. What each says ([the status page](agent-status.md#what-synced-and-conflict-say) has the whole of it):
+conditions, and below them the events of the Treebind, one for each change of `Synced` and `Conflict`, with its time and the
+reason of the condition, and of the type `Warning` for a failure. To list them alone:
+
+<!-- tested: read-the-events -->
+```sh
+kubectl events --for treebind/<name>
+```
+
+[Metrics and events](metrics-and-events.md#events) says which change makes which event. What each condition says
+([the status page](agent-status.md#what-synced-and-conflict-say) has the whole of it):
 
 - **`Synced` `True` with `InSync`.** No step of the sync has failed, and the agent has seen the volume and the repository agree. If
   something you expected has not reached the repository, the sync did not fail: see
@@ -430,9 +439,22 @@ kubectl delete pod <name>-sync-0
 
 ## Noticing that nothing has synced for a while
 
-There is no alert for this yet: Treebind has no metrics of the sync and no events (issue #47), so an alert on "no sync has succeeded
-for several intervals" has no source of its own, and the conditions are what there is. `Synced` is not `True` for as long as a step
-fails, and the time of its last change of status is when it began:
+With Prometheus, alert on the time that the operator last saw the Treebind in sync, against its interval. The operator exports it
+for every Treebind, and this fires when that time is older than five intervals, and never sooner than 10 minutes:
+
+<!-- tested: promql-not-in-sync -->
+```promql
+time() - treebind_in_sync_last_seen_timestamp_seconds
+  > clamp_min(5 * treebind_sync_interval_seconds, 600)
+```
+
+It fires for a step that keeps failing, for a sync that stays pending, as with a second agent on the claim, for an agent that the
+operator cannot read and for a sync pod that does not run, and not for a Treebind that has nothing to sync.
+[Metrics and events](metrics-and-events.md#alerts) has the metrics, the other alerts (a conflict that waits, a push that the host
+refused) and a `PrometheusRule` to adapt, and says how a new leader of the operator takes the time after a failover.
+
+Without Prometheus, the conditions say it. `Synced` is not `True` for as long as a step fails, and the time of its last change of
+status is when it began:
 
 <!-- tested: since-when-synced-says-what-it-says -->
 ```sh
@@ -462,19 +484,23 @@ kubectl get treebind -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.me
 ```
 
 **An old `status.lastSyncTime` is not the sign.** It moves only when the commit at which the two agree changes, and a pull that finds
-nothing new changes neither, so a Treebind with nothing to sync keeps its time and is well. Use it to say when the last change came
-through, and `Synced` to say whether the sync is going on. A stuck agent is restarted by its liveness probe, which
+nothing new changes neither, so a Treebind with nothing to sync keeps its time and is well, and so does the metric
+`treebind_last_synced_commit_timestamp_seconds`, which is the same time. Use it to say when the last change came through, and
+`Synced`, or the time last seen in sync, to say whether the sync is going on. A stuck agent is restarted by its liveness probe, which
 [the status page](agent-status.md#the-probes) describes, and shows as restarts of the pod.
+
+The events of a Treebind say when each change came, for an hour on most clusters: `kubectl events --for treebind/<name>`, as
+[above](#start-with-what-kubectl-shows). A `Warning` with `PushRejected`, or a `Conflict is True` with the reason of the update, is
+where it began.
 
 ## What is not there yet
 
-- **An alert** when no sync has succeeded for several intervals, and an event when a push is rejected or a conflict is found. They
-  need the metrics and events of issue #47, which are not built. [Above](#noticing-that-nothing-has-synced-for-a-while) is what there
-  is.
-- **The host's message in a condition.** The conditions carry fixed sentences, by decision
+- **The host's message in a condition or an event.** The conditions carry fixed sentences, by decision
   ([ADR 0037](adr/0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md)),
-  so the words of the host are in the `Push` check, which the log and the report have, and a `PushRejected` is the reason of `Synced`,
-  not a condition of its own.
+  and the events carry the conditions' sentences, so the words of the host are in the `Push` check, which the log and the report
+  have, and a `PushRejected` is the reason of `Synced` and of its event, not a condition of its own.
+- **A count of every refused push.** The metrics count the changes of `Synced`, so a push that the host refuses at every interval
+  is one `PushRejected` until a push goes through ([metrics and events](metrics-and-events.md#metrics)).
 - **A side branch for the commits of a push that was refused.** Those commits wait on the branch of the checkout. The commits that a
   policy leaves out are kept, under `refs/treebind/local/<number>`, which is [above](#where-each-policy-leaves-your-version).
 - **A way to pause the agent, or to make it try now.** There is no setting for either. Deleting its pod makes it try at once, as
