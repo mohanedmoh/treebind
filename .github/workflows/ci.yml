@@ -372,13 +372,26 @@ jobs:
     with:
       failures: true
 
+  # The chart is installed on a kind cluster, with the operator and the agent image built from the pull request, and a Treebind
+  # syncs through it (hack/test-chart.sh, `make test-chart`). The chart job above lints and renders it, and this one runs it.
+  # The Helm of this job is the pin of release.yml, which the script reads, so there is no second pin here that could drift.
+  chart-install:
+    name: chart-install
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      chart: true
+
   # The only required check besides dco. A required job that a path filter
   # skips would stay pending and block the merge; this gate treats a skipped
   # job as passing and fails only on a failure or a cancellation.
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e, e2e-failures]
+    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e, e2e-failures, chart-install]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled

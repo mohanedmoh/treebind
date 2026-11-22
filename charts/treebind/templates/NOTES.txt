@@ -1,13 +1,34 @@
 Thank you for installing {{ .Chart.Name }}.
 
 Your release is named {{ .Release.Name }}.
+{{- if or (not (hasKey .Values.manager "enabled")) .Values.manager.enabled }}
+{{- $operator := include "treebind.image" (dict "repository" (.Values.manager.image.repository | default "controller") "tag" .Values.manager.image.tag "context" $) }}
+{{- $agent := include "treebind.image" (dict "repository" .Values.agent.image.repository "tag" .Values.agent.image.tag "context" $) }}
 
-The controller and CRDs have been installed in namespace {{ .Release.Namespace }}.
+The operator runs in namespace {{ .Release.Namespace }} from the image
+  {{ $operator }}
+and makes the sync pod of each Treebind from the agent image
+  {{ $agent }}
+{{- if or (hasSuffix ":v0.0.0-dev" $operator) (hasSuffix ":v0.0.0-dev" $agent) }}
+
+This chart comes from a checkout, and no release has published an image with the tag v0.0.0-dev.
+Build the images and give them to the chart with manager.image.* and agent.image.* (docs/development.md).
+{{- end }}
+{{- end }}
 
 To verify the installation:
 
-  kubectl get pods -n {{ .Release.Namespace }}
-  kubectl get customresourcedefinitions
+  kubectl -n {{ .Release.Namespace }} get pods
+  kubectl get crd treebinds.treebind.example.org
+{{- if .Values.crd.enabled }}
+{{- if .Values.crd.keep }}
+
+The CRD is kept when you uninstall the release (crd.keep), and so are the Treebinds and their
+sync pods. To remove them as well, delete the Treebinds and then the CRD:
+
+  kubectl delete crd treebinds.treebind.example.org
+{{- end }}
+{{- end }}
 
 To learn more about the release, try:
 

@@ -5,7 +5,8 @@ name: e2e
 # failures: true it runs the specs that cause a failure on purpose (the label
 # failure, `make test-e2e-failures`) and not the others, on a cluster of its own,
 # so that a pull request waits for the longer of the two jobs and not for their
-# sum.
+# sum. With chart: true it runs no spec of the suite: it installs the Helm chart
+# on the cluster and syncs a Treebind through it (`make test-chart`).
 on:
   workflow_call:
     inputs:
@@ -21,16 +22,21 @@ on:
         description: Run the specs that cause a failure (make test-e2e-failures) and not the others
         type: boolean
         default: false
+      chart:
+        description: Install the Helm chart and sync through it (make test-chart) instead of running the suite
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   e2e:
-    name: e2e${{ inputs.failures && ' failures' || '' }} (kubernetes ${{ inputs.kubernetes }})
+    name: ${{ inputs.chart && 'chart install' || format('e2e{0}', inputs.failures && ' failures' || '') }} (kubernetes ${{ inputs.kubernetes }})
     runs-on: ubuntu-latest
-    # The suite has its own timeouts (30 minutes, and 60 for the failures); this one is for a job that hangs outside it.
-    timeout-minutes: ${{ inputs.failures && 90 || 45 }}
+    # The suite has its own timeouts (30 minutes, and 60 for the failures); this one is for a job that hangs outside it. The
+    # install of the chart has none of its own and takes a few minutes, so its limit is short.
+    timeout-minutes: ${{ inputs.chart && 30 || inputs.failures && 90 || 45 }}
     env:
       KIND_VERSION: v0.33.0
       KIND_SHA256_AMD64: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
@@ -67,9 +73,9 @@ jobs:
       - name: Install ko
         run: GOTOOLCHAIN=auto make ko
 
-      - name: Run the end-to-end suite
+      - name: Run the end-to-end suite, or the install of the chart
         env:
-          TARGET: ${{ inputs.failures && 'test-e2e-failures' || 'test-e2e' }}
+          TARGET: ${{ inputs.chart && 'test-chart' || inputs.failures && 'test-e2e-failures' || 'test-e2e' }}
         run: make "$TARGET"
 
       - name: Collect cluster logs on failure
@@ -83,7 +89,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: kind-logs-${{ inputs.kubernetes }}${{ inputs.failures && '-failures' || '' }}
+          name: kind-logs-${{ inputs.kubernetes }}${{ inputs.failures && '-failures' || '' }}${{ inputs.chart && '-chart' || '' }}
           path: kind-logs
           retention-days: 7
 

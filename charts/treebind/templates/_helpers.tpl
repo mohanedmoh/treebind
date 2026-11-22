@@ -109,3 +109,18 @@ the last value, and the namespaces of the Roles have to win.
 {{- define "treebind.watchNamespacesArg" -}}
 {{- with (include "treebind.watchNamespaces" .) }}--watch-namespaces={{ . }}{{- end }}
 {{- end }}
+
+{{/*
+The reference of an image. Takes a dict with:
+  - .repository: the repository, which may end in @sha256:... to pin a digest
+  - .tag: the tag, or nothing for "v" plus the appVersion of the chart (the tag that the release gives both images)
+  - .context: the root context
+A repository with a digest gets no tag.
+*/}}
+{{- define "treebind.image" -}}
+{{- if contains "@" .repository }}
+{{- .repository }}
+{{- else }}
+{{- printf "%s:%s" .repository (.tag | default (printf "v%s" .context.Chart.AppVersion)) }}
+{{- end }}
+{{- end }}

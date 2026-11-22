@@ -31,6 +31,12 @@ You need Go 1.26 or later, `kubectl` and a cluster such as
 [kind](https://kind.sigs.k8s.io). See [docs/development.md](docs/development.md)
 for the full setup.
 
+To run the operator in the cluster, install the Helm chart. A release will publish
+the chart and both images (the chart is `oci://ghcr.io/mohanedmoh/charts/treebind`).
+Until there is a release, install the chart from a checkout with images that you
+build into your cluster: [docs/development.md](docs/development.md#the-helm-chart)
+has the commands, and `make test-chart` runs them against a throwaway kind cluster.
+
 ## Storage support
 
 Which storage classes Treebind works on, and how that was tested, will be

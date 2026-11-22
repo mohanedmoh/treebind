@@ -37,6 +37,7 @@ import (
 // release.yml pins, and they skip without it, so a run on a machine that has no Helm does not fail.
 
 const (
+	imageKey        = "image"
 	helmBinVariable = "HELM_BIN"
 	helmCommand     = "template"
 	watchFlagPrefix = "--watch-namespaces="
@@ -250,4 +251,90 @@ func TestRealHelmPutsTheFlagOfTheChartAfterTheArgumentsOfTheUser(t *testing.T) {
 			t.Errorf("the manager gets %v, want %v", flags, want)
 		}
 	})
+}
+
+// managerEnv is the value of an environment variable of the manager container of the Deployment that
+// helm template wrote, or its image for the name "image".
+func managerEnv(t *testing.T, output, name string) string {
+	t.Helper()
+	for _, document := range helmDocuments(output) {
+		var object struct {
+			Kind string `json:"kind"`
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							Name string `json:"name"`
+							Env  []struct {
+								Name  string `json:"name"`
+								Value string `json:"value"`
+							} `json:"env"`
+							Image string `json:"image"`
+						} `json:"containers"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(document), &object); err != nil || object.Kind != "Deployment" {
+			continue
+		}
+		for _, container := range object.Spec.Template.Spec.Containers {
+			if container.Name != managerKey {
+				continue
+			}
+			if name == imageKey {
+				return container.Image
+			}
+			for _, variable := range container.Env {
+				if variable.Name == name {
+					return variable.Value
+				}
+			}
+		}
+	}
+	t.Fatalf("helm template wrote no Deployment with a manager container that has %s", name)
+	return ""
+}
+
+// The images that the chart gives to the operator, and to the operator as AGENT_IMAGE for the sync pods:
+// the repository and the tag of the release by default, the tag that was asked for, and no tag after a
+// repository that has a digest.
+func TestRealHelmNamesTheImagesOfTheOperatorAndOfTheAgent(t *testing.T) {
+	helmBinary(t)
+	// images is the values for the image of the operator and the image of the agent, each a repository and, when
+	// it is not empty, a tag.
+	images := func(operatorRepository, operatorTag, agentRepository, agentTag string) map[string]any {
+		image := func(repository, tag string) map[string]any {
+			values := map[string]any{"repository": repository}
+			if tag != "" {
+				values["tag"] = tag
+			}
+			return map[string]any{imageKey: values}
+		}
+		return map[string]any{managerKey: image(operatorRepository, operatorTag), "agent": image(agentRepository, agentTag)}
+	}
+	for _, test := range []struct {
+		name            string
+		values          map[string]any
+		operator, agent string
+	}{
+		{"the defaults", nil,
+			"ghcr.io/mohanedmoh/treebind-operator:v0.0.0-dev", "ghcr.io/mohanedmoh/treebind-agent:v0.0.0-dev"},
+		{"a tag for each", images("example.com/op", "t1", "example.com/ag", "t2"), "example.com/op:t1", "example.com/ag:t2"},
+		{"a digest for each", images("example.com/op@sha256:aa", "ignored", "example.com/ag@sha256:bb", ""),
+			"example.com/op@sha256:aa", "example.com/ag@sha256:bb"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output, said, err := helmTemplate(t, test.values)
+			if err != nil {
+				t.Fatalf("helm template failed: %v\n%s", err, said)
+			}
+			if got := managerEnv(t, output, imageKey); got != test.operator {
+				t.Errorf("the image of the operator is %q, want %q", got, test.operator)
+			}
+			if got := managerEnv(t, output, "AGENT_IMAGE"); got != test.agent {
+				t.Errorf("AGENT_IMAGE is %q, want %q", got, test.agent)
+			}
+		})
+	}
 }
