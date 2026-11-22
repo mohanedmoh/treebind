@@ -72,6 +72,12 @@ A conflict that the agent cannot resolve, or a push that the Git host refuses, s
 read them, what the agent does by itself and what to do are in
 [docs/recovering-from-a-conflict-or-a-rejected-push.md](docs/recovering-from-a-conflict-or-a-rejected-push.md).
 
+## Metrics and events
+
+Each change of `Synced` and `Conflict` is also an event on the Treebind and a Prometheus metric, and an alert can say that a
+Treebind has not synced for several of its intervals. The events, the metrics and the expressions to alert on are in
+[docs/metrics-and-events.md](docs/metrics-and-events.md).
+
 ## Contributing
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and

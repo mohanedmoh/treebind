@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-20
 - Issue: #214
+- Extended by: [0038](0038-the-operator-records-an-event-and-a-metric-where-it-writes-a-condition-of-the-sync.md), which records an event and a
+  metric where `Synced` and `Conflict` are written, as the section "Not here" below planned
 - Extends: [0004](0004-treebind-status-conditions.md), [0011](0011-the-agent-status-endpoint.md), [0015](0015-the-operator-reads-the-agents-status.md), [0030](0030-the-agent-is-ready-after-its-first-pull-and-stays-ready-while-it-runs.md), [0033](0033-the-agent-pushes-the-commits-as-a-fast-forward-and-is-ready-after-its-first-push.md), [0034](0034-the-agent-resolves-a-conflict-by-the-policy-of-the-treebind-one-file-at-a-time-in-the-update-of-a-pull.md)
 
 ## Context

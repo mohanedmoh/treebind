@@ -13,8 +13,9 @@ never do, and says how to install it so that it works in the namespaces you choo
 | `treebinds/finalizers` | update | What it creates names the Treebind as its owner, and that needs this on clusters that enforce owner references |
 | `statefulsets`, `services` | get, list, watch, create, update | The one-replica StatefulSet and the headless Service of each Treebind |
 | `configmaps` | create, patch | The public keys that the sync agent checks the operator's token against ([ADR 0015](adr/0015-the-operator-reads-the-agents-status.md)). It never reads one |
+| `events` of `events.k8s.io` | create, patch | An event on the Treebind for each change of `Synced` and `Conflict` ([metrics and events](metrics-and-events.md)). It reads none |
 | `leases` (its own namespace) | get, create, update | Leader election ([operator replicas](operator-replicas.md)) |
-| `events` (its own namespace) | create, patch | The events that leader election records |
+| `events` of the core group (its own namespace) | create, patch | The events that leader election records |
 | `serviceaccounts/token` (its own namespace) | create, for its own account only | The token that it calls the sync agents with |
 
 It deletes nothing. The StatefulSet, the Service and the ConfigMap of a Treebind carry it as their owner, and the
@@ -95,6 +96,7 @@ OPERATOR=system:serviceaccount:treebind-system:treebind-controller-manager
 kubectl auth can-i list treebinds --as=$OPERATOR -n apps      # yes, if apps is served
 kubectl auth can-i list treebinds --as=$OPERATOR -n other     # no, in a namespaced install
 kubectl auth can-i get secrets --as=$OPERATOR -n apps         # no, always
+kubectl auth can-i create events.events.k8s.io --as=$OPERATOR -n apps   # yes, if apps is served
 ```
 
 The log of the operator says which namespaces it serves, in one line at its start: `Serving only the Treebinds of
