@@ -42,6 +42,9 @@ With `followLocal` your commits are in the history of the branch, and the reposi
 the commits that came from it, except when both sides held the same files: the commits are then in the ref, as with
 `followRemote`.
 
+[Recovering from a conflict or a rejected push](recovering-from-a-conflict-or-a-rejected-push.md#getting-your-version-back) has the commands for finding what your directory
+changed, putting a file back and joining the two edits of a file.
+
 ## What the report says
 
 The `Pull` check says `resolved a conflict` and points at the `Conflict` check, which comes after `Push` and is `Skipped` until
@@ -70,6 +73,9 @@ The operator derives the condition `Conflict` from that check, and writes it wit
 | `False` | `ConflictResolved` | The last conflict that the agent found since it started was resolved, with either policy |
 | `False` | `NoConflict` | The agent knows of no conflict that waits, and has resolved none since it started. It is the answer for a `pull` Treebind too, whose `Diverged` is `Synced` `False` and not a conflict |
 | `Unknown` | As `Synced` | The operator does not know what the sync does, and `Synced` says why: no report yet, a report that is not of the current spec, none yet in which the agent has seen the two agree since it started, or an agent that cannot be read |
+
+What to do for each reason of a conflict that was not resolved is in
+[recovering from a conflict or a rejected push](recovering-from-a-conflict-or-a-rejected-push.md#a-conflict-that-was-not-resolved).
 
 A conflict that cannot be resolved is a failed step, so `Synced` is `False` with the same reason, and `Ready` follows that as
 [the status page](agent-status.md#ready) says. `Conflict` is not an input of `Ready`: with `TooManyDeletions`, `TooManyCommits`,
