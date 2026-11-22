@@ -25,6 +25,9 @@ spec:
     bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
     {{- end }}
     path: /metrics
+    # The metrics of a Treebind carry the namespace of the Treebind, which has to win over the namespace of the
+    # operator that Prometheus gives a target (docs/metrics-and-events.md).
+    honorLabels: true
     port: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
     scheme: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
     {{- if .Values.metrics.secure }}
