@@ -163,10 +163,8 @@ docker-buildx: ## Build and push the operator image for several platforms.
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
-	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment. AGENT_IMG sets the agent image of the sync pods, which a release has to give.
+	KUSTOMIZE="$(KUSTOMIZE)" hack/build-installer.sh "${IMG}" "${AGENT_IMG}" dist/install.yaml
 
 ##@ Deployment
 

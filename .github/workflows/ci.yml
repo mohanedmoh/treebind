@@ -304,6 +304,16 @@ jobs:
           HELM_BIN: ${{ runner.temp }}/tools/helm
         run: go test ./internal/controller/ -run 'TestRealHelm' -count=1 -v
 
+      # The installer of a release is made by the step of release.yml that this one repeats with digests that are not
+      # published, so that a change that leaves the operator with an agent image that a release does not have, or an
+      # image with the tag latest, fails here and not on a tag.
+      - name: Render the installer of a release
+        run: |
+          set -euo pipefail
+          operator="ghcr.io/example/treebind-operator@sha256:$(printf 'a%.0s' {1..64})"
+          agent="ghcr.io/example/treebind-agent@sha256:$(printf 'b%.0s' {1..64})"
+          make build-installer IMG="$operator" AGENT_IMG="$agent"
+
   # Every commit needs a Signed-off-by line. Dependabot does not add one, so
   # its pull requests skip the job; a job skipped by its own condition counts
   # as passing, which keeps the required check satisfied.
