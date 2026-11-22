@@ -251,11 +251,13 @@ jobs:
           retry 3 cosign sign --yes "ghcr.io/${owner}/charts/treebind@${digest}"
           echo "Chart: ghcr.io/${owner}/charts/treebind:${VERSION}@${digest}"
 
-      # 7. install.yaml from config/default, with the operator image digest.
+      # 7. install.yaml from config/default, with the digests of the operator image and of the agent image. The base
+      #    names an agent image that no release publishes, so hack/build-installer.sh replaces it and fails the job
+      #    when the installer does not say the two digests or has an image with the tag latest.
       - name: Render install.yaml
         run: |
           set -euo pipefail
-          make build-installer IMG="$(cat out/operator.ref)"
+          make build-installer IMG="$(cat out/operator.ref)" AGENT_IMG="$(cat out/agent.ref)"
           cp dist/install.yaml out/assets/install.yaml
 
       # 5 and 8. SBOMs and checksums, then the GitHub release: a draft first,

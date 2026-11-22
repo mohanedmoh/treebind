@@ -48,7 +48,10 @@ patch and say so in the notes of the bad release.
 4. Signs every image digest with cosign, keyless, using the workflow's identity.
 5. Packages the chart with the release version, pushes it to
    `oci://ghcr.io/mohanedmoh/charts`, and signs it.
-6. Renders `install.yaml` from `config/default` with the image digests filled in.
+6. Renders `install.yaml` from `config/default` with the digests of the operator image and of the agent image filled in
+   (`hack/build-installer.sh`). The base names an agent image that no release publishes, so the script reads the result
+   back and fails the release when `install.yaml` does not say the two digests or has an image with the tag `latest`. CI
+   runs the same script with digests that are not published.
 7. Creates a **draft** GitHub release with notes generated from pull request
    labels, attaches `install.yaml`, the SBOMs and `checksums.txt`, and only then
    publishes it. A release that is already published cannot change once
@@ -129,6 +132,16 @@ that setting.
 Right after GHCR creates a new package it can briefly refuse the next write, so
 the workflow retries registry writes (the image builds, the chart push and the
 signatures) with a growing delay.
+
+## Artifact Hub
+
+The chart carries what [Artifact Hub](https://artifacthub.io) shows of it: the `artifacthub.io/*` annotations of
+`charts/treebind/Chart.yaml` (license, category, the CRD, links) and the chart's `README.md`. Nothing is registered by the
+release. The owner adds `oci://ghcr.io/mohanedmoh/charts/treebind` as a repository of kind Helm charts in their Artifact Hub
+account, after a release has been verified. Artifact Hub then reads the published chart by itself. To claim the listing as its
+publisher, Artifact Hub gives the repository an ID, and an `artifacthub-repo.yml` that holds it is pushed to the repository
+with the tag `artifacthub.io`; that file and its push are added when the repository is registered, because the ID does not exist
+before.
 
 ## Maintainers: changing the release tools
 
