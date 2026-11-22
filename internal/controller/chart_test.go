@@ -37,8 +37,10 @@ import (
 // from config/manager the way the CRD and the role are. This compares the parts
 // that have to stay the same: the container and pod settings that the chart takes
 // from its default values, and the parts that are fixed text in the template.
-// Wiring in the agent image is not checked (#51 and #85), and neither are the
-// metrics flags, which the chart builds from its own metrics values.
+// The agent image is checked for where it comes from and for its default repository
+// (TestChartGivesTheOperatorTheAgentImageOfTheBase), and chart_helm_test.go has real Helm make the
+// value of it. The metrics flags are not checked, because the chart builds them from its own
+// metrics values.
 
 const (
 	managerContainer = "manager"
@@ -84,6 +86,11 @@ type chartValues struct {
 			MaxUnavailable int32 `json:"maxUnavailable"`
 		} `json:"podDisruptionBudget"`
 	} `json:"manager"`
+	Agent struct {
+		Image struct {
+			Repository string `json:"repository"`
+		} `json:"image"`
+	} `json:"agent"`
 }
 
 var (
@@ -293,4 +300,39 @@ func operatorIdentityEnv(env []corev1.EnvVar) []corev1.EnvVar {
 		return nil
 	}
 	return identity
+}
+
+// envValue returns the value of the variable of that name, and whether the container sets it.
+func envValue(env []corev1.EnvVar, name string) (string, bool) {
+	for _, variable := range env {
+		if variable.Name == name {
+			return variable.Value, true
+		}
+	}
+	return "", false
+}
+
+// The operator makes the pods of the sync from the image in AGENT_IMAGE, and without it from an image
+// with the tag latest, which a release does not publish. The kustomize base sets it, and the chart has to
+// as well, from its agent.image values, so that an install from the chart syncs. The repository that the
+// chart names by default has to be the one of the base: both are the agent image of the release.
+func TestChartGivesTheOperatorTheAgentImageOfTheBase(t *testing.T) {
+	config := configDeployment(t)
+	wanted, ok := envValue(container(t, "config/manager/manager.yaml", config.Spec.Template.Spec.Containers).Env, "AGENT_IMAGE")
+	if !ok || wanted == "" {
+		t.Fatal("config/manager/manager.yaml no longer sets AGENT_IMAGE")
+	}
+	values := defaultValues(t)
+	template := chartDeployment(t, values)
+	fromValues, ok := envValue(container(t, "the chart's Deployment template", template.Spec.Template.Spec.Containers).Env, "AGENT_IMAGE")
+	if !ok {
+		t.Fatal("the chart's Deployment does not set AGENT_IMAGE, so the operator would make its sync pods from an image that a release does not publish")
+	}
+	if !strings.Contains(fromValues, "Values_agent_image_repository") {
+		t.Errorf("AGENT_IMAGE of the chart is %q, which is not made from agent.image.repository", fromValues)
+	}
+	repository, _, _ := strings.Cut(wanted, ":")
+	if got := values.Agent.Image.Repository; got != repository {
+		t.Errorf("agent.image.repository is %q in the chart and %q in config/manager", got, repository)
+	}
 }

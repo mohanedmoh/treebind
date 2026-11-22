@@ -92,6 +92,8 @@ spec:
         - {{ . }}
         {{- end }}
         env:
+        - name: AGENT_IMAGE
+          value: {{ include "treebind.image" (dict "repository" .Values.agent.image.repository "tag" .Values.agent.image.tag "context" $) | quote }}
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
@@ -100,7 +102,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.serviceAccountName
-        image: "{{ .Values.manager.image.repository | default "controller" }}{{- if not (contains "@" (.Values.manager.image.repository | default "controller")) }}:{{ .Values.manager.image.tag | default (printf "v%s" .Chart.AppVersion) }}{{- end }}"
+        image: {{ include "treebind.image" (dict "repository" (.Values.manager.image.repository | default "controller") "tag" .Values.manager.image.tag "context" $) | quote }}
         {{- with .Values.manager.image.pullPolicy }}
         imagePullPolicy: {{ . }}
         {{- end }}

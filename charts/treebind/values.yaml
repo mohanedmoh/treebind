@@ -145,6 +145,18 @@ manager:
   #   labels: {}
   #   annotations: {}
 
+## The sync agent. The operator makes a pod for each Treebind that runs this image,
+## and the chart gives it to the operator as AGENT_IMAGE. The release publishes it
+## with the same tag as the operator image.
+##
+agent:
+  image:
+    repository: ghcr.io/mohanedmoh/treebind-agent
+    ## Image tag (defaults to "v" plus Chart.appVersion if not set). Pin a digest
+    ## by putting it in the repository instead: repository: <name>@sha256:...
+    ##
+    # tag: ""
+
 ## RBAC configuration
 ##
 rbac:
@@ -217,13 +229,15 @@ metrics:
   # Note: Metrics authn/authz needs ClusterRole access.
   secure: true
 
-## Cert-manager integration for TLS certificates.
-## Required for webhook certificates and metrics endpoint certificates.
+## Cert-manager integration. The chart does not need cert-manager: with metrics.secure
+## the operator serves its metrics with a self-signed certificate that it makes itself.
+## No template makes a Certificate. Setting this only makes the ServiceMonitor read the
+## client certificate and the CA from the Secret metrics-server-cert, which you provide.
 ##
 certManager:
   enabled: false
 
-## Webhook server configuration
+## Webhook server configuration. The operator has no webhook today, so nothing reads these.
 ##
 webhook:
   enabled: false
