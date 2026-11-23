@@ -1,0 +1,4 @@
+# The metadata that Artifact Hub reads from the OCI repository of the chart, at the tag artifacthub.io
+# (hack/push-artifacthub-repo.sh pushes it, and the release workflow runs that). The ID is the one that Artifact Hub
+# shows on the card of the repository in its control panel, and makes the listing of the chart a verified publisher.
+repositoryID: 5c57e4c0-9a2f-4493-ae56-2e8cd748814e
