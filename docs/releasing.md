@@ -57,6 +57,8 @@ patch and say so in the notes of the bad release.
    publishes it. A release that is already published cannot change once
    immutable releases are on, which is why the order matters. A tag with a suffix
    such as `-rc.1` is marked as a pre-release.
+8. Pushes `charts/artifacthub-repo.yml` to the OCI repository of the chart at the tag `artifacthub.io`, for
+   [Artifact Hub](#artifact-hub).
 
 ## Verify a release
 
@@ -136,12 +138,25 @@ signatures) with a growing delay.
 ## Artifact Hub
 
 The chart carries what [Artifact Hub](https://artifacthub.io) shows of it: the `artifacthub.io/*` annotations of
-`charts/treebind/Chart.yaml` (license, category, the CRD, links) and the chart's `README.md`. Nothing is registered by the
-release. The owner adds `oci://ghcr.io/mohanedmoh/charts/treebind` as a repository of kind Helm charts in their Artifact Hub
-account, after a release has been verified. Artifact Hub then reads the published chart by itself. To claim the listing as its
-publisher, Artifact Hub gives the repository an ID, and an `artifacthub-repo.yml` that holds it is pushed to the repository
-with the tag `artifacthub.io`; that file and its push are added when the repository is registered, because the ID does not exist
-before.
+`charts/treebind/Chart.yaml` (license, category, the CRD, links) and the chart's `README.md`. The repository
+`oci://ghcr.io/mohanedmoh/charts/treebind` is registered in the Artifact Hub account of the owner, as a repository of kind Helm
+charts, and Artifact Hub reads each new version of the chart by itself.
+
+What makes the listing a verified publisher is `charts/artifacthub-repo.yml`, which holds the ID that Artifact Hub gave the
+repository. It is pushed to the same OCI repository at the tag `artifacthub.io`, with the media types that Artifact Hub looks for,
+by `hack/push-artifacthub-repo.sh`. The release workflow runs that as its last step, after the release is published, so a failure
+of it is a red run and not a release that is half made. It is the same file every time, so a push that is repeated changes
+nothing. To push it by hand, as for a repository that has had no release since the file was added, log in to the registry with a
+token that may write the package (`write:packages`) and run the script with [oras](https://oras.land):
+
+```sh
+echo "$TOKEN" | oras login ghcr.io --username <owner> --password-stdin
+hack/push-artifacthub-repo.sh ghcr.io/<owner>/charts/treebind
+```
+
+The file has no `owners`, because Artifact Hub takes the email of an owner from the account and makes it public in the artifact.
+Artifact Hub scans the images that `artifacthub.io/images` lists, and the chart does not list any, because their tag is the version
+of a release.
 
 ## Maintainers: changing the release tools
 
