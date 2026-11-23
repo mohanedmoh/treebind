@@ -27,6 +27,7 @@ of a monorepo. CI runs every command of these pages on a kind cluster.
 
 Each release publishes the Helm chart, `oci://ghcr.io/mohanedmoh/charts/treebind`,
 and both images, all of them signed, and an `install.yaml` for `kubectl apply`.
+The chart is listed on [Artifact Hub](https://artifacthub.io/packages/helm/treebind/treebind).
 The [chart's README](charts/treebind/README.md) says what it installs, and
 [releasing](docs/releasing.md#verify-a-release) how to check a release. To work on
 Treebind itself, see [docs/development.md](docs/development.md).
