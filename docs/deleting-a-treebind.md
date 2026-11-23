@@ -30,7 +30,9 @@ kubectl auth can-i delete persistentvolumeclaims -n <namespace> \
   --as=system:serviceaccount:treebind-system:treebind-controller-manager
 ```
 
-The answer is `no`.
+The answer is `no`. The claims of [the quickstart](quickstart.md#clean-up) go
+because their namespace is deleted, and its examples delete theirs with
+`kubectl delete pvc` after the Treebind.
 
 ## Creating the Treebind again
 

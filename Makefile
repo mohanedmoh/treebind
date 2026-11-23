@@ -106,6 +106,11 @@ test-chart: setup-test-e2e ko ## Install the Helm chart on a Kind cluster, with 
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) KO=$(KO) KUBECTL=$(KUBECTL) hack/test-chart.sh
 	$(MAKE) cleanup-test-e2e
 
+.PHONY: test-quickstart
+test-quickstart: setup-test-e2e ko ## Run the commands of docs/quickstart.md and docs/examples/ on a Kind cluster, with the chart and the images of the checkout (RELEASED=1: of the release that the page installs). Expected an isolated environment using Kind.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) KO=$(KO) KUBECTL=$(KUBECTL) RELEASED=$(RELEASED) hack/test-quickstart.sh
+	$(MAKE) cleanup-test-e2e
+
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)

@@ -45,8 +45,8 @@ section gives you everything, operator included, in a single command.
 `make dev` needs only Docker and kind. It creates a kind cluster named
 `treebind-dev` if it does not exist, builds the operator and agent images with
 ko straight into the cluster, installs the CRD, deploys the operator and
-starts a throwaway Git remote in the `treebind-dev` namespace, which the sync
-agent will use once it exists, so the loop needs no Git host account. Run it
+starts a throwaway Git remote in the `treebind-dev` namespace, so the loop needs
+no Git host account. Run it
 again after a code change: the cluster is reused and the images are rebuilt.
 
 ```sh
@@ -208,8 +208,9 @@ the state of the cluster before it.
 The cluster has to be fresh: the script stops if the Treebind CRD or the namespace `treebind-system` is there, as they are after
 `make deploy` or `make dev`.
 
-To install the chart in a cluster of your own from a checkout, build the two images into it and pass them to the chart. No release has
-published the default images yet, so without them the operator, and the sync pods that it makes, cannot pull theirs. ko prints
+To install the chart in a cluster of your own from a checkout, build the two images into it and pass them to the chart. The chart of a
+checkout has the version `0.0.0-dev`, whose images no release publishes, so without them the operator, and the sync pods that it makes,
+cannot pull theirs. To install a release instead, follow [the quickstart](quickstart.md#1-install-the-operator). ko prints
 `kind.local/<name>:<tag>`, which the chart takes as a repository and a tag:
 
 ```sh
@@ -226,6 +227,36 @@ kubectl -n treebind-system rollout status deployment/treebind-controller-manager
 A release publishes both images with the tag `v<chart version>`, which the chart uses when `manager.image.tag` and `agent.image.tag` are
 not set, so an install from the released chart needs no `--set`.
 
+## The quickstart
+
+`make test-quickstart` runs the commands of [the quickstart](quickstart.md) and of the three worked examples in `docs/examples/` on a
+kind cluster that it creates and deletes, as a reader runs them, so that the pages cannot say what the code does not do. The script
+is `hack/test-quickstart.sh`, and CI runs it as the job `quickstart` with the same node image as `e2e`, for a pull request that
+changes code and for one that changes only those pages. It needs what `make test-chart` needs, and Perl, and takes about eight
+minutes on a machine with a warm Go cache, a third of it the two image builds and most of the rest the waits that the pages ask for.
+
+Each command of the pages is in a fenced `sh` block that follows a line `<!-- tested: <name> -->`. The script takes the blocks out
+of the pages and runs each as it is written, in a bash of its own and in one working directory, in the order of the pages, as a
+reader pastes them into one terminal; so a block may use the files that an earlier block wrote, and not its shell variables. Between
+the blocks the script checks what the page says the reader sees. What a command prints is shown in a block that follows a line
+`<!-- output: <name> -->`, and the script holds it to what the command printed, with commit ids, times and ages left out and runs of
+spaces taken as one; a line `...` stands for lines that the page leaves out. A block that a reader runs again until a change is
+there, such as a look at the branch after a write, is run until it prints what the page shows. A block that the test cannot run,
+such as `kind create cluster` or the commands for a repository of your own, follows a line `<!-- not tested: <why> -->`. The
+script fails when an `sh` block of the pages has neither line, when a page marks a block or an output that the script does not
+run or hold, and when `docs/examples/` has a page that it does not run, so a command that is added to a page has to be added to
+the script as well.
+
+The pages install the published chart, and a pull request is not a release. So the script builds the operator and the agent image
+from the checkout with ko into the cluster, as `make test-chart` does, and puts a `helm` first on the PATH of the blocks that runs the
+pinned Helm with the same arguments, except that in `helm install` the chart has to be `oci://ghcr.io/mohanedmoh/charts/treebind`
+with the version that the page names, which it replaces with `charts/treebind` and `--set` for the two images. Nothing else of any
+command changes. `make test-quickstart RELEASED=1` runs the pages exactly as they are written, against the published chart and
+images, which is how a release is checked ([releasing](releasing.md#release-checklist)). The version that the page installs is
+printed by `hack/quickstart-version.sh`, and the release workflow refuses a tag that is not that version.
+
+When a change to the code changes what a page shows, such as the message of a condition, change the page in the same pull request.
+
 ## Make targets
 
 | Target | What it does | Status |
@@ -237,6 +268,7 @@ not set, so an install from the released chart needs no `--set`.
 | `make test-e2e` | End-to-end suite on a kind cluster, created if missing, without the specs that cause a failure | Available |
 | `make test-e2e-failures` | Only the end-to-end specs that cause a failure (label `failure`), on a kind cluster, created if missing | Available |
 | `make test-chart` | Installs the Helm chart on a kind cluster, created if missing and deleted after, and syncs a Treebind through it (`hack/test-chart.sh`) | Available |
+| `make test-quickstart` | Runs the commands of the quickstart and of the worked examples on a kind cluster, created if missing and deleted after, with the chart and images of the checkout, or of the release with `RELEASED=1` (`hack/test-quickstart.sh`) | Available |
 | `make cleanup-test-e2e` | Deletes the kind cluster used by the e2e suite | Available |
 | `make install` / `make uninstall` | Installs or removes the CRD in the current cluster | Available |
 | `make build` | Builds the operator (`cmd/operator`) and agent (`cmd/agent`) binaries into `bin/` | Available |

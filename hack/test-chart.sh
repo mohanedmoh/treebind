@@ -24,8 +24,9 @@ CLUSTER="${KIND_CLUSTER:-treebind-test-e2e}"
 KIND="${KIND:-kind}"
 KO="${KO:-$root/bin/ko}"
 KUBECTL="${KUBECTL:-kubectl}"
-HELM_DIR="${HELM_DIR:-$root/bin}"
 export KUBECTL
+# shellcheck source=hack/pinned-helm.sh
+source "$root/hack/pinned-helm.sh"
 
 RELEASE=treebind
 NAMESPACE=treebind-system
@@ -51,31 +52,6 @@ wait_for() {
     [ "$SECONDS" -lt "$deadline" ] || fail "gave up after ${limit}s waiting for $what"
     sleep 2
   done
-}
-
-# The pin of Helm is the one of release.yml, which is the Helm that publishes the chart, and
-# ci.yml checks that the pin of its chart job is the same.
-pin() { sed -n "s/^ *$1: *//p" .github/workflows/release.yml | head -n 1; }
-
-install_helm() {
-  if [ -n "${HELM:-}" ]; then
-    return
-  fi
-  local version sha tmp
-  version="$(pin HELM_VERSION)"
-  sha="$(pin HELM_SHA256)"
-  [ -n "$version" ] && [ -n "$sha" ] || fail "release.yml has no HELM_VERSION and HELM_SHA256"
-  [ "$(uname -sm)" = "Linux x86_64" ] || fail "the pinned Helm is for linux/amd64: set HELM to a Helm $version"
-  HELM="$HELM_DIR/helm-$version/helm"
-  if [ ! -x "$HELM" ]; then
-    tmp="$(mktemp -d)"
-    curl -fsSLo "$tmp/helm.tar.gz" "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz"
-    echo "$sha  $tmp/helm.tar.gz" | sha256sum -c -
-    tar -xzf "$tmp/helm.tar.gz" -C "$tmp" linux-amd64/helm
-    mkdir -p "$(dirname "$HELM")"
-    mv "$tmp/linux-amd64/helm" "$HELM"
-    rm -rf "$tmp"
-  fi
 }
 
 # What the kubectl, the Helm and hack/dev-ssh.sh say they did on a failure: the state of the

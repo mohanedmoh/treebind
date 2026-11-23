@@ -8,34 +8,29 @@ application's edits and optionally pushes them. The application is whatever
 program reads and writes those files: a dashboard tool, a workflow engine, a
 website.
 
-> **Status: alpha, pre-release.** This repository currently holds the project
-> scaffold and the `Treebind` `v1alpha1` API skeleton. Nothing syncs yet; the
-> first working release is tracked by milestone
-> [M1 MVP](https://github.com/mohanedmoh/treebind/milestones). Do not use it with
-> real data.
+> **Status: alpha.** A Treebind syncs in both directions, and releases are
+> published as pre-releases. The API is `v1alpha1`, and its group,
+> `treebind.example.org`, is a placeholder that will change before a stable
+> release, and with it the `apiVersion` of every Treebind. It is tested on kind
+> only, and no storage class is listed as supported yet. Do not use it with data
+> that you cannot lose.
 
 ## Quickstart
 
-These commands install the API and run the operator against your current
-cluster. They will do more once the sync engine lands.
+The [quickstart](docs/quickstart.md) takes you from an empty kind cluster to a
+Treebind that syncs in both directions, with a Git server in the same cluster, in
+about ten minutes: install the chart, apply one manifest, edit a file in a pod and
+see the commit, push a change from Git and see the file, and read both outcomes in
+`kubectl describe`. Three worked examples follow it: dashboards that people edit in
+an application, a static site that Git deploys and nginx serves, and one directory
+of a monorepo. CI runs every command of these pages on a kind cluster.
 
-```sh
-git clone https://github.com/mohanedmoh/treebind.git && cd treebind
-make install        # install the Treebind CRD into the current cluster
-make run            # run the operator from your machine (the reconciler is a stub today)
-kubectl apply -f config/samples/treebind_v1alpha1_treebind.yaml
-kubectl get treebind
-```
-
-You need Go 1.26 or later, `kubectl` and a cluster such as
-[kind](https://kind.sigs.k8s.io). See [docs/development.md](docs/development.md)
-for the full setup.
-
-To run the operator in the cluster, install the Helm chart. A release will publish
-the chart and both images (the chart is `oci://ghcr.io/mohanedmoh/charts/treebind`).
-Until there is a release, install the chart from a checkout with images that you
-build into your cluster: [docs/development.md](docs/development.md#the-helm-chart)
-has the commands, and `make test-chart` runs them against a throwaway kind cluster.
+Each release publishes the Helm chart, `oci://ghcr.io/mohanedmoh/charts/treebind`,
+and both images, all of them signed, and an `install.yaml` for `kubectl apply`.
+The chart is listed on [Artifact Hub](https://artifacthub.io/packages/helm/treebind/treebind).
+The [chart's README](charts/treebind/README.md) says what it installs, and
+[releasing](docs/releasing.md#verify-a-release) how to check a release. To work on
+Treebind itself, see [docs/development.md](docs/development.md).
 
 ## Storage support
 
