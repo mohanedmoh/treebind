@@ -22,22 +22,39 @@ patch and say so in the notes of the bad release.
 1. Every issue in the milestone is closed or moved, and `main` is green.
 2. Open the draft release notes (see [release.yml](../.github/release.yml) for
    how pull requests are sorted). Each breaking change says what to do instead.
-3. Create an annotated tag on `main` and push it:
+3. Set the version that [the quickstart](quickstart.md) installs, the `--version`
+   of its `helm install`, to the version you are about to tag, without the `v`,
+   in a pull request, and merge it. `hack/quickstart-version.sh` prints the
+   version of the page. The release fails at its first step when the two differ,
+   except that a pre-release may leave the page at a release that is not a
+   pre-release.
+4. Create an annotated tag on `main`, at that merge or after it, and push it:
    ```sh
    git tag -a v0.1.0 -m "v0.1.0"
    git push origin v0.1.0
    ```
-4. Approve the **Release** run on the Actions tab (**Review pending
+5. Approve the **Release** run on the Actions tab (**Review pending
    deployments**, then `ci`), and watch it finish.
-5. Verify the signatures (below).
-6. On a clean kind cluster, install once from `install.yaml` and once from the
-   Helm chart, and apply the sample.
-7. Announce in Discussions with the release link and any upgrade notes.
+6. Verify the signatures (below).
+7. Run the quickstart and the worked examples against what was published:
+   `make test-quickstart RELEASED=1` makes a kind cluster, runs every command of
+   the pages as they are written, with the published chart and images, and
+   deletes the cluster. Then, on a clean kind cluster, install once from
+   `install.yaml`, which the quickstart does not use, and check that the operator
+   rolls out and names the agent image of the release:
+   ```sh
+   kubectl apply -f https://github.com/mohanedmoh/treebind/releases/download/v0.1.0/install.yaml
+   kubectl -n treebind-system rollout status deployment/treebind-controller-manager
+   kubectl -n treebind-system get deployment treebind-controller-manager \
+     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="AGENT_IMAGE")].value}'
+   ```
+8. Announce in Discussions with the release link and any upgrade notes.
 
 ## What the workflow does
 
-1. Checks that the tag is `v` plus a semantic version and that its commit is on
-   `main`.
+1. Checks that the tag is `v` plus a semantic version, that its commit is on
+   `main`, and that the quickstart installs this version (step 3 of the
+   checklist).
 2. Runs lint, the tests and the end-to-end suite again on the tagged commit.
 3. Checks Chainguard's signature on the agent's base image, then builds the
    operator and agent images with [ko](https://ko.build) for
