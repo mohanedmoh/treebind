@@ -21,7 +21,9 @@ helm install treebind oci://ghcr.io/mohanedmoh/charts/treebind --version <versio
 By default the images are `ghcr.io/mohanedmoh/treebind-operator` and `ghcr.io/mohanedmoh/treebind-agent`, tagged `v<version>`.
 Pin a digest by putting it in the repository value (`manager.image.repository=<name>@sha256:...`). How to check the signatures
 of the chart and the images is in
-[releasing.md](https://github.com/mohanedmoh/treebind/blob/main/docs/releasing.md#verify-a-release).
+[releasing.md](https://github.com/mohanedmoh/treebind/blob/main/docs/releasing.md#verify-a-release). The
+[quickstart](https://github.com/mohanedmoh/treebind/blob/main/docs/quickstart.md) installs the chart on a kind cluster and
+syncs a first Treebind.
 
 From a checkout, which has no published images, build them into your cluster and set them as values:
 [development.md](https://github.com/mohanedmoh/treebind/blob/main/docs/development.md#the-helm-chart) has the commands.

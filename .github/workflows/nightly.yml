@@ -1,7 +1,7 @@
 name: Nightly
 
-# Runs the end-to-end suite and the install of the Helm chart against every
-# Kubernetes version in the support window (1.35 to 1.37). It is manual for now:
+# Runs the end-to-end suite, the install of the Helm chart and the quickstart against
+# every Kubernetes version in the support window (1.35 to 1.37). It is manual for now:
 # start it from the Actions tab with "Run workflow". To run it every night again, add back
 #   schedule:
 #     - cron: "17 3 * * *"
@@ -78,11 +78,32 @@ jobs:
       node-image: ${{ matrix.node-image }}
       chart: true
 
+  # The commands of the quickstart and of the worked examples, with the chart and the images built from the checkout.
+  quickstart:
+    name: quickstart (kubernetes ${{ matrix.kubernetes }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kubernetes: "1.35"
+            node-image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          - kubernetes: "1.36"
+            node-image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+          - kubernetes: "1.37"
+            node-image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      kubernetes: ${{ matrix.kubernetes }}
+      node-image: ${{ matrix.node-image }}
+      quickstart: true
+
   # A red nightly becomes an issue. One open issue is kept up to date instead
   # of a new one every night.
   report:
     name: report failure
-    needs: [e2e, e2e-failures, chart-install]
+    needs: [e2e, e2e-failures, chart-install, quickstart]
     if: failure()
     runs-on: ubuntu-latest
     permissions:

@@ -30,13 +30,15 @@ jobs:
         run: echo "Approved."
 
   # Decides whether the slow end-to-end suite is needed. A pull request that
-  # touches only documentation and repository metadata skips it.
+  # touches only documentation and repository metadata skips it, unless it
+  # touches the pages whose commands the quickstart job runs.
   changes:
     name: changes
     needs: approve
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      quickstart: ${{ steps.filter.outputs.quickstart }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -54,13 +56,21 @@ jobs:
           set -euo pipefail
           if [ "$EVENT" != "pull_request" ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "quickstart=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if git diff --name-only "$BASE...$HEAD" \
             | grep -qvE '^(docs/|.*\.md$|LICENSE$|NOTICE$|\.github/(ISSUE_TEMPLATE/|CODEOWNERS$|pull_request_template\.md$))'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "quickstart=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
+            # The commands of these pages are run by the quickstart job, so a change to them is tested like code.
+            if git diff --name-only "$BASE...$HEAD" | grep -qE '^docs/(quickstart\.md$|examples/)'; then
+              echo "quickstart=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "quickstart=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   lint:
@@ -395,13 +405,26 @@ jobs:
     with:
       chart: true
 
+  # The commands of the quickstart and of the worked examples of docs/, run on a kind cluster as a reader copies them, with the
+  # chart and the images of the pull request in place of the published ones (hack/test-quickstart.sh, `make test-quickstart`),
+  # so that the pages cannot say what the code does not do. It runs for a change to the code and for a change to those pages.
+  quickstart:
+    name: quickstart
+    needs: changes
+    if: needs.changes.outputs.quickstart == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      quickstart: true
+
   # The only required check besides dco. A required job that a path filter
   # skips would stay pending and block the merge; this gate treats a skipped
   # job as passing and fails only on a failure or a cancellation.
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e, e2e-failures, chart-install]
+    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e, e2e-failures, chart-install, quickstart]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled

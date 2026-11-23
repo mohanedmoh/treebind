@@ -73,6 +73,26 @@ jobs:
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
 
+      # The quickstart installs a release by its version, which a reader copies, so a release that the page does not
+      # install leaves the page on the one before. The version of the page is set in a pull request before the tag
+      # (docs/releasing.md). A pre-release may leave it at a release that is not a pre-release.
+      - name: Check that the quickstart installs this release
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+          VERSION: ${{ steps.check.outputs.version }}
+          PRERELEASE: ${{ steps.check.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          page="$(hack/quickstart-version.sh)"
+          if [ "$page" = "$VERSION" ]; then
+            echo "docs/quickstart.md installs $page."
+          elif [ "$PRERELEASE" = "true" ] && [[ "$page" != *-* ]]; then
+            echo "docs/quickstart.md installs the release $page, and $TAG is a pre-release."
+          else
+            echo "::error::docs/quickstart.md installs the chart version $page, and the tag is $TAG. Set the --version of the quickstart to $VERSION in a pull request, merge it and tag that commit (docs/releasing.md)."
+            exit 1
+          fi
+
   # 2. The full test suite runs again on the tagged commit.
   test:
     name: test
