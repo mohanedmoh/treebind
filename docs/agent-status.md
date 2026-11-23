@@ -47,7 +47,8 @@ From the same report the operator writes two more conditions and two fields of t
 shows `Ready`, `Synced` and `Conflict`. The decisions behind them are in
 [ADR 0037](adr/0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md).
 Each change of `Synced` and `Conflict` is also an event on the Treebind, and every condition is a metric:
-[metrics and events](metrics-and-events.md).
+[metrics and events](metrics-and-events.md). [The quickstart](quickstart.md#7-read-the-outcome-in-kubectl-describe) shows them on
+a Treebind that syncs, and [an example](examples/dashboards-edited-in-the-application.md) after a conflict that the policy resolved.
 
 ```
 kubectl get treebind <name> -o jsonpath='{.status.conditions[?(@.type=="Synced")]}'
