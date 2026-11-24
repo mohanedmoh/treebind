@@ -60,8 +60,12 @@ minute. It carries on once the cause is put right, with no restart.
 
 - **A volume with data in it does not sync until the directory is emptied or matches the branch.**
   That is on purpose. To back up an existing volume, point the Treebind at an empty repository.
-- **`http://` addresses are refused.** Git over plain http sends everything in the clear. The agent
-  exits at start with the reason in its log. Use `https://`.
+- **`http://` addresses are refused.** Git over plain http sends everything in the clear. The API
+  accepts the address, but the operator creates no sync pod for it: `Ready` is `False` with the reason
+  `UnsupportedRepositoryScheme` as soon as the operator has seen the Treebind, and its message says to
+  use `ssh://` or `https://`. If the Treebind had a sync pod, the operator leaves it as it is until the
+  address changes. An agent that is started with such an address anyway exits at start with the reason in
+  its log.
 - **Changing the branch or the address of a Treebind replaces its sync pod.** The new pod reopens the
   checkout and refuses one that follows another branch or belongs to another repository.
 - **The repository has to answer at every start.** The agent checks that the checkout is of the same

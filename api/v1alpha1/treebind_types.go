@@ -483,6 +483,10 @@ const (
 	// sync objects. The message carries the error, and the sync pod count says
 	// nothing until a reconcile succeeds.
 	ReasonReconcileFailed = "ReconcileFailed"
+	// ReasonUnsupportedRepositoryScheme means spec.repository.url has the scheme http,
+	// which the sync agent refuses at start. The operator creates no sync pod for it and
+	// leaves one that exists as it is, and the message says to use ssh:// or https://.
+	ReasonUnsupportedRepositoryScheme = "UnsupportedRepositoryScheme"
 
 	// ConditionSynced is the type of the condition that says whether the volume
 	// matches the repository at status.lastSyncedCommit. It is True when no step

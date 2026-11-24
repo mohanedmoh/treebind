@@ -274,14 +274,14 @@ var _ = Describe("repository.url", func() {
 		return err == nil, err
 	}
 
-	// The agent takes every address that the API server takes, but one scheme.
+	// The agent takes every address that the API server takes, but one scheme, for which the operator makes no sync pod.
 	It("is taken by the agent whenever the API server takes it, but for http://", func() {
 		ctx := context.Background()
 		var accepted, refused int
 		for _, address := range repositoryURLCandidates() {
 			ok, _ := created(ctx, address)
 			_, agentErr := agentconfig.CheckRepositoryURL(address)
-			if ok && agentErr != nil && !strings.EqualFold(strings.SplitN(address, ":", 2)[0], "http") {
+			if ok && agentErr != nil && !usesPlainHTTP(address) {
 				Fail(fmt.Sprintf("address %q: the API server accepts it, the agent refuses it (%v): "+
 					"a value that the API server takes and the agent refuses leaves a sync pod that exits at start for ever",
 					address, agentErr))
@@ -297,8 +297,9 @@ var _ = Describe("repository.url", func() {
 	})
 
 	// This is the one place where they differ, and it is a known one: the Runner refuses Git
-	// over plain http (NFR-15) and the CRD still admits it. When the CRD stops, this says so.
-	It("admits http://, which the agent refuses at start with its reason", func() {
+	// over plain http (NFR-15) and the CRD still admits it. The operator makes no sync pod for
+	// it and says why in Ready (repository_scheme.go). When the CRD stops, this says so.
+	It("admits http://, which the agent refuses at start with its reason and the operator makes no sync pod for", func() {
 		ctx := context.Background()
 		for _, address := range []string{httpRepositoryURL, "HTTP://git.internal/a.git"} {
 			ok, err := created(ctx, address)
@@ -306,6 +307,7 @@ var _ = Describe("repository.url", func() {
 
 			Expect(ok).To(BeTrue(), "%s: %v", address, err)
 			Expect(agentErr).To(MatchError(ContainSubstring("NFR-15")), address)
+			Expect(usesPlainHTTP(address)).To(BeTrue(), address)
 		}
 	})
 })
