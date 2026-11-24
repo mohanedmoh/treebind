@@ -72,12 +72,26 @@ See the Kubernetes documentation on
 [configuring volume permissions](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods)
 for how `fsGroup` and `fsGroupChangePolicy` behave on your storage driver.
 
+## What the agent checks of the volume
+
+When the sync pod starts, the agent checks that it can write to the volume as the
+user above: it creates, writes to and removes a hidden file at the mount point of
+the claim (the check `Writable`). A claim that is mounted read-only fails it with
+`ReadOnlyVolume`, a directory that the agent's user cannot write to with
+`NotWritable`, and any other failure with `WriteFailed`. The message of
+`NotWritable` names the user, and the owner and mode of the directory. The agent
+stays up and checks again, with a longer wait each time up to a minute, so it
+carries on once you put the volume right. The operator shows a failed check in the
+condition `Synced` ([the conditions](agent-status.md#synced), [the checks of the
+report](agent-status.md#what-the-report-holds)).
+
+Git's refusal of a directory that another user owns does not stop the agent: every
+Git command of the agent sets `safe.directory` to the work tree of the checkout,
+and to nothing else
+([ADR 0013](adr/0013-git-runs-only-through-a-runner-with-a-fixed-configuration.md)).
+
 ## What is still to come
 
-- The agent checks at startup that it can write to the volume and reports a clear
-  condition when it cannot ([#31](https://github.com/mohanedmoh/treebind/issues/31)).
-- Git's `safe.directory` for a checkout owned by another user
-  ([#31](https://github.com/mohanedmoh/treebind/issues/31)).
 - A writable home and temporary directory for the agent. Its root filesystem is
   read-only and Git and SSH write there, so the agent has to keep them on a
   temporary volume
