@@ -676,6 +676,7 @@ const (
 // +kubebuilder:printcolumn:name="Conflict",type=string,JSONPath=`.status.conditions[?(@.type=="Conflict")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata.name) || self.metadata.name.size() <= 56",message="metadata.name must be at most 56 characters, so the sync pod name, the name plus '-sync-0', fits the 63-character DNS label limit"
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata.name) || self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')",message="metadata.name must be a DNS label: lowercase letters, digits and '-' only, no dots, starting with a letter and ending with a letter or digit, because the headless Service of the sync is named after it"
 
 // Treebind is the Schema for the treebinds API
 type Treebind struct {

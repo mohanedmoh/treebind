@@ -50,6 +50,15 @@ Everything else, branch included, stays mutable because the agent can re-sync.
 Cap `metadata.name` at 56 characters: the sync StatefulSet's pod is named
 `<name>-sync-0`, and a pod name must fit the 63-character DNS label limit.
 
+Require `metadata.name` to be a DNS label that starts with a letter: lowercase
+letters, digits and `-`, no dots, starting with a letter and ending with a
+letter or digit. The headless Service of the sync is named `<name>-sync`, and a
+Service name cannot hold a dot. It must also start with a letter on Kubernetes
+1.35, which the chart supports; the relaxed check that allows a digit is on
+from 1.36. The rule uses the strictest of the checks. The apiserver accepts a
+dot or a leading digit in the name of a custom resource, so without the rule the
+Treebind is admitted and then fails to reconcile for ever.
+
 ## Consequences
 
 - A bad object fails at `kubectl apply` with a named field instead of a broken
