@@ -56,8 +56,8 @@ type TreebindReconciler struct {
 	Metrics *Metrics
 	// APIReader reads the sync pod from the API server and not from the cache, so that the operator needs only get on
 	// pods and not a watch of every pod (docs/rbac.md). The reconcile reads the pod only while it is not ready, to say
-	// whether its container was killed for memory. SetupWithManager requires it, and a reconciler without one, as a
-	// test makes, reads no pod.
+	// whether the scheduler cannot place it, its node is not ready or its container was killed for memory.
+	// SetupWithManager requires it, and a reconciler without one, as a test makes, reads no pod.
 	APIReader client.Reader
 
 	// now is time.Now unless a test replaces it.
@@ -205,17 +205,24 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		after = jittered(statusKeysRetry)
 	}
 	// Without a reader of the pod a pass sooner learns nothing new.
-	if r.APIReader != nil && (ready.Reason == treebindv1alpha1.ReasonSyncPodNotReady ||
-		ready.Reason == treebindv1alpha1.ReasonSyncPodOOMKilled) {
+	if r.APIReader != nil && slices.Contains(syncPodNotReadyReasons, ready.Reason) {
 		after = min(after, jittered(syncPodRecheck))
 	}
 	return ctrl.Result{RequeueAfter: after}, nil
 }
 
 // syncPodRecheck is about how soon a pass is asked for again while no sync pod is ready. A pod that has never been ready
-// gives its StatefulSet nothing to change while its container is killed and started again, so no event starts a pass
-// that reads the pod, and Ready would say why only after the refresh of the keys (#256).
+// gives its StatefulSet nothing to change while its container is killed and started again, or while it waits for the
+// scheduler, so no event starts a pass that reads the pod, and Ready would say why only after the refresh of the keys
+// (#256, #266).
 const syncPodRecheck = 30 * time.Second
+
+// syncPodNotReadyReasons are the reasons of Ready while no sync pod is ready: the one of readyCondition, and the ones
+// that whySyncPodNotReady gives once it has read the pod.
+var syncPodNotReadyReasons = []string{
+	treebindv1alpha1.ReasonSyncPodNotReady, treebindv1alpha1.ReasonSyncPodUnschedulable,
+	treebindv1alpha1.ReasonSyncPodNodeNotReady, treebindv1alpha1.ReasonSyncPodOOMKilled,
+}
 
 // ensureSyncObjects creates or updates the Service and then the StatefulSet. It
 // returns the StatefulSet as the API server last reported it, or the error of the
@@ -402,8 +409,9 @@ func syncFailureWaitsForPerson(
 }
 
 // whySyncPodNotReady reads the one pod of the StatefulSet and returns the Ready condition of a sync pod that is not
-// ready with what its container status says of the cause (oomKilledCondition). A pod that is not there yet, or that
-// cannot be read, leaves the condition as it is: the status says less, and the sync is not touched.
+// ready with what the pod says of the cause: the scheduler cannot place it (unschedulableCondition), its node is not
+// ready (nodeNotReadyCondition), or its container was killed for memory (oomKilledCondition). A pod that is not there
+// yet, or that cannot be read, leaves the condition as it is: the status says less, and the sync is not touched.
 func (r *TreebindReconciler) whySyncPodNotReady(
 	ctx context.Context, statefulSet *appsv1.StatefulSet, ready metav1.Condition,
 ) metav1.Condition {
@@ -418,7 +426,83 @@ func (r *TreebindReconciler) whySyncPodNotReady(
 		}
 		return ready
 	}
+	if scheduling := unschedulable(pod); scheduling != nil {
+		return unschedulableCondition(ready, pod.Name, scheduling.Message)
+	}
+	if onNodeThatIsNotReady(pod) {
+		return nodeNotReadyCondition(ready, pod.Name, pod.Spec.NodeName)
+	}
 	return oomKilledCondition(ready, pod, r.clock())
+}
+
+// podCondition returns the condition of the pod of the type, and nil when the pod has none.
+func podCondition(pod *corev1.Pod, conditionType corev1.PodConditionType) *corev1.PodCondition {
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == conditionType {
+			return &pod.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
+// unschedulable returns the PodScheduled condition of a pod that is Pending because the scheduler cannot place it, and
+// nil for any other pod. Its message is the scheduler's, which names what no node has: for a claim whose volume only
+// one node can mount, a volume node affinity conflict and the node that was cordoned or drained (#266).
+func unschedulable(pod *corev1.Pod) *corev1.PodCondition {
+	scheduled := podCondition(pod, corev1.PodScheduled)
+	if pod.Status.Phase != corev1.PodPending || scheduled == nil || scheduled.Status != corev1.ConditionFalse ||
+		scheduled.Reason != corev1.PodReasonUnschedulable {
+		return nil
+	}
+	return scheduled
+}
+
+// unschedulableCondition returns the Ready condition of a sync pod that is Pending because the scheduler cannot place it,
+// with the reason SyncPodUnschedulable and the scheduler's words, cut as the error of a failed reconcile is. While it
+// is Pending the pod has no address, so the operator cannot read the agent, and nothing is synced.
+func unschedulableCondition(ready metav1.Condition, pod, scheduler string) metav1.Condition {
+	why := strings.TrimSpace(scheduler)
+	if len(why) > maxFailureText {
+		why = strings.ToValidUTF8(why[:maxFailureText], "") + "..."
+	}
+	if why == "" {
+		why = "kubectl describe pod " + pod + " says why"
+	}
+	ready.Reason = treebindv1alpha1.ReasonSyncPodUnschedulable
+	ready.Message = fmt.Sprintf("%s: the sync pod %s is Pending, because the scheduler cannot place it: %s",
+		ready.Message, pod, why)
+	return ready
+}
+
+// reasonReadinessGatesNotReady is the reason that the kubelet gives the Ready condition of a pod whose containers are
+// ready and one of whose readiness gates is not.
+const reasonReadinessGatesNotReady = "ReadinessGatesNotReady"
+
+// onNodeThatIsNotReady says whether the pod runs on a node that is not ready, as the pod shows it: its Ready condition
+// is False while its ContainersReady condition is True. The kubelet writes both from the same container statuses, and
+// writes Ready False with ContainersReady True only for a readiness gate, with a reason of its own. A pod with a
+// readiness gate, which a service mesh or a webhook can add, is left out, because whoever owns the gate can hold Ready
+// False for a cause of its own. The node lifecycle controller sets Ready to False on every pod of a node whose Ready
+// condition is not True, and changes nothing else of the pod, so the last word of the kubelet, that the containers are
+// ready, stays (#267). A pod that was not ready already when its node was lost does not show it.
+func onNodeThatIsNotReady(pod *corev1.Pod) bool {
+	ready, containersReady := podCondition(pod, corev1.PodReady), podCondition(pod, corev1.ContainersReady)
+	return pod.Spec.NodeName != "" && len(pod.Spec.ReadinessGates) == 0 && pod.Status.Phase == corev1.PodRunning &&
+		ready != nil && ready.Status == corev1.ConditionFalse && ready.Reason != reasonReadinessGatesNotReady &&
+		containersReady != nil && containersReady.Status == corev1.ConditionTrue
+}
+
+// nodeNotReadyCondition returns the Ready condition of a sync pod whose node is not ready, with the reason
+// SyncPodNodeNotReady, the names of the node and the pod, and what to do. A pod on a node that has stopped cannot end,
+// so the StatefulSet does not replace it, and the operator's calls to it fail: AgentUnreachable says ConnectionFailed
+// after a while, and the cause is no network policy. The taint node.kubernetes.io/out-of-service on a node that is shut
+// down lets Kubernetes delete the pod, so that a new one is made.
+func nodeNotReadyCondition(ready metav1.Condition, pod, node string) metav1.Condition {
+	ready.Reason = treebindv1alpha1.ReasonSyncPodNodeNotReady
+	ready.Message = fmt.Sprintf("%s: the node %s of the sync pod %s is not ready, and the pod is stuck there. "+
+		"If the node is shut down, give it the taint %s with the effect NoExecute, so that Kubernetes deletes the pod "+
+		"and makes a new one", ready.Message, node, pod, corev1.TaintNodeOutOfService)
+	return ready
 }
 
 // reasonOOMKilled is the reason that the kubelet gives a container that the kernel killed for using more memory than
@@ -491,7 +575,7 @@ func (r *TreebindReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Metrics == nil {
 		return errors.New("the metrics of the Treebinds are required")
 	}
-	// Without it Ready would not say that the sync container is killed for memory.
+	// Without it Ready would not say why the sync pod does not run.
 	if r.APIReader == nil {
 		return errors.New("a reader of the sync pods is required")
 	}

@@ -11,6 +11,9 @@
 - Extended by: [0039](0039-ready-names-an-http-repository-address-and-a-sync-container-killed-for-memory-and-the-operator-may-get-a-pod.md), which
   gives `Ready` two reasons of its own: `UnsupportedRepositoryScheme` for an `http://` repository address, and
   `SyncPodOOMKilled` for a sync container that was killed for memory
+- Extended by: [0040](0040-ready-names-a-sync-pod-that-cannot-be-placed-and-a-node-that-is-not-ready-and-synced-is-unknown-without-a-report.md),
+  which gives `Ready` two more reasons of its own: `SyncPodUnschedulable` for a sync pod that the scheduler cannot place, and
+  `SyncPodNodeNotReady` for a sync pod whose node is not ready
 
 ## Context
 

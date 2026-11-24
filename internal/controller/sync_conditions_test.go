@@ -203,6 +203,8 @@ type syncCase struct {
 	report    *status.Report
 	// unreachable is the status of AgentUnreachable after the poll, False when it is empty.
 	unreachable metav1.ConditionStatus
+	// unreadFor is how long the polls have got no report, for any reason.
+	unreadFor time.Duration
 	// synced and conflict are the conditions the poll writes, and nil when it leaves them as they are.
 	synced, conflict *wantCondition
 	// commit is the commit the poll writes into status.lastSyncedCommit, with agreedAt, and none when it is empty.
@@ -563,6 +565,32 @@ func syncCases() []syncCase {
 			report:      syncReport(bidirectional, commitTwo),
 			unreachable: unknown,
 		},
+
+		// No report for the time, while AgentUnreachable stays Unknown: a sync pod that is Pending, whose name does not
+		// resolve, or an operator that has no token (#266).
+		{
+			name:        "no report for just under the time leaves everything",
+			direction:   bidirectional,
+			current:     agreedStatus(commitOne),
+			unreachable: unknown,
+			unreadFor:   statusUnreachableAfter - time.Nanosecond,
+		},
+		{
+			name:        "no report for the time, while AgentUnreachable is Unknown",
+			direction:   bidirectional,
+			current:     agreedStatus(commitOne),
+			unreachable: unknown,
+			unreadFor:   statusUnreachableAfter,
+			synced:      unreachableSynced, conflict: unreachableConflict,
+		},
+		{
+			name:        "no report for longer, when the Treebind only pulls",
+			direction:   pullOnly,
+			current:     agreedStatus(commitOne),
+			unreachable: unknown,
+			unreadFor:   time.Hour,
+			synced:      unreachableSynced, conflict: unreachableConflict,
+		},
 		{
 			name:      "no report leaves everything",
 			direction: bidirectional,
@@ -580,7 +608,7 @@ func TestTheSyncConditionsForAReport(t *testing.T) {
 			}
 			treebind := syncTreebind(tc.direction, tc.current)
 
-			got := syncStatusOf(treebind, tc.report, unreachable, hashOfSpec)
+			got := syncStatusOf(treebind, tc.report, unreachable, tc.unreadFor, hashOfSpec)
 
 			expectCondition(t, treebindv1alpha1.ConditionSynced, got.synced, tc.synced)
 			expectCondition(t, treebindv1alpha1.ConditionConflict, got.conflict, tc.conflict)
@@ -639,13 +667,13 @@ func TestAPollThatFindsTheSameThingChangesNothing(t *testing.T) {
 				unreachable = no
 			}
 			treebind := syncTreebind(tc.direction, tc.current)
-			changed := syncStatusOf(treebind, tc.report, unreachable, hashOfSpec).apply(&treebind.Status)
+			changed := syncStatusOf(treebind, tc.report, unreachable, tc.unreadFor, hashOfSpec).apply(&treebind.Status)
 			if wantChange := tc.synced != nil || tc.conflict != nil || tc.commit != ""; changed != wantChange {
 				t.Errorf("the first poll says changed = %v, want %v", changed, wantChange)
 			}
 
 			stored := roundTrip(t, treebind)
-			if syncStatusOf(stored, tc.report, unreachable, hashOfSpec).apply(&stored.Status) {
+			if syncStatusOf(stored, tc.report, unreachable, tc.unreadFor, hashOfSpec).apply(&stored.Status) {
 				t.Errorf("the same poll again changed the status, so the poller would write at every poll")
 			}
 		})
@@ -658,7 +686,7 @@ func TestLastSyncTimeIsWrittenInWholeSeconds(t *testing.T) {
 	report.LastSynced.Time = agreedWithin
 	treebind := syncTreebind(bidirectional, treebindv1alpha1.TreebindStatus{})
 
-	if !syncStatusOf(treebind, report, no, hashOfSpec).apply(&treebind.Status) {
+	if !syncStatusOf(treebind, report, no, 0, hashOfSpec).apply(&treebind.Status) {
 		t.Fatalf("the first agreement changed nothing")
 	}
 	written := treebind.Status.LastSyncTime
@@ -670,7 +698,7 @@ func TestLastSyncTimeIsWrittenInWholeSeconds(t *testing.T) {
 		t.Errorf("lastSyncTime is %v as written and %v as stored: the status that the poller holds is not the one "+
 			"that the API server keeps", written, stored.Status.LastSyncTime)
 	}
-	if syncStatusOf(stored, report, no, hashOfSpec).apply(&stored.Status) {
+	if syncStatusOf(stored, report, no, 0, hashOfSpec).apply(&stored.Status) {
 		t.Errorf("the same report changed the stored status again")
 	}
 }
@@ -682,7 +710,7 @@ func TestAReportWithNoHashIsNotOfASpecWithNone(t *testing.T) {
 	report.TemplateHash = ""
 	treebind := syncTreebind(bidirectional, treebindv1alpha1.TreebindStatus{})
 
-	got := syncStatusOf(treebind, report, no, "")
+	got := syncStatusOf(treebind, report, no, 0, "")
 
 	outdatedSynced, outdatedConflict := bothUnknown(reasonOutdated, msgOutdated)
 	expectCondition(t, treebindv1alpha1.ConditionSynced, got.synced, outdatedSynced)
@@ -709,10 +737,10 @@ func TestTheMessagesStayWhileTheCauseStays(t *testing.T) {
 	restarted.StartedAt = agreedAt.Add(3 * time.Hour)
 
 	treebind := syncTreebind(bidirectional, treebindv1alpha1.TreebindStatus{})
-	made := syncStatusOf(treebind, first, no, hashOfSpec)
+	made := syncStatusOf(treebind, first, no, 0, hashOfSpec)
 	made.apply(&treebind.Status)
 	for _, report := range []*status.Report{later, restarted} {
-		again := syncStatusOf(treebind, report, no, hashOfSpec)
+		again := syncStatusOf(treebind, report, no, 0, hashOfSpec)
 		if again.synced.Message != made.synced.Message || again.conflict.Message != made.conflict.Message {
 			t.Errorf("the messages changed while the cause stayed:\n%q\n%q\nwant\n%q\n%q",
 				again.synced.Message, again.conflict.Message, made.synced.Message, made.conflict.Message)

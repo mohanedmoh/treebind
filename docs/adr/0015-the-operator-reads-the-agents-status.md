@@ -6,6 +6,9 @@
 - Extended by: [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), which
   tells a report of the current spec from one of the spec before by the hash of the pod template and not by a
   generation, and writes `Synced` and `Conflict` from the report
+- Extended by: [0040](0040-ready-names-a-sync-pod-that-cannot-be-placed-and-a-node-that-is-not-ready-and-synced-is-unknown-without-a-report.md), which
+  makes `Synced` and `Conflict` `Unknown` once no report has been read for 3 minutes after one was, also while
+  `AgentUnreachable` is `Unknown`, and points `ConnectionFailed` to the node of a sync pod whose node is not ready
 
 ## Context
 

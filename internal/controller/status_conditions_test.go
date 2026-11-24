@@ -396,6 +396,133 @@ func TestReadyNamesTheMemoryLimitOfASyncContainerThatWasKilledForMemory(t *testi
 	}
 }
 
+// The names of the sync pod and of its node in the tests of why the pod does not run, and the words of the scheduler
+// on the kind cluster of #266 after a drain of the node of a claim of local-path.
+const (
+	podOfSync        = "app-sync-0"
+	nodeOfSync       = "kind-worker2"
+	schedulerMessage = "0/3 nodes are available: 1 node(s) had untolerated taint(s), " +
+		"1 node(s) had volume node affinity conflict, 1 node(s) were unschedulable. " +
+		"preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling."
+	messageUnschedulable = messageNoPodReady + ": the sync pod " + podOfSync +
+		" is Pending, because the scheduler cannot place it: "
+	messageNodeNotReady = messageNoPodReady + ": the node " + nodeOfSync + " of the sync pod " + podOfSync +
+		" is not ready, and the pod is stuck there. If the node is shut down, give it the taint " +
+		"node.kubernetes.io/out-of-service with the effect NoExecute, so that Kubernetes deletes the pod and makes a new one"
+)
+
+// pendingSyncPod is the sync pod as it waits for the scheduler, with the status, the reason and the message of its
+// PodScheduled condition.
+func pendingSyncPod(scheduled corev1.ConditionStatus, reason, message string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podOfSync, Namespace: nsApps},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{
+			{Type: corev1.PodScheduled, Status: scheduled, Reason: reason, Message: message},
+		}},
+	}
+}
+
+// runningSyncPod is the sync pod as it runs on its node and is not ready, with the reason of its Ready condition and the
+// ContainersReady condition of the status.
+func runningSyncPod(readyReason string, containersReady corev1.ConditionStatus) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podOfSync, Namespace: nsApps},
+		Spec:       corev1.PodSpec{NodeName: nodeOfSync},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{
+			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+			{Type: corev1.ContainersReady, Status: containersReady},
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: readyReason},
+		}},
+	}
+}
+
+// A sync pod that does not run has a cause that the pod shows, and Ready names it (#266, #267): a pod that the scheduler
+// cannot place, with the scheduler's words, and a pod on a node that is not ready, with the node, the pod and the taint
+// that lets it be replaced. The node lifecycle controller marks the pods of a node that is not ready as not ready and
+// leaves the kubelet's last word, that the containers are ready, which the kubelet itself never writes with Ready False
+// but for a readiness gate. Any other pod, and a pod whose node is back, says SyncPodNotReady as before. The reconcile
+// looks at the pod again soon for each of these reasons.
+func TestReadyNamesWhyTheSyncPodDoesNotRun(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	evicted := func(pod *corev1.Pod) *corev1.Pod {
+		deleted := metav1.NewTime(now.Add(-time.Hour))
+		pod.DeletionTimestamp = &deleted
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "DeletionByTaintManager",
+			Message: "Taint manager: deleting due to NoExecute taint",
+		})
+		return pod
+	}
+	withReadinessGate := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: "mesh.example.org/ready"}}
+		return pod
+	}
+	long := strings.Repeat("x", maxFailureText+10)
+
+	tests := []struct {
+		name        string
+		pod         *corev1.Pod
+		wantReason  string
+		wantMessage string
+	}{
+		{"Pending, because the volume can only be mounted on a node that is cordoned",
+			pendingSyncPod(corev1.ConditionFalse, corev1.PodReasonUnschedulable, schedulerMessage),
+			treebindv1alpha1.ReasonSyncPodUnschedulable, messageUnschedulable + schedulerMessage},
+		{"Pending, and the scheduler gave no words",
+			pendingSyncPod(corev1.ConditionFalse, corev1.PodReasonUnschedulable, ""),
+			treebindv1alpha1.ReasonSyncPodUnschedulable,
+			messageUnschedulable + "kubectl describe pod " + podOfSync + " says why"},
+		{"Pending, and the words of the scheduler are cut",
+			pendingSyncPod(corev1.ConditionFalse, corev1.PodReasonUnschedulable, long),
+			treebindv1alpha1.ReasonSyncPodUnschedulable, messageUnschedulable + long[:maxFailureText] + "..."},
+		{"Pending, and held by a scheduling gate",
+			pendingSyncPod(corev1.ConditionFalse, corev1.PodReasonSchedulingGated, "Scheduling is blocked"),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"Pending on a node, while its container is made",
+			pendingSyncPod(corev1.ConditionTrue, "", ""),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"Running on a node that is not ready",
+			runningSyncPod("", corev1.ConditionTrue),
+			treebindv1alpha1.ReasonSyncPodNodeNotReady, messageNodeNotReady},
+		{"Terminating on a node that is not ready, after the taint manager deleted it",
+			evicted(runningSyncPod("", corev1.ConditionTrue)),
+			treebindv1alpha1.ReasonSyncPodNodeNotReady, messageNodeNotReady},
+		{"Running on a ready node, before its first pull",
+			runningSyncPod("ContainersNotReady", corev1.ConditionFalse),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"Running on a ready node, with a readiness gate that is not met",
+			runningSyncPod(reasonReadinessGatesNotReady, corev1.ConditionTrue),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"Running with a readiness gate, whose owner holds Ready False without a reason",
+			withReadinessGate(runningSyncPod("", corev1.ConditionTrue)),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"the node is back, and its kubelet says that the container is not ready",
+			evicted(runningSyncPod("ContainersNotReady", corev1.ConditionFalse)),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &podReader{pod: tt.pod}
+			reconciler := &TreebindReconciler{APIReader: reader, now: func() time.Time { return now }}
+			statefulSet := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "app-sync", Namespace: nsApps}}
+			notReady := metav1.Condition{
+				Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+				Reason: treebindv1alpha1.ReasonSyncPodNotReady, Message: messageNoPodReady, ObservedGeneration: 7,
+			}
+
+			got := reconciler.whySyncPodNotReady(context.Background(), statefulSet, notReady)
+
+			assertReady(t, got, metav1.ConditionFalse, tt.wantReason, tt.wantMessage)
+			if got.Type != treebindv1alpha1.ConditionReady || got.ObservedGeneration != notReady.ObservedGeneration {
+				t.Errorf("type/observedGeneration = %s/%d, want those of the condition it was given", got.Type, got.ObservedGeneration)
+			}
+			if !slices.Contains(syncPodNotReadyReasons, got.Reason) {
+				t.Errorf("the reconcile does not look at the pod again soon while Ready says %s", got.Reason)
+			}
+		})
+	}
+}
+
 func TestAddAwaitingReportConditions(t *testing.T) {
 	existing := func(conditionType string, status metav1.ConditionStatus, reason string) metav1.Condition {
 		return metav1.Condition{Type: conditionType, Status: status, Reason: reason, ObservedGeneration: 1}

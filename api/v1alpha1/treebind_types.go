@@ -479,6 +479,14 @@ const (
 	// ReasonSyncPodOOMKilled means the sync pod is not ready because its container
 	// was killed for using more memory than its limit. The message names the limit.
 	ReasonSyncPodOOMKilled = "SyncPodOOMKilled"
+	// ReasonSyncPodUnschedulable means the sync pod is Pending because the scheduler
+	// cannot place it, as for a volume that only a cordoned node can mount. The
+	// message gives the scheduler's words.
+	ReasonSyncPodUnschedulable = "SyncPodUnschedulable"
+	// ReasonSyncPodNodeNotReady means the sync pod is not ready because the node it
+	// runs on is not ready. The message names the node and the pod, and the taint
+	// that lets the pod be replaced when the node is shut down.
+	ReasonSyncPodNodeNotReady = "SyncPodNodeNotReady"
 	// ReasonNotSynced means the sync pod is ready but the volume is not in sync
 	// with the repository. The message names the reason of the Synced condition.
 	ReasonNotSynced = "NotSynced"
