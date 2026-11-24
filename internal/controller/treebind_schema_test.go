@@ -263,6 +263,33 @@ var _ = Describe("Treebind schema", func() {
 		Expect(k8sClient.Delete(ctx, longest)).To(Succeed())
 	})
 
+	DescribeTable("refuses a metadata.name that the headless Service of the sync cannot be named after",
+		func(name string) {
+			err := k8sClient.Create(ctx, newTreebind(name))
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring("must be a DNS label")))
+		},
+		Entry("with a dot", "a.b"),
+		Entry("with a dot after a dash", "dashboards-.prod"),
+		Entry("with upper-case letters", "Dashboards"),
+		Entry("with an underscore", "dash_boards"),
+		Entry("with a leading '-'", "-dashboards"),
+		Entry("with a trailing '-'", "dashboards-"),
+		// A Service name must start with a letter on Kubernetes 1.35, which the chart
+		// supports; the relaxed check that allows a digit is on from 1.36.
+		Entry("that starts with a digit", "9dashboards"),
+	)
+
+	DescribeTable("accepts a metadata.name that the headless Service of the sync can be named after",
+		func(name string) {
+			tb := newTreebind(name)
+			Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, tb)).To(Succeed())
+		},
+		Entry("of one letter", "a"),
+		Entry("with dashes and digits", "dash-boards-2"),
+	)
+
 	It("stores the status fields through the status subresource", func() {
 		tb := newTreebind("schema-status")
 		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
