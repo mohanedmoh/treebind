@@ -458,6 +458,33 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(condition.ObservedGeneration).To(Equal(got.Generation))
 		})
 
+		// A pod that has never been ready changes nothing in its StatefulSet while its container is killed and started
+		// again, so the reconcile asks for itself again soon and reads the pod again (#256).
+		It("says that the sync container was killed for memory, looks again soon, and reads no pod once it is ready", func() {
+			reader := &podReader{pod: syncPodWith(false, waitingToStartAgain(), oomKilledAt(time.Now()))}
+			controllerReconciler.APIReader = reader
+
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reader.reads).To(Equal(1))
+			Expect(reader.asked).To(Equal(client.ObjectKey{Namespace: resourceNamespace, Name: syncNamespacedName.Name + "-0"}))
+			ready := findCondition(treebindv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonSyncPodOOMKilled))
+			Expect(ready.Message).To(Equal(messageOOMKilled))
+			Expect(result.RequeueAfter).To(BeNumerically(">=", syncPodRecheck*4/5))
+			Expect(result.RequeueAfter).To(BeNumerically("<=", syncPodRecheck*6/5))
+
+			makeSyncPodReady()
+			result, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reader.reads).To(Equal(1), "the pod is read again while the StatefulSet has a ready pod")
+			Expect(findCondition(treebindv1alpha1.ConditionReady).Reason).To(Equal(treebindv1alpha1.ReasonSyncPodReady))
+			Expect(result.RequeueAfter).To(BeNumerically(">=", statusKeysRefresh*4/5))
+		})
+
 		It("reports a failed reconcile in Ready, publishes the rest of the status and returns the error", func() {
 			breakTemplate()
 

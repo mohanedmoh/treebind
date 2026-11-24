@@ -32,6 +32,14 @@ const nullDevice = "/dev/null"
 // falseValue is the value of the settings that switch something off.
 const falseValue = "false"
 
+// bigFileThreshold is the size above which Git streams a blob, in a fetch (index-pack, and unpack-objects from Git 2.39),
+// in add and in push, instead of holding it whole in memory (#256). With Git's default of 512 MiB a fetch of a new
+// 200 MB file held all of it, and the sync container is killed at its memory limit of 128 MiB. Below the threshold
+// Git still holds a blob whole, and a push that looks for a delta holds two of them and an index, so it stays well
+// below what the container has beside the agent. A blob above it is stored without a delta and counts as binary,
+// which changes nothing for the agent: it never shows a diff of the content.
+const bigFileThreshold = "16m"
+
 // setting is one configuration value that the Runner passes on the command line
 // of every Git command. A value given with -c is read after every configuration
 // file, so it beats whatever the repository's own config says, including what
@@ -83,6 +91,8 @@ var fixedSettings = []setting{
 	{"gpg.ssh.defaultKeyCommand", "", "names a program that finds the key to sign with"},
 	{"gc.auto", "0", "a commit, merge or fetch would start a gc that detaches from the call and from its process group"},
 	{"maintenance.auto", falseValue, "a commit, merge or fetch would start maintenance tasks that the config selects"},
+	{"core.bigFileThreshold", bigFileThreshold, "a larger value, Git's default among them, holds a large file whole in " +
+		"memory, beyond the memory limit of the sync container"},
 }
 
 // allowedProtocols are the transports Git may use. GIT_ALLOW_PROTOCOL replaces

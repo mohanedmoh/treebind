@@ -312,7 +312,8 @@ becomes the repository's. If your directory had deleted the file, it is not in t
 
 To keep both edits of a file after `followRemote`, join them, which Git can when they changed different places. The file that is in
 your directory now is the repository's version, the common ancestor is the commit that the two sides shared, and the result is
-written beside the file and not over it:
+written beside the file and not over it. Where both edits changed the same place, Git cannot choose, and it leaves both versions in
+the result between marks that begin with `<<<<<<<` and `>>>>>>>`. The block shows the result and says how many such places it has:
 
 <!-- tested: join-the-two-versions-of-a-file -->
 ```sh
@@ -320,10 +321,33 @@ export GIT_DIR="$MOUNT/.treebind/git" GIT_WORK_TREE="$MOUNT/$SUB"
 WORK=$(mktemp -d)
 git show "$(git merge-base "$REF" HEAD):$FILE" > "$WORK/shared"
 git show "$REF:$FILE" > "$WORK/yours"
-git merge-file -p "$GIT_WORK_TREE/$FILE" "$WORK/shared" "$WORK/yours" > "$WORK/joined"
-# The exit status of merge-file is the number of places that both edits changed, which are marked <<<<<<< and >>>>>>> in joined.
-# Read $WORK/joined, put it right if it has such marks, and then put it where the application reads it:
-cp "$WORK/joined" "$GIT_WORK_TREE/$FILE"
+# The exit status of merge-file is the number of places that both edits changed, up to 127, and 255 when it could not do its work.
+# It is kept in STATUS, so that a conflict does not stop the block, and shown below.
+STATUS=0
+git merge-file -p "$GIT_WORK_TREE/$FILE" "$WORK/shared" "$WORK/yours" > "$WORK/joined" || STATUS=$?
+if [ "$STATUS" -eq 255 ]; then
+  rm -f "$WORK/joined"
+  echo "merge-file failed with exit status 255: nothing was joined, and your directory is as it was"
+else
+  cat "$WORK/joined"
+  echo "merge-file exit status $STATUS, places marked: $(grep -c '^<<<<<<<' "$WORK/joined"), joined file $WORK/joined, your directory is as it was"
+fi
+```
+
+Read the result. Where it has marks, put it right in `$WORK/joined`: keep one of the two versions, or write both in, and take out the
+marks. Run the next command only then, in the same terminal: the agent commits and pushes what is in your directory once it has
+settled, marks included. It puts the joined file where the application reads it, and does not copy a file that still has a line that
+begins with `<<<<<<<` or `>>>>>>>`:
+
+<!-- tested: put-the-joined-file-in-place -->
+```sh
+if [ -z "$WORK" ] || [ -z "$FILE" ] || [ -z "$MOUNT" ] || [ -z "$SUB" ] || [ ! -f "$WORK/joined" ]; then
+  echo "WORK, FILE, MOUNT or SUB is not set, or there is no joined file: run the block above first, in this terminal. Nothing was copied"
+elif grep -q -e '^<<<<<<<' -e '^>>>>>>>' "$WORK/joined"; then
+  echo "$WORK/joined still has conflict marks: take them out and run this block again. Nothing was copied"
+else
+  cp "$WORK/joined" "$MOUNT/$SUB/$FILE"
+fi
 ```
 
 With `followLocal` it is the repository's version that lost. It is in the last merge that the agent made:

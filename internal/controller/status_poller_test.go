@@ -1048,14 +1048,19 @@ func TestTheControllersWillNotStartWithoutTheirEventsAndMetrics(t *testing.T) {
 	reconciler := &TreebindReconciler{
 		AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject, StatusKeys: newTestPublisher(),
 	}
+	noPods := &TreebindReconciler{
+		AgentImage: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject, StatusKeys: newTestPublisher(),
+		Metrics: metrics,
+	}
 
 	for name, setup := range map[string]struct {
 		err  error
 		want string
 	}{
-		"a poller with no recorder":               {noRecorder.SetupWithManager(nil), "recorder of the events"},
-		"a poller with no metrics":                {noMetrics.SetupWithManager(nil), "metrics of the Treebinds"},
-		"a reconcile of the spec with no metrics": {reconciler.SetupWithManager(nil), "metrics of the Treebinds"},
+		"a poller with no recorder":                         {noRecorder.SetupWithManager(nil), "recorder of the events"},
+		"a poller with no metrics":                          {noMetrics.SetupWithManager(nil), "metrics of the Treebinds"},
+		"a reconcile of the spec with no metrics":           {reconciler.SetupWithManager(nil), "metrics of the Treebinds"},
+		"a reconcile of the spec with no reader of the pod": {noPods.SetupWithManager(nil), "reader of the sync pods"},
 	} {
 		// The manager is nil, so an error of the controller builder would pass for the refusal: the text has to be
 		// the operator's own.

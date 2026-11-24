@@ -120,6 +120,9 @@ func fullVolume() {
 // WriteFailed once the restarted agent reports, with Ready False; after the volume is freed it says SyncPending, and then InSync.
 func fillAndFree(t syncTarget, node string) {
 	before := syncedAtSeed(t)
+	// The agent stops while the volume is full, and what it said before is read from this, and not from the pod after its container has
+	// ended (followAgentLog).
+	stoppedLog := followAgentLog(t)
 
 	By("checking that the volume of the claim is a tmpfs, as the pod of the application sees it")
 	filesystem, err := utils.Run(exec.Command("kubectl", "-n", t.namespace, "exec", t.appPod, "--", "stat", "-f", "-c", "%T", t.appMount))
@@ -176,8 +179,7 @@ func fillAndFree(t syncTarget, node string) {
 		"-o", "jsonpath={.status.containerStatuses[0].lastState.terminated.exitCode}"))
 	Expect(err).NotTo(HaveOccurred(), "Failed to read the pod of the sync")
 	Expect(exitCode).To(Equal("3"), "the agent did not stop as one that lost the writer lock")
-	previous, err := utils.Run(exec.Command("kubectl", "logs", t.syncPodName(), "-n", t.namespace, "--previous"))
-	Expect(err).NotTo(HaveOccurred(), "Failed to read the log of the agent that stopped")
+	previous := stoppedLog.logOfEndedContainer(Default)
 	_, _ = fmt.Fprintf(GinkgoWriter, "the log of the agent that stopped:\n%s\n", previous)
 	// The agent says that the heartbeat of the lock could not be written, with the error of the volume, and not that another agent took it.
 	Expect(previous).To(ContainSubstring("the heartbeat of the writer lock could not be written for a whole TTL"))

@@ -199,12 +199,28 @@ says `the loop of the agent did not beat within what it promised`, with how late
 | The same, for longer | No pull has passed | The `Pull` check: its reason says what is in the way, and [pulling](pull.md) says what to do |
 | The same, with `BranchGone` | The repository has no such branch, or no commit at all yet | Put a commit on the branch, or set `spec.repository.branch` to one that exists. A Treebind that syncs in both directions turns ready by itself when its first commit is pushed |
 | The same, and the `Pull` check is `Skipped` with `NotChecked` | The volume, the lock or the checkout has not passed | The check that failed, in the same report |
+| There is no sync pod, and `Ready` is `False` with `UnsupportedRepositoryScheme` | `spec.repository.url` has the scheme `http://`, which the agent refuses, so the operator creates no sync pod. A sync pod that the Treebind had is left as it was, and `Synced` says `AgentOutdated` for it | Use an `ssh://` or `https://` address: [the checkout](checkout.md#things-to-know) says why |
 | The pod is `1/1`, and `Ready` is `False` with `NotSynced` | A step of the sync failed for a reason that a person puts right | `Synced`: its reason and message, then the check of the same name in the report ([`Synced` and `Ready`](#ready)) |
 | The container restarts, and `kubectl describe pod` shows `Liveness probe failed: HTTP probe failed with statuscode: 503` | The loop was stuck: a step took longer than it promised, most often a call on a volume that does not answer | The log of the container before the restart (`kubectl logs --previous`), for the line about the loop and how late it was, and the volume |
+| The container restarts, and `Ready` is `False` with `SyncPodOOMKilled` | The container was killed for using more memory than its limit, which the message names. Git needed it, for a large file, and every restart is killed again on the same pull | [Large files](#large-files) |
 
 While the pod is not ready, `kubectl describe pod` shows the event `Readiness probe failed: HTTP probe failed with
 statuscode: 503`. That is the probe doing its work and not a fault of its own. A repository that has no commit yet says
 `BranchGone` with the words "has no branch ... any more", which is also what a branch that was deleted says.
+
+## Large files
+
+The sync container has a memory limit of 128 MiB, and `spec.agent.resources` does not change it yet
+([#96](https://github.com/mohanedmoh/treebind/issues/96)). Git streams a file larger than 16 MiB between the Git host and the
+disk instead of holding it in memory, so a file that is new to the branch needs no more memory for being large: one of 200 MB
+syncs with the default limit. A file larger than 16 MiB is not stored as a delta, so every change to it is sent whole on a
+push. A change of a large file that a pull brings can need more memory: when the Git host sends the new version as a delta of
+the old one, Git builds it in memory from the old one, with about four times the size of the file in all, so with the default limit
+such a change works for a file of up to about 25 MB. When Git needs more than the limit, the container is killed, every restart
+is killed again on the same pull, and `Ready` is `False` with the reason `SyncPodOOMKilled` and a message that names the limit.
+While no sync pod is ready the operator looks at the pod about every 30 seconds, so `Ready` says it within about half a minute
+of the kill, and it names a kill that ended at most 10 minutes before for a container that runs again and is not ready. A later
+commit that removes the file does not help, because a pull fetches every commit of the branch.
 
 ## How the keys reach the agent
 

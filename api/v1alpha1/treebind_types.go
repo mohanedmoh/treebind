@@ -476,6 +476,9 @@ const (
 	ReasonSyncPodReady = "SyncPodReady"
 	// ReasonSyncPodNotReady means the sync StatefulSet has no ready pod.
 	ReasonSyncPodNotReady = "SyncPodNotReady"
+	// ReasonSyncPodOOMKilled means the sync pod is not ready because its container
+	// was killed for using more memory than its limit. The message names the limit.
+	ReasonSyncPodOOMKilled = "SyncPodOOMKilled"
 	// ReasonNotSynced means the sync pod is ready but the volume is not in sync
 	// with the repository. The message names the reason of the Synced condition.
 	ReasonNotSynced = "NotSynced"
@@ -483,6 +486,10 @@ const (
 	// sync objects. The message carries the error, and the sync pod count says
 	// nothing until a reconcile succeeds.
 	ReasonReconcileFailed = "ReconcileFailed"
+	// ReasonUnsupportedRepositoryScheme means spec.repository.url has the scheme http,
+	// which the sync agent refuses at start. The operator creates no sync pod for it and
+	// leaves one that exists as it is, and the message says to use ssh:// or https://.
+	ReasonUnsupportedRepositoryScheme = "UnsupportedRepositoryScheme"
 
 	// ConditionSynced is the type of the condition that says whether the volume
 	// matches the repository at status.lastSyncedCommit. It is True when no step
@@ -676,6 +683,7 @@ const (
 // +kubebuilder:printcolumn:name="Conflict",type=string,JSONPath=`.status.conditions[?(@.type=="Conflict")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata.name) || self.metadata.name.size() <= 56",message="metadata.name must be at most 56 characters, so the sync pod name, the name plus '-sync-0', fits the 63-character DNS label limit"
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata.name) || self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')",message="metadata.name must be a DNS label: lowercase letters, digits and '-' only, no dots, starting with a letter and ending with a letter or digit, because the headless Service of the sync is named after it"
 
 // Treebind is the Schema for the treebinds API
 type Treebind struct {
