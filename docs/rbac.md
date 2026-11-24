@@ -36,10 +36,12 @@ hold each list above exactly, so a verb cannot be added by accident.
 ## Install in some namespaces only
 
 By default the operator serves the Treebinds of every namespace, and its role is a ClusterRole. With the chart
-you can limit it to the namespaces you name:
+you can limit it to the namespaces you name. `<version>` is the version of the release, without the leading `v`, as in
+[the quickstart](quickstart.md#1-install-the-operator):
 
 ```sh
-helm install treebind charts/treebind --namespace treebind-system --create-namespace \
+helm install treebind oci://ghcr.io/mohanedmoh/charts/treebind --version <version> \
+  --namespace treebind-system --create-namespace \
   --set rbac.namespaced=true \
   --set 'rbac.namespaces={apps,tools}'
 ```
@@ -82,8 +84,9 @@ objects yet. The volume details of the status of a Treebind will (#98), and say 
 not there. It is off by default:
 
 ```sh
-# the chart
-helm upgrade treebind charts/treebind --namespace treebind-system --reuse-values --set rbac.volumeRead.enabled=true
+# the chart, at the version that is installed (the APP VERSION of helm list --namespace treebind-system)
+helm upgrade treebind oci://ghcr.io/mohanedmoh/charts/treebind --version <version> \
+  --namespace treebind-system --reuse-values --set rbac.volumeRead.enabled=true
 ```
 
 For kustomize, uncomment the two lines under `[VOLUME READ]` in `config/default/kustomization.yaml`, which add
