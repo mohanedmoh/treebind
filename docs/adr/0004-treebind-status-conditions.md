@@ -8,6 +8,9 @@
   `NotSynced` only for a failure that waits for a person
 - Extended by: [0038](0038-the-operator-records-an-event-and-a-metric-where-it-writes-a-condition-of-the-sync.md), which records an event and a
   metric for each change of `Synced` and `Conflict`, and exports the state of every condition as a metric
+- Extended by: [0039](0039-ready-names-an-http-repository-address-and-a-sync-container-killed-for-memory-and-the-operator-may-get-a-pod.md), which
+  gives `Ready` two reasons of its own: `UnsupportedRepositoryScheme` for an `http://` repository address, and
+  `SyncPodOOMKilled` for a sync container that was killed for memory
 
 ## Context
 
