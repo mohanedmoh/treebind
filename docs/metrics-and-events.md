@@ -73,7 +73,12 @@ TOKEN=$(kubectl -n treebind-system create token metrics-probe)
 # The pod that holds the lease is the one that has the metrics of the Treebinds:
 LEADER=$(kubectl -n treebind-system get lease c4984a8a.example.org -o jsonpath='{.spec.holderIdentity}' | cut -d_ -f1)
 kubectl -n treebind-system port-forward "pod/$LEADER" 8443:8443 &
+FORWARD=$!
+# The port-forward listens a moment after it starts, so ask until it answers, for 10 seconds at most:
+for i in $(seq 10); do curl -sk -o /dev/null https://127.0.0.1:8443/metrics && break; sleep 1; done
+curl -sk -o /dev/null https://127.0.0.1:8443/metrics || echo "the port-forward did not answer: check the pod name and that port 8443 is free"
 curl -sk -H "Authorization: Bearer $TOKEN" https://127.0.0.1:8443/metrics | grep '^treebind_'
+kill $FORWARD
 ```
 
 <!-- families -->

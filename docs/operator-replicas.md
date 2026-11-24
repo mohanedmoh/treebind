@@ -100,8 +100,13 @@ the lease on its own.
 kubectl -n treebind-system scale deployment/treebind-controller-manager --replicas=1
 
 # the Helm chart
-helm upgrade --install treebind charts/treebind --set manager.replicas=1
+helm upgrade --install treebind oci://ghcr.io/mohanedmoh/charts/treebind --version <version> \
+  --namespace treebind-system --create-namespace --reuse-values --set manager.replicas=1
 ```
+
+`<version>` is the version of the release without the leading `v`. The chart and the release have the same version, so for an
+installed release it is the APP VERSION of `helm list --namespace treebind-system`, and for a new one the version that
+[the quickstart](quickstart.md#1-install-the-operator) installs.
 
 `make deploy` and `make dev` set the count back to two the next time they run.
 To run the operator from your machine, use `make run`: it does not pass
