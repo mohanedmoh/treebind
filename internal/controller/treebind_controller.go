@@ -84,6 +84,10 @@ const awaitingReportMessage = "No report from the sync agent has been received y
 // condition or the observed generation changed, so the status update it makes does
 // not trigger a reconcile that writes again.
 //
+// A Treebind whose repository address has the scheme http gets no sync objects, because the agent refuses it at
+// start: Ready is False with the reason UnsupportedRepositoryScheme, and no error is returned, since only a change of
+// the spec puts it right.
+//
 // When it cannot create or update the sync objects it still writes the status,
 // with Ready False and the reason ReconcileFailed, and then returns the error so
 // that the request is retried. An error that a retry makes go away is the
@@ -132,16 +136,25 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			log.Error(keysErr, "Could not put the cluster's public signing keys where the sync agent reads them")
 		}
 	}
-	statefulSet, ensureErr := r.ensureSyncObjects(ctx, treebind)
-	if ensureErr != nil && resolvesOnRetry(ctx, ensureErr) {
-		return ctrl.Result{}, ensureErr
+	// The agent refuses an http:// address at start, so a sync pod made for one would only crash (repository_scheme.go).
+	plainHTTP := usesPlainHTTP(treebind.Spec.Repository.URL)
+	var statefulSet *appsv1.StatefulSet
+	var ensureErr error
+	if !plainHTTP {
+		statefulSet, ensureErr = r.ensureSyncObjects(ctx, treebind)
+		if ensureErr != nil && resolvesOnRetry(ctx, ensureErr) {
+			return ctrl.Result{}, ensureErr
+		}
 	}
 
 	changed = addAwaitingReportConditions(treebind) || changed
 	var ready metav1.Condition
-	if ensureErr != nil {
+	switch {
+	case plainHTTP:
+		ready = unsupportedRepositorySchemeCondition(treebind.Generation)
+	case ensureErr != nil:
 		ready = reconcileFailedCondition(ensureErr, treebind.Generation)
-	} else {
+	default:
 		synced := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionSynced)
 		ready = readyCondition(statefulSet, synced, treebind.Spec.Sync.Direction, treebind.Generation)
 	}
