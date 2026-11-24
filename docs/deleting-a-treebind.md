@@ -36,5 +36,10 @@ because their namespace is deleted, and its examples delete theirs with
 
 ## Creating the Treebind again
 
-A new Treebind for the same claim finds the checkout that is already there.
-Taking over a directory that already has files is not implemented yet.
+A new Treebind for the same claim finds the checkout that is already there and
+opens it, when it is of the same repository and branch. A directory that has
+files and no checkout is taken over when it holds exactly the files of the
+branch: the agent writes no file, and the directory is the checkout. A directory
+with other files is left as it is, and the agent says `DirectoryNotEmpty` in its
+check `Checkout` until the directory is emptied or holds exactly the files of the
+branch. [The checkout](checkout.md) has the rules.
