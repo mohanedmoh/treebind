@@ -186,8 +186,12 @@ func killBetweenSteps(t syncTarget) {
 	Eventually(func(g Gomega) {
 		before = t.syncPod(g)
 		g.Expect(before.ready).To(BeTrue())
-		_, epochBefore = lockTaken(g, t, false)
+		_, epochBefore = lockTaken(g, t)
 	}).Should(Succeed())
+
+	// The log of the agent that is killed is kept from before the kill: the kubelet may remove the dead container, and its log, before it
+	// is asked for (followAgentLog).
+	killedLog := followAgentLog(t)
 
 	By("killing the agent from the node")
 	killed := time.Now()
@@ -216,12 +220,12 @@ func killBetweenSteps(t syncTarget) {
 
 	By("checking in its log that the new agent waited a TTL for the lock, took it with a higher epoch and reopened the checkout")
 	var took time.Time
-	var epochKilled, epochAfter uint64
+	var epochAfter uint64
 	Eventually(func(g Gomega) {
-		_, epochKilled = lockTaken(g, t, true)
-		took, epochAfter = lockTaken(g, t, false)
+		took, epochAfter = lockTaken(g, t)
 	}).Should(Succeed())
-	Expect(epochKilled).To(Equal(epochBefore), "the log of the container before is not the one of the agent that was killed")
+	_, epochKilled := lockTakenIn(Default, killedLog.logOfEndedContainer(Default))
+	Expect(epochKilled).To(Equal(epochBefore), "the log of the container that was killed is not the one of the agent that was read before the kill")
 	Expect(epochAfter).To(BeNumerically(">", epochBefore), "the new agent took the lock with an epoch that is not higher")
 	// The new agent takes the lock after it has seen the slot of the killed one for a TTL from its first look, which is after the
 	// container started. The start is in whole seconds, rounded down, and both times are of the clock of the node.
@@ -256,15 +260,16 @@ func killBetweenSteps(t syncTarget) {
 	Expect(state.ready).To(BeTrue(), "the pod is not ready")
 }
 
-// lockTaken reads the log of the agent, of the container that runs or of the one before it, and returns when it took the writer lock
-// and its epoch, by the clock of the node.
-func lockTaken(g Gomega, t syncTarget, previous bool) (time.Time, uint64) {
-	args := []string{"logs", t.syncPodName(), "-n", t.namespace}
-	if previous {
-		args = append(args, "--previous")
-	}
-	logs, err := utils.Run(exec.Command("kubectl", args...))
+// lockTaken reads the log of the agent of the container that runs, and returns when it took the writer lock and its epoch, by the
+// clock of the node. The log of a container that has ended is not read from the pod: followAgentLog keeps it.
+func lockTaken(g Gomega, t syncTarget) (time.Time, uint64) {
+	logs, err := utils.Run(exec.Command("kubectl", "logs", t.syncPodName(), "-n", t.namespace))
 	g.Expect(err).NotTo(HaveOccurred(), "Failed to read the log of the agent")
+	return lockTakenIn(g, logs)
+}
+
+// lockTakenIn returns when the agent that wrote the log took the writer lock and its epoch, by the clock of the node.
+func lockTakenIn(g Gomega, logs string) (time.Time, uint64) {
 	match := lockLine.FindStringSubmatch(logs)
 	g.Expect(match).NotTo(BeNil(), "the agent has not said that it holds the writer lock")
 	took, err := time.Parse(time.RFC3339, match[1])
