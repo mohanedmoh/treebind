@@ -144,7 +144,9 @@ func frozenHolderTakenOver(first, second syncTarget) {
 	syncedAtSeed(first)
 	before := first.syncPod(Default)
 	var epochFirst uint64
-	Eventually(func(g Gomega) { _, epochFirst = lockTaken(g, first, false) }).Should(Succeed())
+	Eventually(func(g Gomega) { _, epochFirst = lockTaken(g, first) }).Should(Succeed())
+	// What the first agent says when it wakes is read from this, and not from the pod after its container has ended (followAgentLog).
+	firstLog := followAgentLog(first)
 
 	By("applying a second Treebind on the same claim and the same subPath, which the operator accepts")
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -177,7 +179,7 @@ func frozenHolderTakenOver(first, second syncTarget) {
 	var tookOver time.Time
 	var epochSecond uint64
 	Eventually(func(g Gomega) {
-		tookOver, epochSecond = lockTaken(g, second, false)
+		tookOver, epochSecond = lockTaken(g, second)
 	}, holderTakeoverBound, time.Second).Should(Succeed())
 
 	By("thawing the first agent as soon as the takeover is seen")
@@ -205,7 +207,7 @@ func frozenHolderTakenOver(first, second syncTarget) {
 		g.Expect(after.restarts).To(Equal(before.restarts+1), "the container was not started again, or more than once")
 		g.Expect(after.started).To(BeTemporally(">", frozen), "the container that runs is not a new one")
 	}, failureKillBound).Should(Succeed())
-	expectHolderWokeUp(first, frozen)
+	expectHolderWokeUp(first, firstLog, frozen)
 
 	By("seeing the file that the application wrote while the first agent was frozen on the remote, added once")
 	Eventually(func(g Gomega) {
@@ -246,7 +248,7 @@ func frozenHolderTakenOver(first, second syncTarget) {
 	var tookBack time.Time
 	var epochThird uint64
 	Eventually(func(g Gomega) {
-		tookBack, epochThird = lockTaken(g, first, false)
+		tookBack, epochThird = lockTaken(g, first)
 	}, holderReleaseBound).Should(Succeed())
 	Expect(epochThird).To(BeNumerically(">", epochSecond), "the first agent took the lock back with an epoch that is not higher")
 	// A holder that is gone without giving the lock up is waited for a TTL, and the second agent gives it up when it is stopped, so
@@ -300,8 +302,9 @@ func expectWaitingAgent(first, second syncTarget, epochFirst uint64, startedAt t
 }
 
 // expectHolderWokeUp reads how the container of the first agent ended after the freeze, and checks what it did when it woke: it
-// ended by itself, it said why, and it wrote nothing. It says which way it went, as the comment on exitLockLost says.
-func expectHolderWokeUp(first syncTarget, frozen time.Time) {
+// ended by itself, it said why, and it wrote nothing. It says which way it went, as the comment on exitLockLost says. The log is the
+// one that firstLog kept of that container.
+func expectHolderWokeUp(first syncTarget, firstLog *logFollower, frozen time.Time) {
 	By("checking what the first agent did when it was thawed")
 	output, err := utils.Run(exec.Command("kubectl", "get", "pod", first.syncPodName(), "-n", first.namespace, "-o",
 		"jsonpath={.status.containerStatuses[0].lastState.terminated.exitCode}|"+
@@ -310,8 +313,7 @@ func expectHolderWokeUp(first syncTarget, frozen time.Time) {
 	ended := strings.Split(strings.TrimSpace(output), "|")
 	Expect(ended).To(HaveLen(2), "kubectl answered %q", output)
 	events := podEvents(first)
-	logs, err := utils.Run(exec.Command("kubectl", "logs", first.syncPodName(), "-n", first.namespace, "--previous"))
-	Expect(err).NotTo(HaveOccurred(), "Failed to read the log of the first container")
+	logs := firstLog.logOfEndedContainer(Default)
 
 	lost := "the writer lock was lost to another agent, and this one stops"
 	stopped := "the agent stopped on request"
