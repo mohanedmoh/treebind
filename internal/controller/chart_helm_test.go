@@ -338,3 +338,44 @@ func TestRealHelmNamesTheImagesOfTheOperatorAndOfTheAgent(t *testing.T) {
 		})
 	}
 }
+
+// The CRD that the chart installs is the CRD that controller-gen generated, which is also the one in install.yaml. Helm takes
+// every "{{" of a template for the start of an action, so the description of messageTemplate once lost its {{.Count}}, and
+// nothing noticed, because the check of the generated files compares the template with what the script makes of it and never
+// renders it. This renders the template with real Helm, without the annotation that crd.keep adds, and holds the document to
+// the generated CRD, apart from the comment "# Source:" that Helm writes ahead of every document and the blank lines after it.
+func TestRealHelmRendersTheCRDThatControllerGenGenerated(t *testing.T) {
+	helmBinary(t)
+	output, said, err := helmTemplate(t, map[string]any{"crd": map[string]any{"keep": false}})
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, said)
+	}
+	var documents []string
+	for _, document := range helmDocuments(output) {
+		if strings.Contains(document, "\nkind: CustomResourceDefinition\n") {
+			documents = append(documents, document)
+		}
+	}
+	if len(documents) != 1 {
+		t.Fatalf("helm template wrote %d CRDs, want 1:\n%s", len(documents), output)
+	}
+	got := strings.TrimSpace(regexp.MustCompile(`(?m)^# Source: .*\n`).ReplaceAllString(documents[0], ""))
+	want := strings.TrimSpace(strings.TrimPrefix(readRepoFile(t, dirConfig, "crd", "bases", "treebind.example.org_treebinds.yaml"), "---\n"))
+	if got == want {
+		return
+	}
+	gotLines, wantLines := strings.Split(got, "\n"), strings.Split(want, "\n")
+	for i := range max(len(gotLines), len(wantLines)) {
+		var gotLine, wantLine string
+		if i < len(gotLines) {
+			gotLine = gotLines[i]
+		}
+		if i < len(wantLines) {
+			wantLine = wantLines[i]
+		}
+		if gotLine != wantLine {
+			t.Fatalf("the CRD that Helm renders is not the generated CRD; they first differ at line %d.\nHelm:      %s\ngenerated: %s\n"+
+				"Run `make manifests` and, if that changes nothing, fix hack/sync-chart-crd.sh.", i+1, gotLine, wantLine)
+		}
+	}
+}

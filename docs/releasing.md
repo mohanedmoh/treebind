@@ -64,7 +64,10 @@ patch and say so in the notes of the bad release.
    each image.
 4. Signs every image digest with cosign, keyless, using the workflow's identity.
 5. Packages the chart with the release version, pushes it to
-   `oci://ghcr.io/mohanedmoh/charts`, and signs it.
+   `oci://ghcr.io/mohanedmoh/charts`, and signs it. For a pre-release it adds the
+   annotation `artifacthub.io/prerelease: "true"` to the chart first, and the step
+   fails when the packaged chart has the annotation on a release that is not one
+   or lacks it on one that is.
 6. Renders `install.yaml` from `config/default` with the digests of the operator image and of the agent image filled in
    (`hack/build-installer.sh`). The base names an agent image that no release publishes, so the script reads the result
    back and fails the release when `install.yaml` does not say the two digests or has an image with the tag `latest`. CI
@@ -155,7 +158,9 @@ signatures) with a growing delay.
 ## Artifact Hub
 
 The chart carries what [Artifact Hub](https://artifacthub.io) shows of it: the `artifacthub.io/*` annotations of
-`charts/treebind/Chart.yaml` (license, category, the CRD, links) and the chart's `README.md`. The repository
+`charts/treebind/Chart.yaml` (license, category, the CRD, links) and the chart's `README.md`. The annotation
+`artifacthub.io/prerelease: "true"`, which makes Artifact Hub list a version as a pre-release, is not in the file: the release
+workflow adds it to the chart of a tag with a suffix, as it sets the version. The repository
 `oci://ghcr.io/mohanedmoh/charts/treebind` is registered in the Artifact Hub account of the owner, as a repository of kind Helm
 charts, and Artifact Hub reads each new version of the chart by itself.
 

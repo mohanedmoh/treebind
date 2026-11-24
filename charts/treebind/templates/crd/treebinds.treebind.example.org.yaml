@@ -282,7 +282,7 @@ spec:
                     type: integer
                   messageTemplate:
                     description: |-
-                      messageTemplate is the commit message, as a Go text/template, with {{.Count}} for the number of files in
+                      messageTemplate is the commit message, as a Go text/template, with {{ "{{" }}.Count{{ "}}" }} for the number of files in
                       the commit. Only the built-in functions of the package are there, so a template cannot run a program or read
                       a file. The whitespace around the message is trimmed, and the first line is the subject.
                     maxLength: 4096
