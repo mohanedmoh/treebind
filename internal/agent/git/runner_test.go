@@ -838,6 +838,72 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestACommandThatTheVolumeRefusedIsTheErrorOfTheSystem(t *testing.T) {
+	exit := &exec.ExitError{}
+	timedOut, cancel := context.WithCancelCause(context.Background())
+	cancel(ErrTimeout)
+	tests := []struct {
+		name   string
+		ctx    context.Context
+		stderr string
+		want   syscall.Errno // zero means none
+	}{
+		{"a full volume", context.Background(),
+			"error: unable to write file objects/ab/tmp_obj_Xy12Ab: No space left on device\nfatal: unpack-objects failed\n", syscall.ENOSPC},
+		{"a full volume, for the pack", context.Background(), "fatal: write error: No space left on device\nfatal: index-pack failed\n",
+			syscall.ENOSPC},
+		{"a quota", context.Background(), "fatal: write error: Disk quota exceeded\n", syscall.EDQUOT},
+		// A pod with a read-only root file system and a home that cannot be written has ssh say this at every connection.
+		{"a warning of ssh, with a host that refused", context.Background(),
+			"Could not create directory '/home/x/.ssh' (Read-only file system).\n" +
+				"git@example.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n", 0},
+		{"a read-only volume", context.Background(),
+			"fatal: Unable to create '/claim/.treebind/git/index.lock': Read-only file system\n", syscall.EROFS},
+		{"the repository's volume, which the remote side says", context.Background(),
+			"remote: error: unable to write file: No space left on device\nfatal: the remote end hung up unexpectedly\n", 0},
+		{"another failure", context.Background(), "fatal: unable to access 'https://example.com/r.git/': Could not resolve host\n", 0},
+		{"a command that was stopped, whatever it said", timedOut, "error: No space left on device\n", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classify(tt.ctx, cmdFetch, time.Second, &boundedBuffer{}, tt.stderr, exit)
+			for _, errno := range volumeErrnos {
+				if is := errors.Is(got, errno); is != (errno == tt.want) {
+					t.Errorf("errors.Is(%v, %v) = %v", got, errno, is)
+				}
+			}
+			if refused := VolumeRefused(got); refused != (tt.want != 0) {
+				t.Errorf("VolumeRefused(%v) = %v", got, refused)
+			}
+			if !errors.Is(got, exit) && tt.want != 0 {
+				t.Errorf("got %v, want the failure of the command underneath as well", got)
+			}
+		})
+	}
+
+	// An error of the system that the agent got itself says the same.
+	full := fmt.Errorf("write the record: %w", &os.PathError{Op: "write", Path: "slot", Err: syscall.ENOSPC})
+	if !VolumeRefused(full) || VolumeRefused(errors.New("no route to host")) || VolumeRefused(nil) {
+		t.Error("VolumeRefused does not tell an error of the system that says the volume is full from others")
+	}
+}
+
+func TestAFetchThatHasNoRoomSaysSoAndKeepsItsWords(t *testing.T) {
+	r := fakeGit(t, tempDir(t), "echo 'error: unable to write file objects/ab/tmp_obj_Xy12Ab: No space left on device' >&2\n"+
+		"echo 'fatal: unpack-objects failed' >&2\nexit 128")
+
+	_, err := r.Run(context.Background(), cmdFetch, "--", "https://example.invalid/r.git")
+
+	var gitErr *Error
+	if !errors.As(err, &gitErr) || gitErr.Errno != syscall.ENOSPC || !errors.Is(err, syscall.ENOSPC) || !VolumeRefused(err) {
+		t.Fatalf("got %v, want a failed command that the volume refused", err)
+	}
+	if want := "git fetch failed with exit status 128: error: unable to write file objects/ab/tmp_obj_Xy12Ab: " +
+		"No space left on device fatal: unpack-objects failed"; err.Error() != want {
+		t.Errorf("the text is %q, want %q", err, want)
+	}
+}
+
 func TestOptionsThatSignOrRunProgramsAreRefused(t *testing.T) {
 	root := tempDir(t)
 	marker := filepath.Join(root, "ran")

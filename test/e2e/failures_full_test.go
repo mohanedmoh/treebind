@@ -45,9 +45,8 @@ import (
 // for it to be small and for the privileged pod, and not the agent, whose limit is 128 MiB, to write the filler.
 //
 // What the specs assert is what the agent does today on a full volume. The check before writing that #78 (M2) asks for makes a volume
-// that is about to be full a condition at once, with a reason of its own, and not a fetch that fails as if the host were away, a lock
-// that is lost "to another agent" and a restart, so the assertions on the reasons, on the restart and on its exit code change when it
-// lands.
+// that is about to be full a condition at once, with a reason of its own, and not a pull that fails, a heartbeat of the writer lock that
+// cannot be written and a restart, so the assertions on the reasons, on the restart and on its exit code change when it lands.
 const (
 	// fullVolumeMiB is the size of the tmpfs, and fullStorageClass the class that the volume and its claim name, which no provisioner
 	// serves and no StorageClass object defines: a claim that names a volume is bound to it without one.
@@ -102,7 +101,7 @@ func fullVolume() {
 		fillAndFree(target, node)
 	})
 
-	It("should say FetchFailed for a fetch that has no room, and need no restart when there is room again in time", func() {
+	It("should say PullFailed for a fetch that has no room, and need no restart when there is room again in time", func() {
 		fillBeforeObjects(target, node)
 	})
 }
@@ -115,10 +114,10 @@ func fullVolume() {
 // What the agent does, as seen on kind, from the push: the pull fails after 1 to 6 seconds as PullFailed, with the error of Git, and
 // leaves the half of the file, and the volume is full to the last block, so that nothing is left to fill. The pull that follows says
 // Refused, because the lock cannot be checked, the heartbeat counts the lock as lost 30 seconds after the last slot it made, and the
-// agent exits with code 3 about 35 seconds after the push, with a line that says that the writer lock was lost to another agent, and
-// the error of the volume beside it. The container that follows fails the writable check as WriteFailed, and tries again after 5, 10,
-// 20, 40 and 60 seconds, without exiting. Synced says InSync until the operator reads the report, then Refused, then WriteFailed once
-// the restarted agent reports, with Ready False; after the volume is freed it says SyncPending, and then InSync.
+// agent exits with code 3 about 35 seconds after the push, with a line that says that the heartbeat of the writer lock could not be
+// written, and the error of the volume beside it. The container that follows fails the writable check as WriteFailed, and tries again
+// after 5, 10, 20, 40 and 60 seconds, without exiting. Synced says InSync until the operator reads the report, then Refused, then
+// WriteFailed once the restarted agent reports, with Ready False; after the volume is freed it says SyncPending, and then InSync.
 func fillAndFree(t syncTarget, node string) {
 	before := syncedAtSeed(t)
 	// The agent stops while the volume is full, and what it said before is read from this, and not from the pod after its container has
@@ -182,8 +181,9 @@ func fillAndFree(t syncTarget, node string) {
 	Expect(exitCode).To(Equal("3"), "the agent did not stop as one that lost the writer lock")
 	previous := stoppedLog.logOfEndedContainer(Default)
 	_, _ = fmt.Fprintf(GinkgoWriter, "the log of the agent that stopped:\n%s\n", previous)
-	// The agent does not know that the volume is full: it says that the lock was lost to another agent, with the error of the volume.
-	Expect(previous).To(ContainSubstring("the writer lock was lost to another agent, and this one stops"))
+	// The agent says that the heartbeat of the lock could not be written, with the error of the volume, and not that another agent took it.
+	Expect(previous).To(ContainSubstring("the heartbeat of the writer lock could not be written for a whole TTL"))
+	Expect(previous).NotTo(ContainSubstring("lost to another agent"))
 	Expect(previous).To(ContainSubstring("no space left on device"))
 	current := t.agentLog(Default)
 	_, _ = fmt.Fprintf(GinkgoWriter, "the log of the agent that runs:\n%s\n", current)
@@ -228,13 +228,13 @@ func fillAndFree(t syncTarget, node string) {
 }
 
 // fillBeforeObjects leaves the volume room for two blocks, which is room for the slot of the writer lock and for less than the objects
-// of a commit, and pushes a commit from Git. The fetch cannot write its objects, and the agent says FetchFailed, the reason that it
-// gives a host that cannot be reached, so that a full volume is told as an unreachable host and Ready stays True (docs/adr/0037). The
-// room does not last: the objects that the fetch could write took it, and on kind the volume was full within five seconds, and the
-// agent lost the lock and stopped 28 seconds after the fetch failed, as in the other spec. Synced says FetchFailed only for as long
-// as that takes, between two reads of the report by the operator, which is too short to wait for. So the volume is freed as soon as the
-// log says it, and the agent, which still holds the lock, fetches the commit and is not restarted. This is what the agent does today,
-// and the check before writing of #78 (M2) will give a full volume a reason of its own.
+// of a commit, and pushes a commit from Git. The fetch cannot write its objects, and the agent says PullFailed, as for any write that
+// the volume refuses, and not FetchFailed, which is for a host that cannot be reached, and removes the temporary object files that the
+// fetch left. The objects that the fetch could write are kept, and before #257 the temporary ones were too: on kind the volume was full
+// within five seconds, and the agent lost the lock and stopped 28 seconds after the fetch failed, as in the other spec. Synced says
+// the failure only between two reads of the report by the operator, which is too short to wait for. So the volume is freed as soon as
+// the log says it, and the agent, which still holds the lock, fetches the commit and is not restarted. This is what the agent does
+// today, and the check before writing of #78 (M2) will give a full volume a reason of its own.
 func fillBeforeObjects(t syncTarget, node string) {
 	By("waiting for Synced to say that the volume and the repository agree at the tip")
 	Eventually(func(g Gomega) {
@@ -252,13 +252,14 @@ func fillBeforeObjects(t syncTarget, node string) {
 	begun := time.Now()
 	t.pushFromGit("objects.txt", "pushed while the volume had room for two blocks")
 
-	By("seeing the fetch of the agent fail for want of room, which it says as FetchFailed")
+	By("seeing the fetch of the agent fail for want of room, which it says as PullFailed")
 	var failed string
 	Eventually(func(g Gomega) {
 		failed = pullFailureSince(g, t, begun)
 	}).WithPolling(time.Second).Should(Succeed())
 	_, _ = fmt.Fprintf(GinkgoWriter, "%s after the push: %s\n", since(begun), failed)
-	Expect(failed).To(ContainSubstring("reason=FetchFailed"))
+	Expect(failed).To(ContainSubstring("reason=PullFailed"))
+	Expect(failed).To(ContainSubstring("because the volume cannot be written"))
 	Expect(failed).To(ContainSubstring("No space left on device"))
 
 	By("freeing the volume at once")

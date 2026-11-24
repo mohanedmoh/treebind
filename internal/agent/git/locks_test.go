@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -291,5 +292,155 @@ func TestRemoveStaleLocksAndStaleLocksSayWhenTheGitDirectoryCannotBeRead(t *test
 	}
 	if got, err := StaleLocks(gitDir); err == nil || len(got) != 0 {
 		t.Errorf("StaleLocks = %v, %v, want nothing listed and the error", got, err)
+	}
+}
+
+const (
+	tempLoose = "objects/ab/tmp_obj_Xy12Ab"
+	tempPack  = "objects/pack/tmp_pack_Qw34Er"
+)
+
+func TestRemoveStaleTempObjectsRemovesTheTemporaryFilesOfTheObjectStoreAndNothingElse(t *testing.T) {
+	gitDir := tempDir(t)
+	temporary := []string{tempLoose, "objects/0f/tmp_obj_1", tempPack, "objects/pack/tmp_idx_Qw34Er", "objects/tmp_obj_old"}
+	keep := []string{
+		// Objects and packs, and what Git keeps beside them.
+		"objects/ab/cdef0123456789abcdef0123456789abcdef01", "objects/pack/pack-0123.pack", "objects/pack/pack-0123.idx",
+		"objects/info/packs",
+		// Names that are not those of temporary files where they are: tmp_obj_ is only for a directory of loose objects, which
+		// is two hexadecimal digits, and tmp_ only for the top of the store and the packs.
+		"objects/ab/tmp_pack_x", "objects/xy/tmp_obj_1", "objects/AB/tmp_obj_1", "objects/info/tmp_obj_1", "objects/abc/tmp_obj_1",
+		// Outside the object store, whatever the name.
+		"tmp_obj_1", "refs/heads/tmp_obj_1", "logs/tmp_x",
+	}
+	for _, name := range append(slices.Clone(temporary), keep...) {
+		plant(t, gitDir, name)
+	}
+
+	got, err := RemoveStaleTempObjects(gitDir, 0)
+
+	if want := slices.Sorted(slices.Values(temporary)); err != nil || !slices.Equal(got, want) {
+		t.Fatalf("removed %v, %v, want %v", got, err, want)
+	}
+	for _, name := range temporary {
+		if exists(filepath.Join(gitDir, name)) {
+			t.Errorf("%s is still there", name)
+		}
+	}
+	for _, name := range keep {
+		if !exists(filepath.Join(gitDir, name)) {
+			t.Errorf("%s was removed", name)
+		}
+	}
+	if again, err := RemoveStaleTempObjects(gitDir, 0); err != nil || len(again) != 0 {
+		t.Errorf("a second call removed %v, %v, want nothing", again, err)
+	}
+}
+
+func TestRemoveStaleTempObjectsLeavesAFileThatIsNotOldEnough(t *testing.T) {
+	gitDir := tempDir(t)
+	old, young := plant(t, gitDir, tempLoose), plant(t, gitDir, tempPack)
+	long := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(old, long, long); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := StaleTempObjects(gitDir, time.Hour); err != nil || !slices.Equal(got, []string{tempLoose}) {
+		t.Errorf("StaleTempObjects = %v, %v, want only the file that has not changed for an hour", got, err)
+	}
+	got, err := RemoveStaleTempObjects(gitDir, time.Hour)
+
+	if err != nil || !slices.Equal(got, []string{tempLoose}) {
+		t.Errorf("removed %v, %v, want only the file that has not changed for an hour", got, err)
+	}
+	if exists(old) || !exists(young) {
+		t.Error("the old file is there, or the young one is gone")
+	}
+}
+
+func TestRemoveStaleTempObjectsFollowsNoLinkAndRemovesNoDirectory(t *testing.T) {
+	gitDir, elsewhere := tempDir(t), tempDir(t)
+	outside := plant(t, elsewhere, "tmp_obj_1")
+	if err := os.MkdirAll(filepath.Join(gitDir, "objects", "pack"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A link named like a temporary file, and a link in the place of a directory of loose objects.
+	mustSymlink(t, outside, filepath.Join(gitDir, "objects", "pack", "tmp_pack_1"))
+	mustSymlink(t, elsewhere, filepath.Join(gitDir, "objects", "cd"))
+	if err := os.MkdirAll(filepath.Join(gitDir, "objects", "ab", "tmp_obj_dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := RemoveStaleTempObjects(gitDir, 0)
+
+	if err != nil || len(got) != 0 {
+		t.Fatalf("removed %v, %v, want nothing", got, err)
+	}
+	for _, path := range []string{
+		outside, filepath.Join(gitDir, "objects", "pack", "tmp_pack_1"), filepath.Join(gitDir, "objects", "ab", "tmp_obj_dir"),
+	} {
+		if !exists(path) {
+			t.Errorf("%s was removed", path)
+		}
+	}
+}
+
+func TestRemoveStaleTempObjectsWithNoGitDirectoryOrNoObjectsRemovesNothing(t *testing.T) {
+	for _, gitDir := range []string{filepath.Join(tempDir(t), "absent"), tempDir(t)} {
+		if got, err := RemoveStaleTempObjects(gitDir, 0); err != nil || len(got) != 0 {
+			t.Errorf("RemoveStaleTempObjects(%s) = %v, %v, want nothing and no error", gitDir, got, err)
+		}
+		if got, err := StaleTempObjects(gitDir, 0); err != nil || len(got) != 0 {
+			t.Errorf("StaleTempObjects(%s) = %v, %v, want nothing and no error", gitDir, got, err)
+		}
+	}
+}
+
+func TestRemoveStaleTempObjectsSaysWhatItCouldNotRemoveAndGoesOn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a file in a directory that it cannot write")
+	}
+	gitDir := tempDir(t)
+	plant(t, gitDir, tempLoose)
+	plant(t, gitDir, tempPack)
+	locked := filepath.Join(gitDir, "objects", "ab")
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	got, err := RemoveStaleTempObjects(gitDir, 0)
+
+	if err == nil || !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), tempLoose) {
+		t.Fatalf("error = %v, want one that names what was refused", err)
+	}
+	if !slices.Equal(got, []string{tempPack}) {
+		t.Errorf("removed %v, want %v: the others are removed although one could not be", got, []string{tempPack})
+	}
+}
+
+func TestRemoveStaleTempObjectsRefusesWhileACommandRuns(t *testing.T) {
+	root := tempDir(t)
+	ready := filepath.Join(root, "ready")
+	r := fakeGit(t, root, fmt.Sprintf("echo ready > '%s'\nwhile :; do :; done", ready))
+	temporary := plant(t, r.gitDir, tempLoose)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.Run(ctx, cmdStatus)
+	}()
+	eventually(t, "the command to run", func() bool { return exists(ready) })
+
+	got, err := RemoveStaleTempObjects(r.gitDir, 0)
+	if !errors.Is(err, ErrBusy) || len(got) != 0 || !exists(temporary) {
+		t.Errorf("removed %v, %v, want nothing and ErrBusy: the file may be the command's own", got, err)
+	}
+
+	cancel()
+	<-done
+	if got, err := RemoveStaleTempObjects(r.gitDir, 0); err != nil || !slices.Equal(got, []string{tempLoose}) {
+		t.Errorf("once the command has ended: removed %v, %v, want the file removed", got, err)
 	}
 }

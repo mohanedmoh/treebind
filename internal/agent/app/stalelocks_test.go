@@ -21,15 +21,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
+	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/gittest"
 	"github.com/mohanedmoh/treebind/internal/agent/heartbeat"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
@@ -374,6 +379,250 @@ func TestAnAgentThatLostTheWriterLockRemovesNoLockFileBeforeTheCheckoutAndSaysSo
 	if _, err := os.Lstat(stale); err != nil {
 		t.Error("a lock file was removed by an agent that lost the writer lock")
 	}
+}
+
+// tempLeft is a temporary object file of the kind that a fetch that has no room leaves.
+const tempLeft = "objects/ab/tmp_obj_Xy12Ab"
+
+// noRoom is a pull that the volume refused, as a fetch that has no room is: the error of the system is underneath.
+var noRoom = &pull.Error{
+	Reason:  pull.ReasonPullFailed,
+	Message: "the branch main cannot be fetched, because the volume cannot be written: no space left on device",
+	Err:     fmt.Errorf("git fetch failed with exit status 128: %w", syscall.ENOSPC),
+}
+
+func TestClearTempObjectsChecksTheWriterLockOnlyWhenThereIsAFileToRemove(t *testing.T) {
+	gitDir := t.TempDir()
+	var asked int
+	fence := func(context.Context) error { asked++; return nil }
+
+	if removed, err := clearTempObjects(context.Background(), gitDir, fence); err != nil || len(removed) != 0 || asked != 0 {
+		t.Fatalf("with no temporary file: removed %v, %v, asked the fence %d times, want nothing, no error and no call", removed, err, asked)
+	}
+
+	path := plantLock(t, gitDir, tempLeft)
+	removed, err := clearTempObjects(context.Background(), gitDir, fence)
+	if err != nil || !slices.Equal(removed, []string{tempLeft}) || asked != 1 {
+		t.Errorf("removed %v, %v, asked the fence %d times, want the file removed after one call", removed, err, asked)
+	}
+	if gittest.Exists(path) {
+		t.Error("the temporary file is still there")
+	}
+}
+
+func TestClearTempObjectsGoesOnWhenTheVolumeRefusesTheLockAndNotWhenTheLockIsLost(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		fence   error
+		removed bool
+	}{
+		// The full volume refuses the slot of the lock as well, and the lock has not run out.
+		{"the volume refused the slot", fmt.Errorf("lock: write the record of slot 7: %w",
+			&fs.PathError{Op: "write", Path: "slot-00000000000000000007", Err: syscall.ENOSPC}), true},
+		{"another agent took the lock", lock.ErrLost, false},
+		{"the lock could not be renewed for a TTL", fmt.Errorf("%w for 30s, so it counts as lost: %w", lock.ErrNotRenewed, syscall.ENOSPC), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			gitDir := t.TempDir()
+			path := plantLock(t, gitDir, tempLeft)
+
+			removed, err := clearTempObjects(context.Background(), gitDir, func(context.Context) error { return c.fence })
+
+			if c.removed {
+				if err != nil || !slices.Equal(removed, []string{tempLeft}) || gittest.Exists(path) {
+					t.Errorf("removed %v, %v, want the file removed", removed, err)
+				}
+				return
+			}
+			if len(removed) != 0 || !errors.Is(err, lock.ErrLost) || !strings.Contains(err.Error(), tempLeft) || !gittest.Exists(path) {
+				t.Errorf("removed %v, %v, want nothing removed, and an error that names the file and the loss", removed, err)
+			}
+		})
+	}
+}
+
+func TestTheNoteNamesAFewOfTheTemporaryObjectFilesThatWereRemovedAndWhatFailed(t *testing.T) {
+	if got := tempNote(nil, nil); got != "" {
+		t.Errorf("note = %q, want none when nothing was removed", got)
+	}
+	if got, want := tempNote([]string{tempLeft}, nil), "removed the temporary object file that a Git command that failed left: "+tempLeft; got != want {
+		t.Errorf("note = %q, want %q", got, want)
+	}
+	got := tempNote([]string{"a", "b", "c", "d"}, errors.New("objects/pack/tmp_pack_x cannot be removed"))
+	if want := "removed 4 temporary object files that a Git command that failed left: a, b, c and 1 more; " +
+		"objects/pack/tmp_pack_x cannot be removed"; got != want {
+		t.Errorf("note = %q, want %q", got, want)
+	}
+}
+
+func TestAPullThatTheVolumeRefusedRemovesTheTemporaryObjectFilesThatAFailedGitLeftAndSaysSo(t *testing.T) {
+	root, _ := claimWithState(t)
+	gitDir := filepath.Join(root, ".treebind", "git")
+	f := newFakePuller()
+	change, _ := withPuller(f, &loopClock{})
+	r := start(t, func(o *Options) {
+		change(o)
+		o.Config.MountPath = root
+	})
+	f.awaitBegun(t)
+	left := plantLock(t, gitDir, tempLeft)
+
+	f.answer(t, answer{err: noRoom})
+
+	got, _ := pullCheck(t, r)
+	if got.Outcome != outcomeFailed || got.Reason != pull.ReasonPullFailed || !strings.Contains(got.Message, noRoom.Message) ||
+		!strings.Contains(got.Message, "removed the temporary object file that a Git command that failed left: "+tempLeft) {
+		t.Errorf("pull = %+v, want PullFailed, with the temporary file that was removed said", got)
+	}
+	if gittest.Exists(left) {
+		t.Error("the temporary file is still there, and keeps the volume full")
+	}
+
+	// A pull that failed for another cause does not look: a fetch that the host cut off leaves them too, and they take
+	// room that a fetch needs only once the volume is full, which is when a fetch is refused.
+	left = plantLock(t, gitDir, tempLeft)
+	f.answer(t, failedPull(pull.ReasonFetchFailed, noRoute))
+	got, _ = pullCheck(t, r)
+	if got.Reason != pull.ReasonFetchFailed || strings.Contains(got.Message, "temporary") || !gittest.Exists(left) {
+		t.Errorf("pull = %+v, want FetchFailed, with nothing removed and nothing said of temporary files", got)
+	}
+}
+
+type answeringPuller struct{ err error }
+
+func (p answeringPuller) Pull(context.Context) (pull.Result, error) { return pull.Result{}, p.err }
+
+func TestAnAgentThatLostTheWriterLockRemovesNoTemporaryObjectFileAfterAPullAndSaysSo(t *testing.T) {
+	a := agentThatLostTheLock(t)
+	gitDir := t.TempDir()
+	left := plantLock(t, gitDir, tempLeft)
+	l := &pulls{a: a, p: &progress{pulling: notTried(CheckPull, "waiting")}, options: pull.Options{Layout: layout.Layout{GitDir: gitDir}},
+		puller: answeringPuller{noRoom}}
+
+	l.once(context.Background())
+
+	if got := l.p.pulling; got.Outcome != preflight.Failed || got.Reason != pull.ReasonPullFailed ||
+		!strings.Contains(got.Message, "were not removed, because the writer lock was lost") || !strings.Contains(got.Message, tempLeft) {
+		t.Errorf("pull = %+v, want PullFailed, naming the temporary file that was not removed", got)
+	}
+	if !gittest.Exists(left) {
+		t.Error("a temporary file was removed by an agent that lost the writer lock")
+	}
+	if len(a.lost) != 1 {
+		t.Error("the loss of the lock was not said to the agent")
+	}
+}
+
+// startsOn starts an agent on a claim and returns once its volume checks have run, which is what comes after the removal of
+// old temporary object files, and whether the file was there when they ran.
+func startsOn(t *testing.T, root, file string) (r *running, thereAtTheChecks bool) {
+	t.Helper()
+	checked := make(chan bool, 1)
+	r = start(t, func(o *Options) {
+		o.Config.MountPath = root
+		o.Preflight = func(context.Context, string, string) []preflight.Result {
+			select {
+			case checked <- gittest.Exists(file):
+			default:
+			}
+			return passed
+		}
+	})
+	select {
+	case thereAtTheChecks = <-checked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the volume checks did not run")
+	}
+	return r, thereAtTheChecks
+}
+
+// age makes a file look as if it had not changed for the duration.
+func age(t *testing.T, path string, d time.Duration) {
+	t.Helper()
+	then := time.Now().Add(-d)
+	if err := os.Chtimes(path, then, then); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnAgentThatStartsRemovesTheOldTemporaryObjectFilesBeforeTheVolumeChecksAndLeavesTheOthers(t *testing.T) {
+	root, _ := claimWithState(t)
+	gitDir := filepath.Join(root, ".treebind", "git")
+	old, young := plantLock(t, gitDir, tempLeft), plantLock(t, gitDir, "objects/pack/tmp_pack_Qw34Er")
+	age(t, old, tempObjectsAge+time.Minute)
+	// Not old enough: a fetch of another agent that holds the lock may still be writing it.
+	age(t, young, tempObjectsAge-time.Minute)
+
+	r, there := startsOn(t, root, old)
+
+	if there || gittest.Exists(old) {
+		t.Error("the old temporary file was there when the volume was checked: a full volume fails the Writable check for it")
+	}
+	if !gittest.Exists(young) {
+		t.Error("a temporary file that a Git command may still be writing was removed")
+	}
+	if n := r.logs.count("removed the temporary object files that a Git command that was stopped or failed left"); n != 1 ||
+		!strings.Contains(r.logs.String(), tempLeft) {
+		t.Errorf("the removal was logged %d times, want once, with the file\n%s", n, r.logs.String())
+	}
+}
+
+func TestAnAgentThatStartsRemovesNothingThroughAStateDirectoryThatIsALink(t *testing.T) {
+	root, elsewhere := t.TempDir(), t.TempDir()
+	old := plantLock(t, filepath.Join(elsewhere, "git"), tempLeft)
+	age(t, old, tempObjectsAge+time.Minute)
+	if err := os.Symlink(elsewhere, filepath.Join(root, ".treebind")); err != nil {
+		t.Fatal(err)
+	}
+
+	r, _ := startsOn(t, root, old)
+
+	if !gittest.Exists(old) {
+		t.Error("a file was removed through a link in the place of the state directory")
+	}
+	if n := r.logs.count("temporary object files"); n != 0 {
+		t.Errorf("the agent said something of temporary files that it did not look at\n%s", r.logs.String())
+	}
+}
+
+func TestAnAgentBeginsNoSecondRemovalOfOldTemporaryObjectFilesWhileOneHasNotEnded(t *testing.T) {
+	root, _ := claimWithState(t)
+	if err := os.Mkdir(filepath.Join(root, ".treebind", "git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The removal is held as a volume that does not answer holds it, until the test lets it go.
+	release := make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	var removals atomic.Int32
+	removeOldTempObjects = func(string, time.Duration) ([]string, error) {
+		removals.Add(1)
+		<-release
+		return nil, nil
+	}
+	oldTempObjectsWait = 10 * time.Millisecond
+	t.Cleanup(func() { removeOldTempObjects, oldTempObjectsWait = git.RemoveStaleTempObjects, preflight.Timeout })
+	t.Cleanup(free)
+	var rounds atomic.Int32
+	r := start(t, func(o *Options) {
+		o.Config.MountPath = root
+		// The checks fail, so that they run again and again.
+		o.Preflight = func(context.Context, string, string) []preflight.Result {
+			rounds.Add(1)
+			return failed
+		}
+	})
+
+	eventually(t, "several rounds of the volume checks", func() bool { return rounds.Load() >= 5 })
+	if n := removals.Load(); n != 1 {
+		t.Errorf("%d removals began while the first had not ended, want only the first", n)
+	}
+	if n := r.logs.count("so no other begins"); n != 1 {
+		t.Errorf("the rounds that began no removal were logged %d times, want once\n%s", n, r.logs.String())
+	}
+
+	free()
+	eventually(t, "a removal in a round after the first has ended", func() bool { return removals.Load() >= 2 })
 }
 
 func TestAnAgentThatStartsAfterAnUpdateWasKilledInTheMiddleOfItsFilesUndoesItAndAppliesIt(t *testing.T) {

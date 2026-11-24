@@ -633,6 +633,8 @@ func classify(ctx context.Context, sub string, timeout time.Duration, stdout *bo
 		e.Cause = err
 		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
 			e.ExitCode = exit.ExitCode()
+			// Git runs in another process, so a full volume reaches the agent only as the words of its message.
+			e.Errno = volumeErrno(stderr)
 		}
 	}
 	return e

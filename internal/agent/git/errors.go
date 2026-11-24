@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -55,6 +57,10 @@ type Error struct {
 	Cause error
 	// ExitCode is the exit status of a command that failed, and zero otherwise.
 	ExitCode int
+	// Errno is the error of the system that a command that failed names in its
+	// standard error, of those that say the volume cannot be written to (see
+	// VolumeRefused), and zero otherwise. errors.Is matches it.
+	Errno syscall.Errno
 	// Stderr is the last lines of the standard error, on one line, with the
 	// credentials of any URL removed.
 	Stderr string
@@ -95,6 +101,50 @@ func (e *Error) Error() string {
 
 // Unwrap returns the cause.
 func (e *Error) Unwrap() error { return e.Cause }
+
+// Is makes errors.Is(err, syscall.ENOSPC) true of a command that said the volume
+// was full, and the same for the other errors of volumeErrnos.
+func (e *Error) Is(target error) bool { return e.Errno != 0 && target == e.Errno }
+
+// volumeErrnos are the errors of the system that say that the volume cannot be
+// written to: it is full, over its quota or read-only. Git names them in its
+// standard error in the words of strerror, which LC_ALL=C (config.go) makes the
+// ones that Go uses, but for the case of the first letter.
+var volumeErrnos = []syscall.Errno{syscall.ENOSPC, syscall.EDQUOT, syscall.EROFS}
+
+// VolumeRefused reports whether err says that the volume could not be written to,
+// because it is full, over its quota or read-only: an error of the system, or an
+// Error of a command that said so.
+func VolumeRefused(err error) bool {
+	for _, errno := range volumeErrnos {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+	return false
+}
+
+// volumeErrno is the one of volumeErrnos that the standard error of a command
+// names, or zero. Only the lines in which Git says why it failed are read, the
+// ones it starts with "error:" or "fatal:": a warning of ssh, such as one that
+// it cannot make a directory in a home on a read-only file system, comes with
+// every connection and says nothing of why the command failed. A line that Git
+// starts with "remote:" was sent by the repository, and is of its volume and not
+// of this one.
+func volumeErrno(stderr string) syscall.Errno {
+	for line := range strings.Lines(stderr) {
+		if !strings.HasPrefix(line, "error:") && !strings.HasPrefix(line, "fatal:") {
+			continue
+		}
+		line = strings.ToLower(line)
+		for _, errno := range volumeErrnos {
+			if strings.Contains(line, errno.Error()) {
+				return errno
+			}
+		}
+	}
+	return 0
+}
 
 // quote shows an argument that is not a known subcommand, shortened, because a
 // caller's mistake should not put a long string into a log.

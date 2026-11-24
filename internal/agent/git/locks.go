@@ -21,21 +21,24 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
-// ErrBusy means a Git command of this process is running on the Git directory, so no lock file in
-// it can be told from one that the command holds.
+// ErrBusy means a Git command of this process is running on the Git directory, so no lock file or
+// temporary file in it can be told from one that the command holds.
 var ErrBusy = errors.New("a Git command is running on the Git directory")
 
 // running counts the Git commands of this process that run, by Git directory. A command that holds a
 // lock file is the reason a lock file is there, and a command is the only thing that this process
 // starts that makes one, so a lock file is stale when none runs (docs/adr/0028). The mutex is held by
-// RemoveStaleLocks for as long as it looks and removes, and by a command only while it counts itself,
-// so that no command starts between the look at the count and the removal.
+// RemoveStaleLocks for as long as it looks and removes, by RemoveStaleTempObjects while it removes, and by
+// a command only while it counts itself, so that no command starts between the look at the count and the
+// removal.
 var running = struct {
 	sync.Mutex
 	commands map[string]int
@@ -164,6 +167,127 @@ func RemoveStaleLocks(gitDir string) ([]string, error) {
 			removed = append(removed, name)
 		case !errors.Is(err, fs.ErrNotExist):
 			failed = append(failed, fmt.Errorf("the lock file %s cannot be removed: %w", filepath.Join(gitDir, filepath.FromSlash(name)), err))
+		}
+	}
+	return removed, errors.Join(failed...)
+}
+
+// The object store, the directory of its packs, and how the names of the temporary files that Git writes there begin, before
+// it moves each to its name. They are the names that git prune takes for temporary files: tmp_obj_ in a directory of loose
+// objects, and any tmp_ at the top of the store and among the packs.
+const (
+	objectsDir       = "objects"
+	packsDir         = "objects/pack"
+	tempPrefix       = "tmp_"
+	tempObjectPrefix = "tmp_obj_"
+)
+
+// looseDir reports whether a name at the top of the object store is that of a directory of loose objects: two hexadecimal
+// digits.
+func looseDir(name string) bool {
+	return len(name) == 2 && strings.Trim(name, "0123456789abcdef") == ""
+}
+
+// StaleTempObjects lists what RemoveStaleTempObjects would remove, and removes nothing. It is for the caller that checks the
+// writer lock before it removes anything, and only when there is something to remove.
+func StaleTempObjects(gitDir string, olderThan time.Duration) ([]string, error) {
+	root, err := os.OpenRoot(filepath.Clean(gitDir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	found, failed := findTempObjects(root, gitDir, olderThan)
+	return found, errors.Join(failed...)
+}
+
+// findTempObjects lists the temporary files of the object store, in order, that have not changed for olderThan, or all of them
+// when it is not positive, and the errors of what it could not look at. WalkDir is not used: the directories of loose objects
+// can hold many objects, and only the names are looked at.
+func findTempObjects(root *os.Root, gitDir string, olderThan time.Duration) (found []string, failed []error) {
+	now := time.Now()
+	look := func(dir, prefix string) []fs.DirEntry {
+		entries, err := fs.ReadDir(root.FS(), dir)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				failed = append(failed, fmt.Errorf("%s cannot be looked at: %w", filepath.Join(gitDir, filepath.FromSlash(dir)), err))
+			}
+			return nil
+		}
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() || !strings.HasPrefix(entry.Name(), prefix) {
+				continue
+			}
+			if olderThan > 0 {
+				info, err := entry.Info()
+				if err != nil {
+					if !errors.Is(err, fs.ErrNotExist) {
+						failed = append(failed, fmt.Errorf("%s cannot be looked at: %w",
+							filepath.Join(gitDir, filepath.FromSlash(dir), entry.Name()), err))
+					}
+					continue
+				}
+				if now.Sub(info.ModTime()) < olderThan {
+					continue
+				}
+			}
+			found = append(found, path.Join(dir, entry.Name()))
+		}
+		return entries
+	}
+	for _, entry := range look(objectsDir, tempPrefix) {
+		// A link is not a directory here, so no link is followed.
+		if entry.IsDir() && looseDir(entry.Name()) {
+			look(path.Join(objectsDir, entry.Name()), tempObjectPrefix)
+		}
+	}
+	look(packsDir, tempPrefix)
+	slices.Sort(found)
+	return found, failed
+}
+
+// RemoveStaleTempObjects removes the temporary files that Git wrote in the object store of the Git directory and did not move
+// to their names, because it failed in the middle of the write, as a fetch on a full volume does, or was killed, and returns
+// their names relative to the Git directory, in order. Git does not remove them when it fails, and garbage collection, which
+// would, is off (docs/adr/0013), so they stay, and on a full volume they keep it full. It removes only a regular file that has
+// not changed for olderThan, or any when it is not positive, follows no link, and goes on after one that it cannot remove.
+//
+// It returns ErrBusy, and removes nothing, while a command of this process runs on the Git directory when the removal comes,
+// as RemoveStaleLocks does. That no command of another process writes there is the caller's to make true: with the writer lock
+// (NFR-1), or with an age that no command of an agent outlives.
+//
+// The look at the object store, which reads many directories and which a volume that does not answer holds, keeps no command
+// from starting or ending: a file that a command made while it looked is that of a command that still runs at the removal, which
+// is then refused, or of one that has ended, and then what it left is stale too, or gone.
+func RemoveStaleTempObjects(gitDir string, olderThan time.Duration) ([]string, error) {
+	gitDir = filepath.Clean(gitDir)
+	root, err := os.OpenRoot(gitDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	found, failed := findTempObjects(root, gitDir, olderThan)
+	if len(found) == 0 {
+		return nil, errors.Join(failed...)
+	}
+	running.Lock()
+	defer running.Unlock()
+	if running.commands[gitDir] > 0 {
+		return nil, ErrBusy
+	}
+	var removed []string
+	for _, name := range found {
+		switch err := root.Remove(filepath.FromSlash(name)); {
+		case err == nil:
+			removed = append(removed, name)
+		case !errors.Is(err, fs.ErrNotExist):
+			failed = append(failed, fmt.Errorf("the temporary file %s cannot be removed: %w", filepath.Join(gitDir, filepath.FromSlash(name)), err))
 		}
 	}
 	return removed, errors.Join(failed...)

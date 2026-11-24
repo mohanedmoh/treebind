@@ -5,6 +5,9 @@
 - Issue: #33
 - Extended by: #241, on 2026-11-21, which says what a loss of the lock ends with when the agent was told to stop as
   well: the exit code 3 and the line that says the lock was lost, and never the code 0 of a stop on request
+- Extended by: #257, on 2026-11-24, which says that a heartbeat that the volume refused for a TTL, as a full one does,
+  ends the agent with the exit code 3 as well, since the lock counts as lost then (ADR 0012), and with a line that says
+  that the heartbeat could not be written and why, and not that another agent took the lock
 
 ## Context
 

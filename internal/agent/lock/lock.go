@@ -55,7 +55,21 @@ var (
 	// How such a holder shows that it is alive is unknown, so it is never taken
 	// over.
 	ErrNewerVersion = errors.New("lock: held by a newer version of Treebind")
+	// ErrNotRenewed is the ErrLost of a holder that could not renew the lock for a
+	// whole TTL, because the volume refused every slot, as a full one does. No other
+	// holder was seen, but one may take over now, so the lock is lost all the same,
+	// and errors.Is(err, ErrLost) is true of it.
+	ErrNotRenewed error = notRenewed{}
 )
+
+// notRenewed is ErrNotRenewed: a loss of the lock whose words do not say that
+// another holder has it.
+type notRenewed struct{}
+
+func (notRenewed) Error() string { return "lock: could not be renewed" }
+
+// Is makes errors.Is(err, ErrLost) true of it.
+func (notRenewed) Is(target error) bool { return target == ErrLost }
 
 // maxHolder bounds a holder's name, so that a record always fits in maxRecord.
 const maxHolder = 256
@@ -288,9 +302,10 @@ func (l *Lock) advance(released bool) error {
 		l.ended = ErrLost
 	case l.ended == nil && l.cfg.Clock.Now().Sub(l.renewed) >= l.cfg.TTL:
 		// A contender may have judged this holder gone by now. It cannot prove
-		// otherwise, so it gives up instead of holding a lock it cannot renew.
-		l.ended = ErrLost
-		err = fmt.Errorf("%w: it could not be renewed for %s: %w", ErrLost, l.cfg.TTL, err)
+		// otherwise, so it gives up instead of holding a lock it cannot renew. Every
+		// later call says the same, with the volume's error that ended it.
+		err = fmt.Errorf("%w for %s, so it counts as lost: %w", ErrNotRenewed, l.cfg.TTL, err)
+		l.ended = err
 	}
 	return err
 }

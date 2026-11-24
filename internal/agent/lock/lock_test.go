@@ -1122,6 +1122,9 @@ func TestKeep(t *testing.T) {
 		finish(t, done)
 		wantLost(t, *result)
 		wantLost(t, l.Check())
+		if errors.Is(*result, ErrNotRenewed) || errors.Is(l.Check(), ErrNotRenewed) {
+			t.Errorf("Keep returned %v: a lock that another holder took is not one that could not be renewed", *result)
+		}
 	})
 
 	t.Run("it returns nil when the context ends", func(t *testing.T) {
@@ -1159,7 +1162,7 @@ func TestKeep(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root writes to a directory whatever its mode")
 		}
-		dir, clock, _, done, result := keep(t, context.Background())
+		dir, clock, l, done, result := keep(t, context.Background())
 		clock.waitParked(t, done)
 		refuseWrites(t, dir)
 
@@ -1170,11 +1173,18 @@ func TestKeep(t *testing.T) {
 		if got := clock.Now().Sub(start); got != testTTL {
 			t.Errorf("Keep gave up after %s, want %s", got, testTTL)
 		}
-		if !errors.Is(*result, ErrLost) || !errors.Is(*result, fs.ErrPermission) {
-			t.Errorf("Keep returned %v, want a loss that names the volume's error", *result)
+		if !errors.Is(*result, ErrLost) || !errors.Is(*result, ErrNotRenewed) || !errors.Is(*result, fs.ErrPermission) {
+			t.Errorf("Keep returned %v, want a loss that says the lock could not be renewed and names the volume's error", *result)
 		}
-		if !strings.HasPrefix((*result).Error(), "lock: lost to another holder: it could not be renewed for 30s: ") {
+		// No other holder was seen, and the words do not say there was one.
+		if !strings.HasPrefix((*result).Error(), "lock: could not be renewed for 30s, so it counts as lost: ") ||
+			strings.Contains((*result).Error(), "another holder") {
 			t.Errorf("the error does not say what happened: %v", *result)
+		}
+		// Every call that follows says what ended the lock, also once the volume lets the slot be made.
+		allowWrites(t, dir)
+		if err := l.Check(); !errors.Is(err, ErrLost) || err.Error() != (*result).Error() {
+			t.Errorf("Check after the loss = %v, want the error that ended the lock, %v", err, *result)
 		}
 	})
 }

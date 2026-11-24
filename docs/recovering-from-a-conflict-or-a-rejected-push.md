@@ -423,7 +423,10 @@ Two lines with the same namespace and the same claim are the two. A pod that was
 replacement takes it at once, and one that was lost with its node is waited for 30 seconds. A lock that another agent took from this one
 stops this one with the exit code 3, and the line `the writer lock was lost to another agent` is in the log of the container before
 the restart (`--previous`); its restart waits for the lock again. A pod that restarts again and again with that line has a second agent
-on its volume. `Refused`, `CommitFailed` and `PushFailed` say so too, when the lock could not be checked.
+on its volume. `Refused`, `CommitFailed` and `PushFailed` say so too, when the lock could not be checked. An agent whose heartbeat the
+volume refused for 30 seconds, as a full one does, stops with the exit code 3 as well, because another agent may take the lock then,
+and its line says instead that `the heartbeat of the writer lock could not be written`, with the error of the volume: make room on
+the claim.
 
 ### An update that was cut off
 

@@ -154,7 +154,7 @@ func (l *pulls) once(ctx context.Context) bool {
 	if l.puller == nil {
 		made, err := l.a.NewPuller(l.options)
 		if err != nil {
-			return l.report(ctx, pull.Result{}, fmt.Errorf("the pull cannot be set up: %w", err), nil)
+			return l.report(ctx, pull.Result{}, fmt.Errorf("the pull cannot be set up: %w", err))
 		}
 		l.puller = made
 	}
@@ -162,23 +162,31 @@ func (l *pulls) once(ctx context.Context) bool {
 	// it. The writer lock is held and no command runs, so what is there is stale (docs/adr/0028).
 	cleared, err := clearLocks(ctx, l.options.Layout.GitDir, l.a.fence)
 	if err != nil {
-		return l.report(ctx, pull.Result{}, clearFailed(err), cleared)
+		return l.report(ctx, pull.Result{}, clearFailed(err), clearedNote(cleared))
 	}
 	result, err := l.puller.Pull(ctx)
-	return l.report(ctx, result, err, cleared)
+	var tidied string
+	if err != nil && git.VolumeRefused(err) && ctx.Err() == nil {
+		// What the command that the volume refused had written keeps the volume full, and the heartbeat of the
+		// writer lock needs room. No command runs now.
+		tidied = tempNote(clearTempObjects(ctx, l.options.Layout.GitDir, l.a.fence))
+	}
+	return l.report(ctx, result, err, clearedNote(cleared), tidied)
 }
 
 // report publishes and logs the result of a pull, unless the agent was told to stop in the middle of it:
-// a pull that was cut short says nothing about the repository. It says too which lock files were removed
-// before the pull.
-func (l *pulls) report(ctx context.Context, result pull.Result, err error, cleared []string) bool {
+// a pull that was cut short says nothing about the repository. The notes, which are left out when empty,
+// say what was removed before and after the pull: lock files, and temporary object files.
+func (l *pulls) report(ctx context.Context, result pull.Result, err error, notes ...string) bool {
 	if ctx.Err() != nil {
 		return false
 	}
 	checked, failed := pullResult(result, err)
 	l.a.agreedByPull(l.p, result, err)
-	if note := clearedNote(cleared); note != "" {
-		checked.Message += "; " + note
+	for _, note := range notes {
+		if note != "" {
+			checked.Message += "; " + note
+		}
 	}
 	l.p.pulling = &checked
 	if err == nil && result.Outcome == pull.Resolved && result.Resolution != nil {

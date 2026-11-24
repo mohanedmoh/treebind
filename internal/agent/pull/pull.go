@@ -94,7 +94,8 @@ const (
 	// ReasonBranchGone means the repository has no such branch any more.
 	ReasonBranchGone = "BranchGone"
 	// ReasonFetchFailed means a command that asks the repository failed: the host cannot be
-	// reached, the key is refused, or the repository does not exist.
+	// reached, the key is refused, or the repository does not exist. A fetch that the volume
+	// could not take is ReasonPullFailed.
 	ReasonFetchFailed = "FetchFailed"
 	// ReasonReservedPath means the update brings a file named like the state directory into a
 	// work tree that holds it. It is the reason of the checkout for the same cause.
@@ -432,7 +433,7 @@ func (p *Puller) fetch(ctx context.Context) (string, error) {
 	refspec := "+" + headsPrefix + p.o.Branch + ":" + remotePrefix + p.o.Branch
 	if _, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
 		"--", p.o.URL, refspec); err != nil {
-		return "", p.fail(ReasonFetchFailed, "the branch %s cannot be fetched: %v", p.o.Branch, err)
+		return "", p.fetchFailed(err)
 	}
 	out, err := p.git.Run(ctx, "rev-parse", "--verify", remotePrefix+p.o.Branch+"^{commit}")
 	if err != nil {
@@ -447,7 +448,7 @@ func (p *Puller) fetchDirectory(ctx context.Context) (snapshot, source string, e
 	refspec := "+" + headsPrefix + p.o.Branch + ":" + subtree.FetchRef(p.o.Branch)
 	if _, err := p.git.RunTimeout(ctx, p.o.FetchTimeout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
 		"--", p.o.URL, refspec); err != nil {
-		return "", "", p.fail(ReasonFetchFailed, "the branch %s cannot be fetched: %v", p.o.Branch, err)
+		return "", "", p.fetchFailed(err)
 	}
 	projection, err := p.projector.Project(ctx)
 	if err != nil {
@@ -457,6 +458,16 @@ func (p *Puller) fetchDirectory(ctx context.Context) (snapshot, source string, e
 		return "", "", p.fail(ReasonPullFailed, "the files of the directory of the branch %s cannot be made: %v", p.o.Branch, err)
 	}
 	return projection.Snapshot, projection.Real, nil
+}
+
+// fetchFailed is the error of a fetch that failed. A fetch that the volume did not take, because it is full, over its quota or
+// read-only, is PullFailed, as any other write that the volume refuses: the repository answered, and the volume waits for a
+// person. FetchFailed is for a repository that could not be asked, which the agent waits for by itself.
+func (p *Puller) fetchFailed(err error) *Error {
+	if git.VolumeRefused(err) {
+		return p.fail(ReasonPullFailed, "the branch %s cannot be fetched, because the volume cannot be written: %v", p.o.Branch, err)
+	}
+	return p.fail(ReasonFetchFailed, "the branch %s cannot be fetched: %v", p.o.Branch, err)
 }
 
 // fastForward applies the commits up to tip to the checkout, which is at from, or has no commit
