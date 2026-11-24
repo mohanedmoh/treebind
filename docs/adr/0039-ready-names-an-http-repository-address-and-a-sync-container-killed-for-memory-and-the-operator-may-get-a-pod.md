@@ -3,6 +3,9 @@
 - Status: accepted
 - Date: 2026-11-24
 - Issue: #256, #258
+- Extended by: [0040](0040-ready-names-a-sync-pod-that-cannot-be-placed-and-a-node-that-is-not-ready-and-synced-is-unknown-without-a-report.md),
+  which gives `Ready` two more reasons of its own, `SyncPodUnschedulable` and `SyncPodNodeNotReady`, and makes `Synced`
+  `Unknown` after 3 minutes without a report, whatever the reason
 - Extends: [0004](0004-treebind-status-conditions.md), [0032](0032-the-operator-may-do-what-it-does-and-can-be-limited-to-namespaces.md)
 
 ## Context

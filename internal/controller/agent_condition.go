@@ -22,6 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
@@ -112,11 +113,17 @@ func reasonOf(kind statusclient.Kind) string {
 }
 
 // unreachableMessage is the message of the condition when it is True: what failed and
-// what is the likeliest thing to check.
+// what is the likeliest thing to check. A connection that fails to a sync pod whose
+// node is not ready, as Ready says, is the node and not a network policy (#267).
 func unreachableMessage(treebind *treebindv1alpha1.Treebind, failure *statusclient.Error) string {
 	what := capitalize(failure.Message)
 	switch failure.Kind {
 	case statusclient.KindConnectionFailed:
+		ready := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionReady)
+		if ready != nil && ready.Reason == treebindv1alpha1.ReasonSyncPodNodeNotReady {
+			return fmt.Sprintf("The operator cannot reach the sync agent: %s. The node of the sync pod is not ready: "+
+				"Ready names it and says what to do", failure.Message)
+		}
 		return fmt.Sprintf("The operator cannot reach the sync agent: %s. A network policy or a service mesh may be "+
 			"blocking it: the operator has to be allowed to reach port %d of the sync pod", failure.Message, statusclient.Port)
 	case statusclient.KindTokenRefused:

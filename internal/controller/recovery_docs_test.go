@@ -125,7 +125,7 @@ func refusedPush(t *testing.T) *treebindv1alpha1.Treebind {
 	treebind := syncTreebind(bidirectional, treebindv1alpha1.TreebindStatus{})
 	treebind.Spec.Sync.Interval = &metav1.Duration{Duration: 30 * time.Second}
 	synced := syncStatusOf(treebind, syncReport(bidirectional, commitOne, failedCheck(app.CheckPush, reasonPushRejected)),
-		metav1.ConditionFalse, hashOfSpec)
+		metav1.ConditionFalse, 0, hashOfSpec)
 	if synced.synced == nil || synced.synced.Reason != reasonPushRejected {
 		t.Fatalf("Synced = %+v, want it False with PushRejected", synced.synced)
 	}

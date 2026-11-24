@@ -73,11 +73,18 @@ func TestAgentUnreachableConditionForTheOutcomeOfAPoll(t *testing.T) {
 	const keysName = testTreebindName + "-sync-keys"
 	after := statusUnreachableAfter
 
+	// The reasons of Ready that the reconcile of the spec writes, for a sync pod on a node that is not ready and on one
+	// that is.
+	readyFor := func(reason string) *metav1.Condition {
+		return &metav1.Condition{Type: treebindv1alpha1.ConditionReady, Status: no, Reason: reason}
+	}
+
 	tests := []struct {
 		name        string
 		outcome     pollOutcome
 		previous    *metav1.Condition
 		failingFor  time.Duration
+		ready       *metav1.Condition
 		wantStatus  metav1.ConditionStatus
 		wantReason  string
 		wantMessage string
@@ -171,6 +178,31 @@ func TestAgentUnreachableConditionForTheOutcomeOfAPoll(t *testing.T) {
 			wantMessage: messageUnreachableStart + "the sync pod did not answer in time" + messageUnreachableTail,
 		},
 		{
+			name:       "no answer in time from a sync pod whose node is not ready names the node and not a network policy",
+			outcome:    pollOutcome{failure: failed(statusclient.KindConnectionFailed, "the sync pod did not answer in time")},
+			failingFor: after,
+			ready:      readyFor(treebindv1alpha1.ReasonSyncPodNodeNotReady),
+			wantStatus: yes, wantReason: reasonConnectionFailed,
+			wantMessage: messageUnreachableStart + "the sync pod did not answer in time. " +
+				"The node of the sync pod is not ready: Ready names it and says what to do",
+		},
+		{
+			name:       "no answer in time from a sync pod that is not ready on a node that is keeps the network policy",
+			outcome:    pollOutcome{failure: failed(statusclient.KindConnectionFailed, "the sync pod did not answer in time")},
+			failingFor: after,
+			ready:      readyFor(treebindv1alpha1.ReasonSyncPodNotReady),
+			wantStatus: yes, wantReason: reasonConnectionFailed,
+			wantMessage: messageUnreachableStart + "the sync pod did not answer in time" + messageUnreachableTail,
+		},
+		{
+			name:       "a node that is not ready is not why a poll failed for less than the time",
+			outcome:    pollOutcome{failure: failed(statusclient.KindConnectionFailed, msgRefusedConnection)},
+			failingFor: time.Minute,
+			ready:      readyFor(treebindv1alpha1.ReasonSyncPodNodeNotReady),
+			wantStatus: unknown, wantReason: reasonPollFailing,
+			wantMessage: "The last poll failed: the sync pod refused the connection. " + messagePollFailingTail,
+		},
+		{
 			name:       "a refused token that has lasted the time, with the keys in place",
 			outcome:    pollOutcome{failure: failed(statusclient.KindTokenRefused, msgTokenRefused)},
 			failingFor: after,
@@ -213,6 +245,9 @@ func TestAgentUnreachableConditionForTheOutcomeOfAPoll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			treebind := testTreebindWithGeneration(7)
+			if tt.ready != nil {
+				treebind.Status.Conditions = []metav1.Condition{*tt.ready}
+			}
 
 			got := agentUnreachableCondition(treebind, tt.outcome, tt.previous, tt.failingFor)
 

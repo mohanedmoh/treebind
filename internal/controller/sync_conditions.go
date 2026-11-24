@@ -73,7 +73,8 @@ const (
 		"has passed since"
 )
 
-// agentUnreachableMessage is the message of both conditions while AgentUnreachable is True.
+// agentUnreachableMessage is the message of both conditions while AgentUnreachable is True, and once no poll has got a
+// report for as long.
 var agentUnreachableMessage = fmt.Sprintf("The operator has not been able to read the sync agent's report for %d "+
 	"minutes or more, so it does not know what the sync does; AgentUnreachable says why",
 	int(statusUnreachableAfter.Minutes()))
@@ -184,12 +185,15 @@ type syncStatus struct {
 
 // syncStatusOf returns what the poll of the agent of treebind says of the sync. report is the agent's report as the
 // client accepted it, nil when the poll did not get one; unreachable is the status of the AgentUnreachable condition
-// that the same poll makes; templateHash is the hash of the pod template that the current spec gives, the value of the
-// variable that desiredPodTemplate gives the agent.
+// that the same poll makes; unreadFor is how long the polls have got no report, for any reason, since one was read, 0
+// for a poll that got one and for a Treebind that has never been read; templateHash is the hash of the pod template that the current spec gives, the value of the variable that
+// desiredPodTemplate gives the agent.
 //
-//   - While AgentUnreachable is True, both conditions are Unknown with the reason AgentUnreachable: what they said is
-//     no longer known to hold (docs/adr/0015). While it is Unknown, or when there is no report, nothing changes: the
-//     poll says nothing of the sync.
+//   - While AgentUnreachable is True, and once no poll has got a report for statusUnreachableAfter, both conditions are
+//     Unknown with the reason AgentUnreachable: what they said is no longer known to hold (docs/adr/0015). The second
+//     is the case of a sync pod that does not run, whose name does not resolve, and of an operator that cannot make
+//     the call, which leave AgentUnreachable Unknown for ever (docs/adr/0040). Otherwise, while AgentUnreachable is
+//     Unknown, or when there is no report, nothing changes: the poll says nothing of the sync.
 //   - A report of another template than the spec gives, or of none, as from an agent of the release before, says
 //     nothing of the sync of this spec: both conditions are Unknown with the reason AgentOutdated, and the agreement it
 //     reports is not taken either, because it can be of the repository or the branch of the spec before.
@@ -207,11 +211,12 @@ type syncStatus struct {
 // condition that it leaves keeps the generation its last write gave it. The commit of the report is a full object name,
 // which the client checks before the report gets here.
 func syncStatusOf(
-	treebind *treebindv1alpha1.Treebind, report *status.Report, unreachable metav1.ConditionStatus, templateHash string,
+	treebind *treebindv1alpha1.Treebind, report *status.Report, unreachable metav1.ConditionStatus,
+	unreadFor time.Duration, templateHash string,
 ) syncStatus {
 	generation := treebind.Generation
 	switch {
-	case unreachable == metav1.ConditionTrue:
+	case unreachable == metav1.ConditionTrue, unreadFor >= statusUnreachableAfter:
 		return unknownSyncStatus(treebindv1alpha1.ReasonAgentUnreachable, agentUnreachableMessage, generation)
 	case unreachable == metav1.ConditionUnknown || report == nil:
 		return syncStatus{}

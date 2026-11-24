@@ -110,11 +110,14 @@ type StatusPollerReconciler struct {
 	// now is time.Now unless a test replaces it.
 	now func() time.Time
 
-	// failingSince is when the polls of each Treebind that is failing began to fail.
-	// It is in memory: a restart of the operator or a new leader starts the count
-	// again, which only delays True by a few minutes.
+	// failingSince is when the polls of each Treebind that is failing began to fail,
+	// as AgentUnreachable counts them, and unreadSince when they began to get no
+	// report, for any reason, after a report was read. They are in memory: a restart
+	// of the operator or a new leader starts the counts again, which only delays True
+	// and Unknown by a few minutes.
 	mu           sync.Mutex
 	failingSince map[types.NamespacedName]time.Time
+	unreadSince  map[types.NamespacedName]time.Time
 }
 
 // agentSettings is what the sync pods are given beside the spec of a Treebind, as the
@@ -130,28 +133,49 @@ func (r *StatusPollerReconciler) clock() time.Time {
 	return time.Now()
 }
 
-// failingFor records a failed poll of the Treebind and returns how long the polls have
-// failed in a row, which is 0 for the first.
-func (r *StatusPollerReconciler) failingFor(key types.NamespacedName) time.Duration {
+// failingFor records a poll of the Treebind that got no report and returns how long
+// the polls have failed in a row, as AgentUnreachable counts them, and how long they
+// have got no report, for any reason. Each is 0 at the first poll that it counts, and
+// a poll that it does not count ends it. counts says whether this poll is the agent
+// failing to answer (countsAsFailing), and reported whether the status holds what an
+// earlier report said: a Treebind that has never been read has nothing to go stale,
+// so a slow first start of its sync pod is not counted as an outage.
+func (r *StatusPollerReconciler) failingFor(
+	key types.NamespacedName, counts, reported bool,
+) (failing, unread time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.clock()
-	since, failing := r.failingSince[key]
-	if !failing {
-		if r.failingSince == nil {
-			r.failingSince = make(map[types.NamespacedName]time.Time)
+	count := func(times *map[types.NamespacedName]time.Time, counted bool) time.Duration {
+		if !counted {
+			delete(*times, key)
+			return 0
 		}
-		r.failingSince[key] = now
+		return elapsedSince(times, key, now)
+	}
+	return count(&r.failingSince, counts), count(&r.unreadSince, reported)
+}
+
+// elapsedSince returns how long it is from the time that times holds for the key to
+// now, and holds now for the key when it holds none.
+func elapsedSince(times *map[types.NamespacedName]time.Time, key types.NamespacedName, now time.Time) time.Duration {
+	since, held := (*times)[key]
+	if !held {
+		if *times == nil {
+			*times = make(map[types.NamespacedName]time.Time)
+		}
+		(*times)[key] = now
 		return 0
 	}
 	return now.Sub(since)
 }
 
-// recovered forgets that the polls of the Treebind were failing.
+// recovered forgets that the polls of the Treebind were failing and got no report.
 func (r *StatusPollerReconciler) recovered(key types.NamespacedName) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.failingSince, key)
+	delete(r.unreadSince, key)
 }
 
 // The events of a change of Synced and Conflict are recorded on the Treebind, in its namespace, through the
@@ -227,9 +251,9 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	key := client.ObjectKeyFromObject(treebind)
-	var failingFor time.Duration
-	if outcome.failure != nil && countsAsFailing(outcome) {
-		failingFor = r.failingFor(key)
+	var failingFor, unreadFor time.Duration
+	if outcome.failure != nil {
+		failingFor, unreadFor = r.failingFor(key, countsAsFailing(outcome), everReported(treebind))
 	} else {
 		r.recovered(key)
 	}
@@ -243,7 +267,7 @@ func (r *StatusPollerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// What the poll says of the sync depends on the AgentUnreachable it makes, and goes
 	// into the same write, so that a conflict loses neither and no write shows one
 	// without the other.
-	polled := syncStatusOf(treebind, report, condition.Status, specHash)
+	polled := syncStatusOf(treebind, report, condition.Status, unreadFor, specHash)
 	changed = polled.apply(&treebind.Status) || changed
 	if changed {
 		if err := r.Status().Update(ctx, treebind); err != nil {
@@ -300,6 +324,13 @@ func countsAsFailing(outcome pollOutcome) bool {
 	default:
 		return true
 	}
+}
+
+// everReported says whether the status of the Treebind holds what a poll made of the sync: Synced is there and no longer
+// says AwaitingAgentReport, which the reconcile of the spec gives it until then.
+func everReported(treebind *treebindv1alpha1.Treebind) bool {
+	synced := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionSynced)
+	return synced != nil && synced.Reason != treebindv1alpha1.ReasonAwaitingAgentReport
 }
 
 // conditionSummary is the status and the reason of a condition, for the log.

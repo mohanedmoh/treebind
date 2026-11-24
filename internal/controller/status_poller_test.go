@@ -398,9 +398,11 @@ var _ = Describe("The status poller", func() {
 	})
 
 	It("does not poll a Treebind that is being deleted, and forgets it", func() {
+		poll() // a report was read, so a poll that reads none counts
 		agents.set(errNoConnection)
 		poll()
 		Expect(poller.failingSince).NotTo(BeEmpty())
+		Expect(poller.unreadSince).NotTo(BeEmpty())
 		asked := len(agents.asked())
 
 		held := get()
@@ -414,6 +416,7 @@ var _ = Describe("The status poller", func() {
 		Expect(result).To(Equal(reconcile.Result{}))
 		Expect(agents.asked()).To(HaveLen(asked))
 		Expect(poller.failingSince).To(BeEmpty())
+		Expect(poller.unreadSince).To(BeEmpty())
 
 		release := get()
 		controllerutil.RemoveFinalizer(release, "test.example.org/hold")
@@ -464,8 +467,10 @@ var _ = Describe("The status poller", func() {
 	})
 
 	It("forgets a Treebind that is gone, so that the count of a new one with its name begins at zero", func() {
+		poll() // a report was read, so a poll that reads none counts
 		agents.set(errNoConnection)
 		poll()
+		Expect(poller.unreadSince).NotTo(BeEmpty())
 		clock.Advance(time.Hour)
 		Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
 
@@ -473,6 +478,7 @@ var _ = Describe("The status poller", func() {
 
 		Expect(result).To(Equal(reconcile.Result{}))
 		Expect(poller.failingSince).To(BeEmpty())
+		Expect(poller.unreadSince).To(BeEmpty())
 	})
 
 	It("does not turn the stop of the manager into a failure of the agent", func() {
@@ -694,16 +700,67 @@ var _ = Describe("The status poller", func() {
 			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
 		})
 
-		It("leaves them as they are while the operator cannot tell whether the agent answers", func() {
+		// A sync pod that the scheduler cannot place has no address, so its name does not resolve, and AgentUnreachable
+		// stays Unknown for as long as it waits (#266). The polls that read no report count all the same.
+		It("says Unknown for both once no report has been read for the time, whatever the reason, and takes the next one", func() {
 			agents.answer(currentReport(get(), commitOne))
 			poll()
-			agents.set(&statusclient.Error{Kind: statusclient.KindTokenUnavailable, Message: "no token"})
+			agents.set(errPodNotRunning)
 
+			poll()
+			clock.Advance(statusUnreachableAfter - time.Second)
+			poll()
+			expectCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonAgentNotRunning)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionFalse, reasonNoConflict)
+
+			clock.Advance(time.Second)
+			poll()
+			expectCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonAgentNotRunning)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, reasonUnreachable)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionUnknown, reasonUnreachable)
+			Expect(find(treebindv1alpha1.ConditionSynced).Message).To(Equal(msgUnreachable))
+			Expect(get().Status.LastSyncedCommit).To(Equal(commitOne), "a poll that failed cleared the agreement")
+
+			// Without a token the operator reads no report either, and the count goes on.
+			agents.set(&statusclient.Error{Kind: statusclient.KindTokenUnavailable, Message: "no token"})
 			clock.Advance(time.Hour)
 			poll()
-
 			expectCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonTokenUnavailable)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, reasonUnreachable)
+
+			agents.set(nil)
+			poll()
+			expectCondition(metav1.ConditionFalse, treebindv1alpha1.ReasonReportReceived)
 			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionFalse, reasonNoConflict)
+
+			// The count began again with the report.
+			agents.set(errPodNotRunning)
+			clock.Advance(statusUnreachableAfter)
+			poll()
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionTrue, reasonInSync)
+		})
+
+		// A sync pod that waits for its claim to be bound or its image to be pulled has never been read, and its status
+		// holds nothing that could go stale: a slow first start is no outage.
+		It("keeps AwaitingAgentReport while no report was ever read, however long the polls read none", func() {
+			fresh := get()
+			addAwaitingReportConditions(fresh)
+			Expect(k8sClient.Status().Update(ctx, fresh)).To(Succeed())
+			agents.set(errPodNotRunning)
+
+			poll()
+			for range 5 {
+				clock.Advance(time.Minute)
+				poll()
+			}
+
+			expectCondition(metav1.ConditionUnknown, treebindv1alpha1.ReasonAgentNotRunning)
+			expectSync(treebindv1alpha1.ConditionSynced, metav1.ConditionUnknown, treebindv1alpha1.ReasonAwaitingAgentReport)
+			expectSync(treebindv1alpha1.ConditionConflict, metav1.ConditionUnknown, treebindv1alpha1.ReasonAwaitingAgentReport)
+			Expect(poller.unreadSince).To(BeEmpty())
+			Expect(recorder.summaries()).To(BeEmpty())
 		})
 
 		It("says AgentOutdated for a report of another template, or of none, and takes no agreement from it", func() {

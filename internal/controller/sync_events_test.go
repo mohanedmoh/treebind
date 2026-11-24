@@ -58,7 +58,7 @@ func pollFrom(
 	unreachable metav1.ConditionStatus,
 ) []metav1.Condition {
 	treebind := syncTreebind(direction, treebindv1alpha1.TreebindStatus{Conditions: slices.Clone(before)})
-	syncStatusOf(treebind, report, unreachable, hashOfSpec).apply(&treebind.Status)
+	syncStatusOf(treebind, report, unreachable, 0, hashOfSpec).apply(&treebind.Status)
 	return treebind.Status.Conditions
 }
 
