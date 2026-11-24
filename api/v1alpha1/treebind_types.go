@@ -476,6 +476,9 @@ const (
 	ReasonSyncPodReady = "SyncPodReady"
 	// ReasonSyncPodNotReady means the sync StatefulSet has no ready pod.
 	ReasonSyncPodNotReady = "SyncPodNotReady"
+	// ReasonSyncPodOOMKilled means the sync pod is not ready because its container
+	// was killed for using more memory than its limit. The message names the limit.
+	ReasonSyncPodOOMKilled = "SyncPodOOMKilled"
 	// ReasonNotSynced means the sync pod is ready but the volume is not in sync
 	// with the repository. The message names the reason of the Synced condition.
 	ReasonNotSynced = "NotSynced"

@@ -14,6 +14,7 @@ never do, and says how to install it so that it works in the namespaces you choo
 | `statefulsets`, `services` | get, list, watch, create, update | The one-replica StatefulSet and the headless Service of each Treebind |
 | `configmaps` | create, patch | The public keys that the sync agent checks the operator's token against ([ADR 0015](adr/0015-the-operator-reads-the-agents-status.md)). It never reads one |
 | `events` of `events.k8s.io` | create, patch | An event on the Treebind for each change of `Synced` and `Conflict` ([metrics and events](metrics-and-events.md)). It reads none |
+| `pods` | get | The sync pod of a Treebind, while its StatefulSet has no ready pod, to say in `Ready` whether its container was killed for memory ([large files](agent-status.md#large-files)). The role cannot name the sync pods, because their names are made from the names of the Treebinds, so it may get any pod where the role applies: in every namespace with the ClusterRole of a cluster-wide install, and only in the namespaces of `rbac.namespaces` (the release namespace when it is empty) with the Roles of `rbac.namespaced=true`. It lists and watches no pod |
 | `leases` (its own namespace) | get, create, update | Leader election ([operator replicas](operator-replicas.md)) |
 | `events` of the core group (its own namespace) | create, patch | The events that leader election records |
 | `serviceaccounts/token` (its own namespace) | create, for its own account only | The token that it calls the sync agents with |
