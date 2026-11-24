@@ -17,6 +17,7 @@ limitations under the License.
 package pull
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,6 +39,9 @@ const (
 	yoursFirst = "ONE\ntwo\nthree\n"
 	theirsLast = "one\ntwo\nTHREE\n"
 	joinedBoth = "ONE\ntwo\nTHREE\n"
+
+	// The repository's edit of the first line, which is the line that yoursFirst changed too.
+	theirsFirst = "UNO\ntwo\nthree\n"
 )
 
 // runPage runs a block of the page for the checkout of the world, with the variables that the page says it needs.
@@ -119,6 +123,43 @@ func TestTheCommandThatPutsBackAFileOfYourVersionDoesSoAndChangesNothingElse(t *
 	})
 }
 
+// join runs the first block of the page that joins the two versions of a file, with the directory that it makes in a
+// directory of its own, so that the next block can be run for it. It returns what the block wrote and that directory.
+func (w *world) join(t *testing.T) (out, work string) {
+	t.Helper()
+	tmp := gittest.TempDir(t)
+	out = w.runPage(t, "join-the-two-versions-of-a-file", []string{"mktemp", "grep", "rm"}, "TMPDIR="+tmp, "REF="+firstLocal, "FILE="+fileA)
+	made, err := os.ReadDir(tmp)
+	if err != nil || len(made) != 1 {
+		t.Fatalf("the block made %v in %s, err = %v, want the one work directory", made, tmp, err)
+	}
+	return out, filepath.Join(tmp, made[0].Name())
+}
+
+// putInPlace runs the second block, which puts the joined file of the work directory where the application reads it. An empty
+// work leaves WORK unset, as it is in a terminal that did not run the first block.
+func (w *world) putInPlace(t *testing.T, work string) string {
+	t.Helper()
+	extra := []string{"FILE=" + fileA}
+	if work != "" {
+		extra = append(extra, "WORK="+work)
+	}
+	return w.runPage(t, "put-the-joined-file-in-place", []string{"cp", "grep"}, extra...)
+}
+
+// conflictedOnOneLine makes what is usual after a conflict: both sides changed the first line of a.json, and followRemote took the
+// repository's version, so that it is what the volume has.
+func conflictedOnOneLine(t *testing.T, sub string) *world {
+	t.Helper()
+	w := newWorldOf(t, sub, map[string]string{fileA: threeLines, fileB: contentB}, resolving(FollowRemote))
+	w.local(t, map[string]string{fileA: yoursFirst})
+	w.f.Publish(branchMain, map[string]string{fileA: theirsFirst})
+	if got, err := w.pull(t); err != nil || got.Outcome != Resolved {
+		t.Fatalf("result = %+v, %v, want the conflict resolved", got, err)
+	}
+	return w
+}
+
 func TestTheCommandsThatJoinTheTwoVersionsOfAFileKeepBothEdits(t *testing.T) {
 	eachLayout(t, func(t *testing.T, sub string) {
 		w, _ := conflicted(t, sub, FollowRemote)
@@ -126,13 +167,121 @@ func TestTheCommandsThatJoinTheTwoVersionsOfAFileKeepBothEdits(t *testing.T) {
 			t.Fatal("the volume does not have the repository's version, as the page says")
 		}
 
-		w.runPage(t, "join-the-two-versions-of-a-file", []string{"mktemp", "cp"}, "REF="+firstLocal, "FILE="+fileA)
+		out, work := w.join(t)
+
+		// The first block shows the result and writes it beside the file and not over it.
+		if !strings.Contains(out, joinedBoth) || !strings.Contains(out, "exit status 0, places marked: 0") {
+			t.Errorf("output = %q, want the joined file and no place marked", out)
+		}
+		if gittest.Read(t, w.l, fileA) != theirsLast || w.dirty(t) != "" {
+			t.Error("the first block changed the volume")
+		}
+		if got, err := os.ReadFile(filepath.Join(work, "joined")); err != nil || string(got) != joinedBoth {
+			t.Errorf("joined = %q, %v, want both edits: %q", got, err, joinedBoth)
+		}
+
+		w.putInPlace(t, work)
 
 		if got := gittest.Read(t, w.l, fileA); got != joinedBoth {
 			t.Errorf("the file = %q, want both edits: %q", got, joinedBoth)
 		}
 		if dirty := w.dirty(t); dirty != "M "+fileA {
 			t.Errorf("status = %q, want the joined file as an edit that is not committed", dirty)
+		}
+	})
+}
+
+func TestTheCommandThatJoinsTwoEditsOfOneLineShowsTheMarksAndLeavesTheFileAlone(t *testing.T) {
+	// Both sides changed the first line, which is what a conflict usually is. The block has to get through the exit status of
+	// merge-file, which is not zero, and it must not put the marks in the directory that the agent commits.
+	eachLayout(t, func(t *testing.T, sub string) {
+		w := conflictedOnOneLine(t, sub)
+		head := w.head()
+
+		out, work := w.join(t)
+
+		for _, want := range []string{"<<<<<<<", "ONE\n", "UNO\n", ">>>>>>>", "exit status 1, places marked: 1"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output = %q, want it to hold %q", out, want)
+			}
+		}
+		if got, err := os.ReadFile(filepath.Join(work, "joined")); err != nil || !strings.Contains(string(got), "<<<<<<<") {
+			t.Errorf("joined = %q, %v, want the result with its marks", got, err)
+		}
+		if gittest.Read(t, w.l, fileA) != theirsFirst {
+			t.Error("the file of the volume is not the repository's version: the block wrote over it")
+		}
+		if dirty := w.dirty(t); dirty != "" || w.head() != head {
+			t.Errorf("status = %q, want the checkout clean and where it was", dirty)
+		}
+	})
+}
+
+func TestTheCommandThatPutsTheJoinedFileInPlaceRefusesAFileThatStillHasMarks(t *testing.T) {
+	// A reader who pastes both blocks one after the other must not get the marks into the directory.
+	eachLayout(t, func(t *testing.T, sub string) {
+		w := conflictedOnOneLine(t, sub)
+		_, work := w.join(t)
+
+		out := w.putInPlace(t, work)
+
+		if !strings.Contains(out, "still has conflict marks") || !strings.Contains(out, "Nothing was copied") {
+			t.Errorf("output = %q, want the block to say that the file has marks and that it copied nothing", out)
+		}
+		if gittest.Read(t, w.l, fileA) != theirsFirst || w.dirty(t) != "" {
+			t.Error("the block put a file with marks in the directory")
+		}
+	})
+}
+
+func TestTheCommandThatPutsTheJoinedFileInPlaceCopiesItOnceTheMarksAreOut(t *testing.T) {
+	eachLayout(t, func(t *testing.T, sub string) {
+		w := conflictedOnOneLine(t, sub)
+		_, work := w.join(t)
+		// What the page tells the reader to do: keep one of the two versions, and take the marks out.
+		if err := os.WriteFile(filepath.Join(work, "joined"), []byte(yoursFirst), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		out := w.putInPlace(t, work)
+
+		if strings.Contains(out, "Nothing was copied") {
+			t.Errorf("output = %q, want the block to copy a file with no marks", out)
+		}
+		if got := gittest.Read(t, w.l, fileA); got != yoursFirst {
+			t.Errorf("the file = %q, want the fixed file: %q", got, yoursFirst)
+		}
+		if dirty := w.dirty(t); dirty != "M "+fileA {
+			t.Errorf("status = %q, want the fixed file as an edit that is not committed", dirty)
+		}
+	})
+}
+
+func TestTheCommandsThatJoinSayWhenMergeFileFailsAndCopyNothing(t *testing.T) {
+	// The file of the volume is not there, so merge-file cannot read it and ends with the status of an error, which is not a count of
+	// places. The block says so and makes no joined file, so the next block copies nothing, in the terminal that ran the first one
+	// and in one that does not know the work directory.
+	eachLayout(t, func(t *testing.T, sub string) {
+		w, _ := conflicted(t, sub, FollowRemote)
+		if err := os.Remove(filepath.Join(w.l.WorkTree, fileA)); err != nil {
+			t.Fatal(err)
+		}
+
+		out, work := w.join(t)
+
+		if !strings.Contains(out, "exit status 255") || !strings.Contains(out, "nothing was joined") || strings.Contains(out, "places marked") {
+			t.Errorf("output = %q, want it to say that merge-file failed and that nothing was joined", out)
+		}
+		if gittest.Exists(filepath.Join(work, "joined")) {
+			t.Error("the block left a joined file after the failure")
+		}
+		for _, again := range []string{w.putInPlace(t, work), w.putInPlace(t, "")} {
+			if !strings.Contains(again, "run the block above first") || !strings.Contains(again, "Nothing was copied") {
+				t.Errorf("output = %q, want the block to say to run the block above first, and that it copied nothing", again)
+			}
+		}
+		if gittest.Exists(filepath.Join(w.l.WorkTree, fileA)) {
+			t.Error("the second block wrote a file that the first did not make")
 		}
 	})
 }
