@@ -24,7 +24,9 @@ maintainers:
     url: https://github.com/mohanedmoh
 
 # What Artifact Hub shows of the chart (https://artifacthub.io/docs/topics/annotations/helm/). The images are not listed
-# here: their tag is the version of a release, which the release workflow sets and this file does not know.
+# here: their tag is the version of a release, which the release workflow sets and this file does not know. Nor is
+# artifacthub.io/prerelease: the release workflow adds it, as "true", to the chart of a version with a suffix such as
+# -rc.1.
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/category: integration-delivery

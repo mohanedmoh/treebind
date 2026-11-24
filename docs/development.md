@@ -285,7 +285,9 @@ change anything under `api/` or the RBAC markers in the controller, then commit
 the result, because CI fails on a dirty diff.
 
 The chart's copies of the CRD and of the operator's role are generated from
-`config/`; do not edit them by hand. The chart's manager Deployment is written
+`config/`; do not edit them by hand. Helm reads every `{{` of a template as the start of an action, so
+`hack/sync-chart-crd.sh` writes each `{{` and `}}` of the CRD as a Helm string, and the chart job of CI renders the CRD with Helm and
+compares it with the generated CRD. The chart's manager Deployment is written
 by hand. `make test` compares it with `config/manager/manager.yaml` and names
 the field that differs, so change both when you change one: the arguments, the
 probes and ports, the security contexts, the resources, the replica count, the

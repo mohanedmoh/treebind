@@ -254,14 +254,28 @@ jobs:
           done
 
       # 6. Package the chart with version and appVersion set to the release
-      #    without the v, push it to ghcr.io/<owner>/charts, and sign it.
+      #    without the v, push it to ghcr.io/<owner>/charts, and sign it. A
+      #    pre-release also carries the annotation that tells Artifact Hub so.
       - name: Package, push and sign the Helm chart
         run: |
           set -euo pipefail
           source hack/retry.sh
           owner="${GITHUB_REPOSITORY_OWNER,,}"
+          # Artifact Hub lists a chart as a stable release unless its Chart.yaml says it is a pre-release, and helm
+          # package has no flag for an annotation. So the line is added to the Chart.yaml of this checkout, which
+          # nothing else reads, and the packaged chart is read back below. A stable release has no such line.
+          if [ "$PRERELEASE" = "true" ]; then
+            sed -i 's|^annotations:$|&\n  artifacthub.io/prerelease: "true"|' charts/treebind/Chart.yaml
+          fi
           helm lint charts/treebind --strict
           helm package charts/treebind --version "$VERSION" --app-version "$VERSION" --destination out
+          want=0
+          if [ "$PRERELEASE" = "true" ]; then want=1; fi
+          got="$(tar -xzOf "out/treebind-${VERSION}.tgz" treebind/Chart.yaml | grep -c '^  artifacthub.io/prerelease: "true"$' || true)"
+          if [ "$got" -ne "$want" ]; then
+            echo "::error::The packaged chart has $got artifacthub.io/prerelease annotations, and a release with PRERELEASE=$PRERELEASE needs $want."
+            exit 1
+          fi
           # The chart is a new package on its first release, so its push is
           # retried like the images. Each attempt rewrites the log that the
           # digest is read from.
