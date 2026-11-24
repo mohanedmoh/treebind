@@ -161,6 +161,7 @@ var wantSettings = map[string]string{
 	"gpg.ssh.defaultKeyCommand": "",
 	"gc.auto":                   "0",
 	"maintenance.auto":          wantFalse,
+	"core.bigFileThreshold":     "16m",
 	"safe.directory":            fakeWorkDir,
 }
 

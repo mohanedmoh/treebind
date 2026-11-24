@@ -275,6 +275,7 @@ func main() {
 		StatusSubject: status.Subject,
 		StatusKeys:    statusKeys,
 		Metrics:       treebindMetrics,
+		APIReader:     mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind")
 		os.Exit(1)

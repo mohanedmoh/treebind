@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +54,14 @@ type TreebindReconciler struct {
 	// Metrics holds the metrics of the Treebinds, which the status poller shares. The reconcile records in it the
 	// conditions that it owns, Ready and SpecSupported (metrics.go).
 	Metrics *Metrics
+	// APIReader reads the sync pod from the API server and not from the cache, so that the operator needs only get on
+	// pods and not a watch of every pod (docs/rbac.md). The reconcile reads the pod only while it is not ready, to say
+	// whether its container was killed for memory. SetupWithManager requires it, and a reconciler without one, as a
+	// test makes, reads no pod.
+	APIReader client.Reader
+
+	// now is time.Now unless a test replaces it.
+	now func() time.Time
 }
 
 // agentSettings is what the sync pods are given beside the spec of a Treebind.
@@ -60,15 +69,24 @@ func (r *TreebindReconciler) agentSettings() agentSettings {
 	return agentSettings{Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject}
 }
 
+func (r *TreebindReconciler) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
 // What the operator may do is what its code does and no more (NFR-5): it reads Treebinds and writes their
 // status, and it creates and updates the StatefulSet and the Service that a Treebind owns, which the garbage
 // collector deletes with it. The finalizers verb is for the owner reference of what it creates, which sets
-// blockOwnerDeletion. The ConfigMap of the keys is in statuskeys.go. rbac_exact_test.go holds each list.
+// blockOwnerDeletion. It gets the sync pod by its name, and lists and watches no pod, to say why the pod is not ready.
+// The ConfigMap of the keys is in statuskeys.go. rbac_exact_test.go holds each list.
 // +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds,verbs=get;list;watch
 // +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds/status,verbs=update
 // +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get
 
 // awaitingReportMessage is the message of the Synced and Conflict conditions
 // until the sync agent's first report arrives.
@@ -101,7 +119,7 @@ const awaitingReportMessage = "No report from the sync agent has been received y
 // the sync. The failure is logged and the pass is asked for again after about
 // statusKeysRetry. A pass that succeeds is asked for again after about
 // statusKeysRefresh, because the keys can change with nothing in the cluster to
-// say so.
+// say so, and after about syncPodRecheck while no sync pod is ready.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
@@ -157,6 +175,9 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	default:
 		synced := meta.FindStatusCondition(treebind.Status.Conditions, treebindv1alpha1.ConditionSynced)
 		ready = readyCondition(statefulSet, synced, treebind.Spec.Sync.Direction, treebind.Generation)
+		if ready.Reason == treebindv1alpha1.ReasonSyncPodNotReady {
+			ready = r.whySyncPodNotReady(ctx, statefulSet, ready)
+		}
 	}
 	changed = meta.SetStatusCondition(&treebind.Status.Conditions, ready) || changed
 
@@ -179,11 +200,22 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if ensureErr != nil {
 		return ctrl.Result{}, ensureErr
 	}
+	after := jittered(statusKeysRefresh)
 	if keysErr != nil {
-		return ctrl.Result{RequeueAfter: jittered(statusKeysRetry)}, nil
+		after = jittered(statusKeysRetry)
 	}
-	return ctrl.Result{RequeueAfter: jittered(statusKeysRefresh)}, nil
+	// Without a reader of the pod a pass sooner learns nothing new.
+	if r.APIReader != nil && (ready.Reason == treebindv1alpha1.ReasonSyncPodNotReady ||
+		ready.Reason == treebindv1alpha1.ReasonSyncPodOOMKilled) {
+		after = min(after, jittered(syncPodRecheck))
+	}
+	return ctrl.Result{RequeueAfter: after}, nil
 }
+
+// syncPodRecheck is about how soon a pass is asked for again while no sync pod is ready. A pod that has never been ready
+// gives its StatefulSet nothing to change while its container is killed and started again, so no event starts a pass
+// that reads the pod, and Ready would say why only after the refresh of the keys (#256).
+const syncPodRecheck = 30 * time.Second
 
 // ensureSyncObjects creates or updates the Service and then the StatefulSet. It
 // returns the StatefulSet as the API server last reported it, or the error of the
@@ -369,6 +401,82 @@ func syncFailureWaitsForPerson(
 		!WaitsForRepository(synced.Reason, direction)
 }
 
+// whySyncPodNotReady reads the one pod of the StatefulSet and returns the Ready condition of a sync pod that is not
+// ready with what its container status says of the cause (oomKilledCondition). A pod that is not there yet, or that
+// cannot be read, leaves the condition as it is: the status says less, and the sync is not touched.
+func (r *TreebindReconciler) whySyncPodNotReady(
+	ctx context.Context, statefulSet *appsv1.StatefulSet, ready metav1.Condition,
+) metav1.Condition {
+	if r.APIReader == nil {
+		return ready
+	}
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: statefulSet.Namespace, Name: statefulSet.Name + "-0"}
+	if err := r.APIReader.Get(ctx, key, pod); err != nil {
+		if !apierrors.IsNotFound(err) && ctx.Err() == nil {
+			logf.FromContext(ctx).Error(err, "Could not read the sync pod to say why it is not ready", "pod", key.Name)
+		}
+		return ready
+	}
+	return oomKilledCondition(ready, pod, r.clock())
+}
+
+// reasonOOMKilled is the reason that the kubelet gives a container that the kernel killed for using more memory than
+// its limit.
+const reasonOOMKilled = "OOMKilled"
+
+// recentKill is how long after it ended a kill for memory still names the cause for a container that runs again and is
+// not ready. The kubelet keeps the last end of a container for the life of the pod, so a kill of hours ago would
+// otherwise name the cause of every later wait. It is longer than the longest wait of the kubelet before a restart, 5
+// minutes, and a run, so that a container that is killed again on every try is named also while it is up.
+const recentKill = 10 * time.Minute
+
+// oomKilledCondition returns the Ready condition of a sync pod that is not ready with the reason SyncPodOOMKilled and the
+// memory limit of the sync container, when the container is not ready and was killed for memory (#256): it is ended by
+// the kill now, it waits to start again after one, or it runs again after one that ended at most recentKill before now.
+// Git needs the memory, on a large file, and every restart tries the same update and is killed again, which
+// SyncPodNotReady alone does not say. Any other pod leaves the condition as it is.
+func oomKilledCondition(ready metav1.Condition, pod *corev1.Pod, now time.Time) metav1.Condition {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != agentContainerName || status.Ready {
+			continue
+		}
+		if !killedForMemoryLately(status, now) {
+			return ready
+		}
+		cause := "the sync container was killed for memory"
+		for _, container := range pod.Spec.Containers {
+			if limit, ok := container.Resources.Limits[corev1.ResourceMemory]; ok && container.Name == agentContainerName {
+				cause = "the sync container was killed for using more than its memory limit of " + limit.String()
+			}
+		}
+		ready.Reason = treebindv1alpha1.ReasonSyncPodOOMKilled
+		ready.Message = fmt.Sprintf("%s: %s (%s)", ready.Message, cause, reasonOOMKilled)
+		return ready
+	}
+	return ready
+}
+
+// killedForMemoryLately says whether a container is ended by a kill for memory, waits to start again after one, or runs
+// again after one that ended at most recentKill before now.
+func killedForMemoryLately(status corev1.ContainerStatus, now time.Time) bool {
+	switch {
+	case killedForMemory(status.State):
+		return true
+	case !killedForMemory(status.LastTerminationState):
+		return false
+	case status.State.Waiting != nil:
+		return true
+	default:
+		return now.Sub(status.LastTerminationState.Terminated.FinishedAt.Time) <= recentKill
+	}
+}
+
+// killedForMemory says whether a state of a container is its end by the kernel for memory.
+func killedForMemory(state corev1.ContainerState) bool {
+	return state.Terminated != nil && state.Terminated.Reason == reasonOOMKilled
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *TreebindReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// An agent that is given no issuer or no subject exits at once and is started
@@ -382,6 +490,10 @@ func (r *TreebindReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.Metrics == nil {
 		return errors.New("the metrics of the Treebinds are required")
+	}
+	// Without it Ready would not say that the sync container is killed for memory.
+	if r.APIReader == nil {
+		return errors.New("a reader of the sync pods is required")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&treebindv1alpha1.Treebind{}).

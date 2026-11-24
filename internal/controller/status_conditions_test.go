@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -26,11 +27,16 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
@@ -263,6 +269,130 @@ func assertReady(t *testing.T, got metav1.Condition, status metav1.ConditionStat
 	t.Helper()
 	if got.Status != status || got.Reason != reason || got.Message != message {
 		t.Errorf("Ready = %s/%s %q, want %s/%s %q", got.Status, got.Reason, got.Message, status, reason, message)
+	}
+}
+
+// messageOOMKilled is the message of Ready for a sync container that was killed for memory, with the limit that the pod
+// template gives it.
+const messageOOMKilled = messageNoPodReady +
+	": the sync container was killed for using more than its memory limit of 128Mi (OOMKilled)"
+
+// podReader holds one pod, or none, in place of the API server, and keeps how often it was read and the name that it
+// was last asked for.
+type podReader struct {
+	pod   *corev1.Pod
+	reads int
+	asked client.ObjectKey
+}
+
+func (r *podReader) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	r.reads++
+	r.asked = key
+	if r.pod == nil {
+		return apierrors.NewNotFound(corev1.Resource("pods"), key.Name)
+	}
+	r.pod.DeepCopyInto(obj.(*corev1.Pod))
+	return nil
+}
+
+func (r *podReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("the reconcile lists no pod")
+}
+
+// oomKilledAt is the state of a container that the kernel killed for memory at the given time.
+func oomKilledAt(finished time.Time) corev1.ContainerState {
+	return corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		ExitCode: 137, Reason: "OOMKilled", FinishedAt: metav1.NewTime(finished),
+	}}
+}
+
+// waitingToStartAgain is the state of a container that the kubelet starts again after a wait.
+func waitingToStartAgain() corev1.ContainerState {
+	return corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+}
+
+// syncPodWith is a sync pod whose container has the memory limit that the pod template gives it, and is ready or not,
+// in the given state after the given last one.
+func syncPodWith(ready bool, state, last corev1.ContainerState) *corev1.Pod {
+	return &corev1.Pod{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: agentContainerName,
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+			},
+		}}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name: agentContainerName, Ready: ready, State: state, LastTerminationState: last,
+		}}},
+	}
+}
+
+// A sync container that the kernel killed for memory is killed again by every restart, on the same update (#256). Ready
+// says so, with the memory limit of the container, while the container is not ready and the kill is what it is in, what
+// it waits after, or a recent end of the run before this one. The kubelet keeps the last end for the life of the pod, so
+// a kill that is long over does not name the cause of a wait that comes later.
+func TestReadyNamesTheMemoryLimitOfASyncContainerThatWasKilledForMemory(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	otherEnd := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error"}}
+	withoutLimit := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+		return pod
+	}
+	inAnotherContainer := func(pod *corev1.Pod) *corev1.Pod {
+		sidecar := "sidecar"
+		pod.Spec.Containers[0].Name, pod.Status.ContainerStatuses[0].Name = sidecar, sidecar
+		return pod
+	}
+
+	tests := []struct {
+		name        string
+		pod         *corev1.Pod
+		wantReason  string
+		wantMessage string
+	}{
+		{"killed, and waiting to start again", syncPodWith(false, waitingToStartAgain(), oomKilledAt(now.Add(-time.Minute))),
+			treebindv1alpha1.ReasonSyncPodOOMKilled, messageOOMKilled},
+		{"killed, and not started again yet", syncPodWith(false, oomKilledAt(now), corev1.ContainerState{}),
+			treebindv1alpha1.ReasonSyncPodOOMKilled, messageOOMKilled},
+		{"started again after a kill of the last 10 minutes, and not ready yet",
+			syncPodWith(false, running, oomKilledAt(now.Add(-recentKill))),
+			treebindv1alpha1.ReasonSyncPodOOMKilled, messageOOMKilled},
+		{"started again after a kill longer ago, and not ready for another reason",
+			syncPodWith(false, running, oomKilledAt(now.Add(-recentKill-time.Second))),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"killed, with no memory limit", withoutLimit(syncPodWith(false, waitingToStartAgain(), oomKilledAt(now))),
+			treebindv1alpha1.ReasonSyncPodOOMKilled, messageNoPodReady + ": the sync container was killed for memory (OOMKilled)"},
+		{"ready again after a kill", syncPodWith(true, running, oomKilledAt(now.Add(-time.Minute))),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"ended for another reason", syncPodWith(false, waitingToStartAgain(), otherEnd),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"never ended", syncPodWith(false, running, corev1.ContainerState{}),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"another container killed", inAnotherContainer(syncPodWith(false, waitingToStartAgain(), oomKilledAt(now))),
+			treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+		{"no pod yet", nil, treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &podReader{pod: tt.pod}
+			reconciler := &TreebindReconciler{APIReader: reader, now: func() time.Time { return now }}
+			statefulSet := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "app-sync", Namespace: nsApps}}
+			notReady := metav1.Condition{
+				Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+				Reason: treebindv1alpha1.ReasonSyncPodNotReady, Message: messageNoPodReady, ObservedGeneration: 7,
+			}
+
+			got := reconciler.whySyncPodNotReady(context.Background(), statefulSet, notReady)
+
+			if want := (client.ObjectKey{Namespace: nsApps, Name: "app-sync-0"}); reader.asked != want {
+				t.Errorf("the reconcile read the pod %s, want %s", reader.asked, want)
+			}
+			assertReady(t, got, metav1.ConditionFalse, tt.wantReason, tt.wantMessage)
+			if got.Type != treebindv1alpha1.ConditionReady || got.ObservedGeneration != notReady.ObservedGeneration {
+				t.Errorf("type/observedGeneration = %s/%d, want those of the condition it was given", got.Type, got.ObservedGeneration)
+			}
+		})
 	}
 }
 
