@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -479,6 +482,67 @@ func TestSaysTheLossOfTheLockWhenItComesAlone(t *testing.T) {
 	}
 	if n := logs.count("the writer lock was lost to another agent"); n != 1 {
 		t.Errorf("the loss was logged %d times, want once\n%s", n, logs.String())
+	}
+}
+
+func TestSaysAHeartbeatThatTheVolumeRefusedForATTLAndNotAnotherAgent(t *testing.T) {
+	a, logs := waiting()
+	// What the keeper says when the volume is full: every slot of the heartbeat was refused for a TTL.
+	full := fmt.Errorf("%w for 30s, so it counts as lost: %w", lock.ErrNotRenewed,
+		&fs.PathError{Op: "write", Path: "/claim/.treebind/lock/slot-00000000000000000007", Err: syscall.ENOSPC})
+	a.lose(full)
+
+	serveErr, lostErr := a.waitToStop(context.Background(), make(chan error))
+
+	if serveErr != nil || !errors.Is(lostErr, lock.ErrLost) || !errors.Is(lostErr, syscall.ENOSPC) {
+		t.Errorf("waitToStop returned %v and %v, want the loss of the lock, with the error of the volume", serveErr, lostErr)
+	}
+	if n := logs.count("the heartbeat of the writer lock could not be written for a whole TTL"); n != 1 {
+		t.Errorf("the heartbeat that could not be written was logged %d times, want once\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "no space left on device") ||
+		strings.Contains(logs.String(), "another agent") {
+		t.Errorf("the loss is not logged as an error with its cause, or is said to be another agent's\n%s", logs.String())
+	}
+}
+
+func TestStopsWhenTheHeartbeatOfTheLockCannotBeWrittenForATTLAndSaysWhy(t *testing.T) {
+	root, lockDir := claimWithState(t)
+	clock := newFakeClock()
+	r := start(t, func(o *Options) {
+		takesTheLock(root, cloned)(o)
+		o.LockClock = clock
+	})
+	eventually(t, "the lock in the report", func() bool {
+		got, _ := lockCheck(t, r)
+		return got.Outcome == outcomePassed
+	})
+
+	// The volume takes no slot from now on, and no other agent is there.
+	if err := os.RemoveAll(lockDir); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the agent to stop", func() bool {
+		clock.Advance(lockTTL)
+		select {
+		case <-r.stopped:
+			return true
+		default:
+			return false
+		}
+	})
+	err := r.waitStopped(t)
+
+	// It stops as for any loss, with the exit code of one, and says that the heartbeat could not be written, and why.
+	if !errors.Is(err, ErrLockLost) || !errors.Is(err, lock.ErrNotRenewed) || !errors.Is(err, fs.ErrNotExist) ||
+		strings.Contains(err.Error(), "another") {
+		t.Errorf("Run returned %v, want ErrLockLost, with the heartbeat that could not be written and the volume's error", err)
+	}
+	if n := r.logs.count("the heartbeat of the writer lock could not be written"); n != 1 {
+		t.Errorf("the heartbeat that could not be written was logged %d times, want once\n%s", n, r.logs.String())
+	}
+	if n := r.logs.count("lost to another agent"); n != 0 {
+		t.Errorf("a heartbeat that the volume refused was logged as a loss to another agent\n%s", r.logs.String())
 	}
 }
 

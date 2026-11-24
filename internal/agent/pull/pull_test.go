@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/mohanedmoh/treebind/internal/agent/checkout"
@@ -333,6 +334,54 @@ func TestPullSaysWhenTheRepositoryCannotBeReached(t *testing.T) {
 	w.f.Publish(branchMain, map[string]string{fileC: contentC})
 	if got, err := w.pull(t); err != nil || got.Outcome != Advanced {
 		t.Fatalf("result = %+v, %v, want Advanced once the repository can be reached", got, err)
+	}
+}
+
+// fullOnFetch is a stand-in for git, for the Git option of a Runner, that runs what it is asked, but fails a fetch as Git fails one
+// on a volume that is full. It uses what a shell has built in, as the stand-ins of gittest do.
+func fullOnFetch(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(gittest.TempDir(t), "git")
+	script := `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = fetch ]; then
+    echo 'error: unable to write file objects/ab/tmp_obj_Xy12Ab: No space left on device' >&2
+    echo 'fatal: unpack-objects failed' >&2
+    exit 128
+  fi
+done
+exec '` + gittest.Binary(t) + `' "$@"
+`
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return binary
+}
+
+func TestPullSaysAFetchThatTheVolumeHasNoRoomForAsAFailureOfThePullAndNotOfTheRepository(t *testing.T) {
+	for _, c := range []struct{ name, path string }{{"the whole repository", ""}, {"a directory of the repository", dirPath}} {
+		t.Run(c.name, func(t *testing.T) {
+			var w *world
+			if c.path == "" {
+				w = newWorld(t, subPath)
+			} else {
+				w = newDirectoryWorld(t, subPath).world
+			}
+			w.puller = puller(t, w.f, w.l, func(o *Options) { o.Path, o.Git.Git = c.path, fullOnFetch(t) })
+			w.f.Publish(branchMain, map[string]string{fileC: contentC, dirPath + "/" + fileC: contentC})
+			before := w.head()
+
+			_, err := w.pull(t)
+
+			got := errorOf(t, err, ReasonPullFailed)
+			if !errors.Is(err, syscall.ENOSPC) || !strings.Contains(got.Message, "because the volume cannot be written") ||
+				!strings.Contains(got.Message, "No space left on device") {
+				t.Errorf("error = %v, want one that says the volume could not be written, with what Git said", err)
+			}
+			if w.head() != before {
+				t.Error("the checkout moved")
+			}
+		})
 	}
 }
 

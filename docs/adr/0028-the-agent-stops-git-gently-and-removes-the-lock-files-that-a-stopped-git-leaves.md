@@ -8,6 +8,13 @@
   so a settle time shorter than the phase had them committed first, a half file among them. The commit step now commits
   nothing while `updating` is in the state directory, with the `Commit` check `Skipped` and `NotChecked` and saying why,
   whatever the timing and whether the repository answers, and the first pull of a start that finds it comes at once
+- Extended by: #257, on 2026-11-24, which removes what the last consequence below leaves: the temporary files that Git
+  writes in `objects` before it moves them to their names (`tmp_obj_*` in a directory of loose objects, `tmp_*` at the
+  top and in `pack`), which a fetch that fails on a full volume leaves and which keep the volume full. They are removed,
+  when no command runs, after a pull that the volume refused, with the fence called first and nothing removed when the
+  lock is lost, and also when the fence fails because the volume refuses the slot, which a full volume does; and before
+  the volume checks of a start, without the lock, only those that have not changed for longer than a Git command of an
+  agent may run. A fetch that the volume did not take is `PullFailed`, and not `FetchFailed`
 
 ## Context
 

@@ -198,3 +198,20 @@ touched: an edit stays an edit, as a change that is not staged.
 
 The Git directory holds the history of the branch, so the claim needs room for it besides
 the files.
+
+A fetch that has no room on the claim fails, and the `Pull` check says `PullFailed` with what Git said, such as
+`No space left on device`. Git leaves the temporary files of the objects that it was writing in `.treebind/git/objects`,
+which keep the claim full, and so does a Git that is killed in the middle of a fetch. After a pull that the volume
+refused, the agent removes them and names them in the check:
+
+```
+removed the temporary object file that a Git command that failed left: objects/ab/tmp_obj_Xy12Ab
+```
+
+It checks the writer lock first, as before it removes a lock file, and leaves them when the lock is lost; a volume
+that refuses the heartbeat of the lock, because it is full, does not stop it. When the agent starts, before the volume
+checks, it removes the ones that have not changed for 31 minutes, longer than a Git command of an agent may run, and
+says so in its log: it does not hold the writer lock yet then, and another agent may be writing the newer ones. It
+removes only a regular file whose name is one that `git prune` takes for a temporary file, `tmp_obj_*` in the
+directories of loose objects and `tmp_*` at the top of `objects` and in `objects/pack`, and follows no link. The
+objects that a fetch wrote in full stay: free room on the claim, and the next pull fetches the rest.

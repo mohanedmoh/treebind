@@ -50,9 +50,11 @@ const (
 	tokenBytes = 4
 )
 
-// ErrLockLost is what Run returns when the writer lock was lost to another agent. The agent has
-// stopped what it was doing, and a restart waits for the lock again (docs/adr/0023).
-var ErrLockLost = errors.New("the writer lock was lost to another agent")
+// ErrLockLost is what Run returns when the writer lock was lost: another agent took it, or its
+// heartbeat could not be written for a TTL, after which another agent may take it (docs/adr/0012).
+// The error of the lock underneath says which. The agent has stopped what it was doing, and a
+// restart waits for the lock again (docs/adr/0023).
+var ErrLockLost = errors.New("the writer lock was lost")
 
 // fillLockDefaults sets what the lock needs: the name of the holder and how long a heartbeat may be
 // missing.

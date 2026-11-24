@@ -181,6 +181,9 @@ type agent struct {
 	// writer lock is given up after that and not before: a lock that is given up while Git is still
 	// being stopped lets the next agent write beside it (NFR-1).
 	idle chan struct{}
+	// tidying is set while a removal of old temporary object files runs, which a volume that does not
+	// answer holds for as long as it does not, so that no second one begins beside it (clearOldTempObjects).
+	tidying atomic.Bool
 }
 
 // checked is the results of one run of the volume checks and when it finished.
@@ -303,7 +306,14 @@ func (a *agent) takeLost() error {
 	}
 }
 
+// logLost says that the lock was lost, and why. A heartbeat that the volume refused for a TTL, as a full one does, is no sign of
+// another agent, and is not said as one: the agent stops all the same, because another agent may take the lock over now.
 func (a *agent) logLost(err error) {
+	if errors.Is(err, lock.ErrNotRenewed) {
+		a.Logger.Error("the heartbeat of the writer lock could not be written for a whole TTL, so this agent can no longer show "+
+			"that it holds the lock, and stops", "error", err)
+		return
+	}
 	a.Logger.Error("the writer lock was lost to another agent, and this one stops", "error", err)
 }
 
@@ -414,8 +424,11 @@ func (a *agent) prepare(ctx context.Context) {
 func (a *agent) checkVolume(ctx context.Context) ([]preflight.Result, bool) {
 	wait := a.RetryMin
 	var logged []string
+	var tidied string
 	for {
 		a.working()
+		// What a Git that was killed left in the object store can keep the volume full, so it goes before the checks.
+		tidied = a.clearOldTempObjects(ctx, tidied)
 		results := a.Preflight(ctx, a.Config.MountPath, a.Config.SubPath)
 		if ctx.Err() != nil {
 			return nil, false
