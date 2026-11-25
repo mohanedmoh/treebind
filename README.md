@@ -1,5 +1,7 @@
 # Treebind
 
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/treebind)](https://artifacthub.io/packages/helm/treebind/treebind)
+
 Treebind is a Kubernetes operator that keeps a Git repository and an
 application's files in sync, in both directions, through a shared volume. You
 declare a `Treebind` that names the repository, an existing PVC and the sync
