@@ -29,7 +29,7 @@ kind create cluster --name treebind
 
 <!-- tested: install -->
 ```sh
-helm install treebind oci://ghcr.io/mohanedmoh/charts/treebind --version 0.0.1-alpha.3 \
+helm install treebind oci://ghcr.io/mohanedmoh/charts/treebind --version 0.0.1-alpha.4 \
   --namespace treebind-system --create-namespace --wait
 ```
 
