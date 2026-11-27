@@ -1,90 +1,161 @@
+<div align="center">
+
 # Treebind
 
+**Keep a Git repository and a Kubernetes volume in sync, in both directions.**
+
+Declare a `Treebind`. It pulls changes from Git, commits what your application writes, and pushes it back.
+
+[![CI](https://github.com/mohanedmoh/treebind/actions/workflows/ci.yml/badge.svg)](https://github.com/mohanedmoh/treebind/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/mohanedmoh/treebind/actions/workflows/codeql.yml/badge.svg)](https://github.com/mohanedmoh/treebind/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/mohanedmoh/treebind?include_prereleases&label=release)](https://github.com/mohanedmoh/treebind/releases)
+[![License](https://img.shields.io/github/license/mohanedmoh/treebind)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/treebind)](https://artifacthub.io/packages/helm/treebind/treebind)
 
-Treebind is a Kubernetes operator that keeps a Git repository and an
-application's files in sync, in both directions, through a shared volume. You
-declare a `Treebind` that names the repository, an existing PVC and the sync
-policy. The operator runs a sync agent that pulls changes, commits the
-application's edits and optionally pushes them. The application is whatever
-program reads and writes those files: a dashboard tool, a workflow engine, a
-website.
+[Quickstart](docs/quickstart.md) · [Examples](#examples) · [Documentation](#documentation) · [Discussions](https://github.com/mohanedmoh/treebind/discussions)
 
-> **Status: alpha.** A Treebind syncs in both directions, and releases are
-> published as pre-releases. The API is `v1alpha1`, and its group,
-> `treebind.example.org`, is a placeholder that will change before a stable
-> release, and with it the `apiVersion` of every Treebind. Its tests run on kind.
-> `v0.0.1-alpha.5` was also tried by hand on a cluster of two nodes, with local and
-> NFS volumes. No storage class is listed as supported yet. Do not use it with data
-> that you cannot lose.
+</div>
 
-## Quickstart
+> [!WARNING]
+> **Alpha (`v1alpha1`).** Do not use it with data you cannot lose. The API group, `treebind.example.org`, is a placeholder and will change before a stable release. See [status and limitations](#status-and-limitations).
 
-The [quickstart](docs/quickstart.md) takes you from an empty kind cluster to a
-Treebind that syncs in both directions, with a Git server in the same cluster, in
-about ten minutes: install the chart, apply one manifest, edit a file in a pod and
-see the commit, push a change from Git and see the file, and read both outcomes in
-`kubectl describe`. Three worked examples follow it: dashboards that people edit in
-an application, a static site that Git deploys and nginx serves, and one directory
-of a monorepo. CI runs every command of these pages on a kind cluster.
+## Why Treebind
 
-Each release publishes the Helm chart, `oci://ghcr.io/mohanedmoh/charts/treebind`,
-and both images, all of them signed, and an `install.yaml` for `kubectl apply`.
-The chart is listed on [Artifact Hub](https://artifacthub.io/packages/helm/treebind/treebind).
-The [chart's README](charts/treebind/README.md) says what it installs, and
-[releasing](docs/releasing.md#verify-a-release) how to check a release. To work on
-Treebind itself, see [docs/development.md](docs/development.md).
+Many applications keep their state as plain files: dashboards, workflow definitions, site content, settings. People edit them in the application's own UI, so the edits have no history, no review and no rollback. GitOps tools deploy your manifests, but they do not follow the files an application writes while it runs.
 
-## Storage support
+Treebind puts such a directory under Git, **in both directions**:
 
-Which storage classes Treebind works on, and how that was tested, will be
-listed in the [storage support matrix](docs/storage-support.md).
+- A user saves a dashboard in the application, and Treebind commits and pushes it.
+- Someone merges a change in Git, and Treebind writes it into the application's directory.
 
-## Operator availability
+## How it works
 
-The operator runs as two replicas with leader election: one reconciles, and the
-other takes over within seconds if it goes away. How a failover works and how long
-it takes, where the replicas are placed, and how to run one replica for
-development are in [docs/operator-replicas.md](docs/operator-replicas.md).
+```mermaid
+flowchart LR
+  subgraph git["Git host"]
+    repo[("Repository<br/>branch: main")]
+  end
 
-## What the operator may do
+  subgraph cluster["Your Kubernetes cluster"]
+    direction LR
+    op["Treebind operator<br/>2 replicas, leader election"]
+    cr[/"Treebind resource<br/>Ready · Synced · Conflict"/]
+    agent["Sync agent<br/>one pod per Treebind"]
+    pvc[("PVC<br/>shared volume")]
+    app["Your application<br/>dashboards, workflows, site, config"]
+  end
 
-Its roles are the calls that it makes and no more, and it never reads a Secret. It can be limited to the
-namespaces you name. What it may do, how to limit it and what that costs are in [docs/rbac.md](docs/rbac.md).
+  repo <-->|"pull new commits<br/>push the app's commits"| agent
+  agent <-->|"write files<br/>detect edits"| pvc
+  app <-->|"reads and writes files"| pvc
+  op -.->|"creates and watches"| agent
+  op -.->|"writes status from the agent's report"| cr
+```
 
-## Pod Security and file ownership
+| When... | Treebind... |
+| :-- | :-- |
+| the application writes a file | waits until the file has been quiet for `settleTime` (5s by default), commits it as one author, and pushes it as a fast-forward |
+| someone pushes to the branch | pulls at every `interval` (30s by default) and writes the change into the directory, never over an edit that is not committed yet |
+| both sides changed the same file | applies your `conflictPolicy`: `followRemote` (Git wins, your commits are kept in a ref) or `followLocal` (the application wins, in a merge commit that keeps Git's version in the history) |
+| it cannot decide safely | stops, says why in `kubectl describe` (`Synced`, `Conflict`), and waits for you |
 
-Both pods run under the `restricted` Pod Security level. What they set, and what
-a volume that another user wrote to needs, is in
-[docs/pod-security.md](docs/pod-security.md).
+## Features
 
-## Deleting a Treebind
+- **Two-way, or pull-only.** `bidirectional` commits and pushes the application's edits. `pull` is a read-only mirror of the repository.
+- **Safe by default.** It never force-pushes and never writes over an uncommitted local edit. It refuses an update that would remove more than 100 files at once ([deletion guard](docs/deletion-guard.md)), and it never commits files named like secrets, such as `.env` and private keys.
+- **Breaks echo loops.** `commit.maxPerHour` (60 by default) stops an application and a repository that answer each other from committing for ever ([echo loops](docs/echo-loops.md)).
+- **Syncs exactly what you mean.** `repository.path` syncs one directory of a monorepo, and `paths.include` / `paths.exclude` take `.gitignore` patterns.
+- **Observable.** `kubectl get treebind` shows `Ready`, `Synced` and `Conflict`. Each change of `Synced` and `Conflict` is also an event and a Prometheus metric, with alert expressions in the [docs](docs/metrics-and-events.md).
+- **Locked down.** Two operator replicas with leader election. Pods run under the `restricted` Pod Security level. The operator never reads a Secret and can be limited to the namespaces you name ([RBAC](docs/rbac.md)). The chart and images are signed, with SBOMs, for amd64 and arm64.
 
-Deleting a Treebind removes its sync pod and Service. It never touches your
-volume or the data on it; see
-[docs/deleting-a-treebind.md](docs/deleting-a-treebind.md).
+## See it work
 
-## When the sync stops
+A Treebind is one small manifest:
 
-A conflict that the agent cannot resolve, or a push that the Git host refuses, shows in the conditions `Synced` and `Conflict`. How to
-read them, what the agent does by itself and what to do are in
-[docs/recovering-from-a-conflict-or-a-rejected-push.md](docs/recovering-from-a-conflict-or-a-rejected-push.md).
+```yaml
+apiVersion: treebind.example.org/v1alpha1
+kind: Treebind
+metadata: {name: dashboards, namespace: monitoring}
+spec:
+  repository:
+    url: ssh://git@github.com/acme/dashboards.git   # change: the ssh address of your repository
+    branch: main                                    # change: the branch to follow
+    auth:
+      sshKeySecretRef: {name: deploy-key, key: id_ed25519}                    # change: your Secret with the deploy key
+      knownHostsConfigMapRef: {name: git-known-hosts, key: known_hosts}       # change: your ConfigMap with the host's keys
+  target:
+    claimName: app-data        # change: an existing PersistentVolumeClaim
+    subPath: dashboards        # change: the directory of the claim that is synced
+  sync:
+    direction: bidirectional
+    conflictPolicy: followLocal
+```
 
-## Metrics and events
+Write a file the way your application would:
 
-Each change of `Synced` and `Conflict` is also an event on the Treebind and a Prometheus metric, and an alert can say that a
-Treebind has not synced for several of its intervals. The events, the metrics and the expressions to alert on are in
-[docs/metrics-and-events.md](docs/metrics-and-events.md).
+```sh
+kubectl -n demo exec app -- sh -c 'echo "Written by the application" > /data/from-the-app.txt'
+```
+
+A few seconds later it is a commit on the branch. This is the log on the quickstart's Git server:
+
+```
+d3de362 treebind-bot: treebind: sync 1 file(s)
+a8b732d Developer: First commit
+```
+
+Push a commit from Git, and the file appears in the application's directory within the interval. The [quickstart](docs/quickstart.md) runs the whole loop on a local kind cluster, with a Git server inside the cluster, in about ten minutes. CI runs every command on that page on a kind cluster.
+
+## Install
+
+You need Kubernetes 1.35 or later, [Helm](https://helm.sh), an existing PVC, and a Git repository that you can give an ssh deploy key.
+
+```sh
+helm install treebind oci://ghcr.io/mohanedmoh/charts/treebind --version 0.0.1-alpha.5 \
+  --namespace treebind-system --create-namespace --wait
+```
+
+Each release also publishes an `install.yaml` for `kubectl apply`, and signs the chart and both images ([how to verify a release](docs/releasing.md#verify-a-release)). The [chart README](charts/treebind/README.md) lists what it installs and its values.
+
+## Examples
+
+Each example is a complete, tested walk-through that starts where the quickstart ends.
+
+| Use case | What it shows |
+| :-- | :-- |
+| [Dashboards edited in the application](docs/examples/dashboards-edited-in-the-application.md) | Both directions, the author and message of the commits, and a dashboard changed in the application and in Git at the same time |
+| [A static site that Git deploys and nginx serves](docs/examples/a-static-site-served-by-nginx.md) | `direction: pull`, a read-only mount, and a push that is live within the interval |
+| [One directory of a monorepo](docs/examples/one-directory-of-a-monorepo.md) | `repository.path`, commits that change only that directory, and `paths.exclude` |
+
+## Status and limitations
+
+Treebind is alpha, and its releases are pre-releases. Read this before you use it with anything that matters.
+
+- **The API will change.** The group `treebind.example.org` is a placeholder ([#15](https://github.com/mohanedmoh/treebind/issues/15)), and when it changes you will create every Treebind again.
+- **Tested on kind.** The tests run on kind clusters of one node with `local-path` storage. `v0.0.1-alpha.5` was also tried by hand on a cluster of two nodes, with local and NFS volumes. **No storage class is listed as supported yet** ([storage support](docs/storage-support.md)).
+- **The sync pod is not placed next to the application yet** ([#97](https://github.com/mohanedmoh/treebind/issues/97)). With a `ReadWriteOnce` claim on several nodes, the scheduler can put the two on different nodes.
+- **The only credential is an ssh key** ([tokens for https: #58](https://github.com/mohanedmoh/treebind/issues/58)). The agent polls, and webhooks are planned ([#61](https://github.com/mohanedmoh/treebind/issues/61)).
+- **Some fields are accepted and ignored.** `spec.placement.mode: sidecar` and `spec.agent` are not built yet, and the condition `SpecSupported` says so.
+
+## Documentation
+
+| Topic | Page |
+| :-- | :-- |
+| Get started | [Quickstart](docs/quickstart.md) · [Examples](#examples) |
+| How the sync behaves | [Pulling](docs/pull.md) · [Local changes and commits](docs/local-changes.md) · [Conflicts](docs/conflicts.md) · [Deletion guard](docs/deletion-guard.md) · [Echo loops](docs/echo-loops.md) |
+| When something is wrong | [Recovering from a conflict or a rejected push](docs/recovering-from-a-conflict-or-a-rejected-push.md) · [Reading the agent's status](docs/agent-status.md) |
+| Running it | [Operator replicas](docs/operator-replicas.md) · [RBAC](docs/rbac.md) · [Pod Security and file ownership](docs/pod-security.md) · [Metrics and events](docs/metrics-and-events.md) · [Deleting a Treebind](docs/deleting-a-treebind.md) |
+| Design decisions | [Architecture decision records](docs/adr/README.md) |
 
 ## Contributing
 
-Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and
-see [GOVERNANCE.md](GOVERNANCE.md) for how decisions are made. Questions and
-ideas go to
-[Discussions](https://github.com/mohanedmoh/treebind/discussions). Report
-security problems privately, as described in [SECURITY.md](SECURITY.md).
+Contributions are welcome, and you do not need to know Kubernetes internals to start. Issues labelled [`good first issue`](https://github.com/mohanedmoh/treebind/labels/good%20first%20issue) are self-contained, with named files and an acceptance test. A maintainer gives a first response within three working days.
+
+- Start with [CONTRIBUTING.md](CONTRIBUTING.md). Commits are signed off (`git commit -s`), and [docs/development.md](docs/development.md) gets you a working setup.
+- Ask questions and share ideas in [Discussions](https://github.com/mohanedmoh/treebind/discussions).
+- **Storage reports wanted.** Tried Treebind on your storage class? The [storage support matrix](docs/storage-support.md) fills in from what people report.
+- Decisions are made as described in [GOVERNANCE.md](GOVERNANCE.md). Report security problems privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 
-Treebind is licensed under the Apache License, Version 2.0. See
-[LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
