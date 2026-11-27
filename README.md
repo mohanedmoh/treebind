@@ -30,27 +30,9 @@ Treebind puts such a directory under Git, **in both directions**:
 
 ## How it works
 
-```mermaid
-flowchart LR
-  subgraph git["Git host"]
-    repo[("Repository<br/>branch: main")]
-  end
-
-  subgraph cluster["Your Kubernetes cluster"]
-    direction LR
-    op["Treebind operator<br/>2 replicas, leader election"]
-    cr[/"Treebind resource<br/>Ready · Synced · Conflict"/]
-    agent["Sync agent<br/>one pod per Treebind"]
-    pvc[("PVC<br/>shared volume")]
-    app["Your application<br/>dashboards, workflows, site, config"]
-  end
-
-  repo <-->|"pull new commits<br/>push the app's commits"| agent
-  agent <-->|"write files<br/>detect edits"| pvc
-  app <-->|"reads and writes files"| pvc
-  op -.->|"creates and watches"| agent
-  op -.->|"writes status from the agent's report"| cr
-```
+<p align="center">
+  <img src="docs/images/how-it-works.svg" alt="How Treebind works: a Git repository and your application share a PVC through a sync agent. The agent pulls changes into the volume, and commits and pushes the application's edits. The operator creates the sync pod and writes Ready, Synced and Conflict on the Treebind resource." width="860">
+</p>
 
 | When... | Treebind... |
 | :-- | :-- |
