@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -174,13 +175,22 @@ func RemoveStaleLocks(gitDir string) ([]string, error) {
 
 // The object store, the directory of its packs, and how the names of the temporary files that Git writes there begin, before
 // it moves each to its name. They are the names that git prune takes for temporary files: tmp_obj_ in a directory of loose
-// objects, and any tmp_ at the top of the store and among the packs.
+// objects, and any tmp_ at the top of the store and among the packs. Among the packs a repack has one more: pack-objects moves
+// the pack that it wrote to .tmp-<pid>-pack-<hash>, and the repack then moves it to pack-<hash>, the index last, and removes what
+// it made redundant only after that (docs/adr/0043).
 const (
 	objectsDir       = "objects"
 	packsDir         = "objects/pack"
 	tempPrefix       = "tmp_"
 	tempObjectPrefix = "tmp_obj_"
+	repackTempPrefix = ".tmp-"
 )
+
+// unindexedPack matches the files of a pack that Git reads only through the index of the pack: the pack itself, and the reverse
+// index, the bitmap and the times of a pack of unreachable objects beside it. One of them without its index is what a Git that
+// was killed between moving the pack and moving its index leaves, a repack or the index-pack of a fetch, and Git never reads it.
+// A .keep or a .promisor says something of a pack whether or not the pack is there, and is not one.
+var unindexedPack = regexp.MustCompile(`^(pack-[0-9a-f]{40}(?:[0-9a-f]{24})?)\.(?:pack|rev|bitmap|mtimes)$`)
 
 // looseDir reports whether a name at the top of the object store is that of a directory of loose objects: two hexadecimal
 // digits.
@@ -208,7 +218,7 @@ func StaleTempObjects(gitDir string, olderThan time.Duration) ([]string, error) 
 // can hold many objects, and only the names are looked at.
 func findTempObjects(root *os.Root, gitDir string, olderThan time.Duration) (found []string, failed []error) {
 	now := time.Now()
-	look := func(dir, prefix string) []fs.DirEntry {
+	look := func(dir string, temporary func(names map[string]bool, name string) bool) []fs.DirEntry {
 		entries, err := fs.ReadDir(root.FS(), dir)
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
@@ -216,8 +226,12 @@ func findTempObjects(root *os.Root, gitDir string, olderThan time.Duration) (fou
 			}
 			return nil
 		}
+		names := make(map[string]bool, len(entries))
 		for _, entry := range entries {
-			if !entry.Type().IsRegular() || !strings.HasPrefix(entry.Name(), prefix) {
+			names[entry.Name()] = true
+		}
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() || !temporary(names, entry.Name()) {
 				continue
 			}
 			if olderThan > 0 {
@@ -237,21 +251,32 @@ func findTempObjects(root *os.Root, gitDir string, olderThan time.Duration) (fou
 		}
 		return entries
 	}
-	for _, entry := range look(objectsDir, tempPrefix) {
+	prefixed := func(prefix string) func(map[string]bool, string) bool {
+		return func(_ map[string]bool, name string) bool { return strings.HasPrefix(name, prefix) }
+	}
+	for _, entry := range look(objectsDir, prefixed(tempPrefix)) {
 		// A link is not a directory here, so no link is followed.
 		if entry.IsDir() && looseDir(entry.Name()) {
-			look(path.Join(objectsDir, entry.Name()), tempObjectPrefix)
+			look(path.Join(objectsDir, entry.Name()), prefixed(tempObjectPrefix))
 		}
 	}
-	look(packsDir, tempPrefix)
+	look(packsDir, func(names map[string]bool, name string) bool {
+		if strings.HasPrefix(name, tempPrefix) || strings.HasPrefix(name, repackTempPrefix) {
+			return true
+		}
+		m := unindexedPack.FindStringSubmatch(name)
+		return m != nil && !names[m[1]+".idx"]
+	})
 	slices.Sort(found)
 	return found, failed
 }
 
 // RemoveStaleTempObjects removes the temporary files that Git wrote in the object store of the Git directory and did not move
-// to their names, because it failed in the middle of the write, as a fetch on a full volume does, or was killed, and returns
-// their names relative to the Git directory, in order. Git does not remove them when it fails, and garbage collection, which
-// would, is off (docs/adr/0013), so they stay, and on a full volume they keep it full. It removes only a regular file that has
+// to their names, because it failed in the middle of the write, as a fetch on a full volume does, or was killed, and the files of
+// a pack that a killed repack or fetch left without its index, and returns their names relative to the Git directory, in order.
+// Git does not remove them when it fails, and the next repack does not either, so they stay, and on a full volume they keep it
+// full. None of them holds an object that Git reads: Git reads a pack through its index, and a repack removes what it made
+// redundant only once its new pack has its index (docs/adr/0043). It removes only a regular file that has
 // not changed for olderThan, or any when it is not positive, follows no link, and goes on after one that it cannot remove.
 //
 // It returns ErrBusy, and removes nothing, while a command of this process runs on the Git directory when the removal comes,

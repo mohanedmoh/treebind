@@ -33,6 +33,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/maintain"
 	"github.com/mohanedmoh/treebind/internal/agent/paths"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/push"
@@ -49,6 +50,8 @@ var (
 	// with.
 	committerOfThePackage = newCommitter
 	pusherOfThePackage    = newPusher
+	// maintainerOfThePackage is the function that the agent packs the objects of its Git directory with.
+	maintainerOfThePackage = newMaintainer
 )
 
 // No test of the agent's main starts Git: the checkout and the pulls are the ones of the packages,
@@ -68,6 +71,9 @@ func init() {
 	}
 	newPusher = func(push.Options) (app.Pusher, error) {
 		return nil, errors.New("the tests of the main push nothing")
+	}
+	newMaintainer = func(maintain.Options) (app.Maintainer, error) {
+		return nil, errors.New("the tests of the main maintain nothing")
 	}
 	openCheckout = func(context.Context, checkout.Options) (checkout.Result, error) {
 		return checkout.Result{Outcome: checkout.Cloned, Branch: "main"}, nil
@@ -404,5 +410,32 @@ func TestTheScannerAndTheWatcherOfThePackagesRefuseWhatCannotWorkAndAreOnesThatW
 	}
 	if err := watcher.Close(); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestTheAgentMaintainsWithTheFunctionOfTheMain(t *testing.T) {
+	previous := newMaintainer
+	t.Cleanup(func() { newMaintainer = previous })
+	var asked maintain.Options
+	newMaintainer = func(o maintain.Options) (app.Maintainer, error) {
+		asked = o
+		return nil, errors.New("no maintainer in a test")
+	}
+	options := agentOptions(config.Config{RepoURL: repoURL}, nil, nil)
+
+	_, err := options.NewMaintainer(maintain.Options{LooseLimit: 7})
+
+	if err == nil || asked.LooseLimit != 7 {
+		t.Errorf("NewMaintainer asked for %+v, %v, want the function of the main, called with what it is given", asked, err)
+	}
+}
+
+func TestTheMaintainerOfThePackageRefusesWhatCannotWork(t *testing.T) {
+	where, err := layout.New("/work", "sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := maintainerOfThePackage(maintain.Options{Layout: where, Timeout: -time.Second}); err == nil {
+		t.Error("a negative timeout was taken")
 	}
 }

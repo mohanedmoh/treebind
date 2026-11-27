@@ -25,6 +25,10 @@
   lock is lost, and also when the fence fails because the volume refuses the slot, which a full volume does; and before
   the volume checks of a start, without the lock, only those that have not changed for longer than a Git command of an
   agent may run. A fetch that the volume did not take is `PullFailed`, and not `FetchFailed`
+- Extended by: [0043](0043-the-agent-packs-the-objects-of-its-git-directory-with-a-repack-under-the-writer-lock.md), on
+  2026-11-27, which removes with the temporary files of the object store what a killed repack leaves among the packs: a
+  `.tmp-*` file, and the files of a pack without its index. The last consequence below no longer holds: the agent packs its
+  objects
 
 ## Context
 

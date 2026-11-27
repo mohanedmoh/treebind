@@ -204,7 +204,42 @@ touched: an edit stays an edit, as a change that is not staged.
 ## Room on the claim
 
 The Git directory holds the history of the branch, so the claim needs room for it besides
-the files.
+the files. Every commit, fetch and resolved conflict adds objects to it, first each as a file of its own, which takes at least
+a block of the volume and an inode. The agent packs them: after a pull, when there are about 6,700 loose objects or 50 packs,
+the limits that Git has for its own garbage collection, it runs `git repack`, which puts them in a pack and removes the files.
+It removes no object that is not in the pack it has just written, and no ref, so the commits that the agent keeps for you under
+`refs/treebind/recovery` and `refs/treebind/local`, and under a ref you made by hand, stay. It does not run `git gc`, and you
+should not either (see [the deletion guard](deletion-guard.md#things-to-know)).
+
+How much room the Git directory needs, measured with the defaults (`sync.interval` 30 seconds, `sync.settleTime` 5 seconds,
+`commit.maxPerHour` 60) for an application that saves files of about 6 KB every few seconds, which makes a commit a minute,
+while another Treebind changes the same repository every other minute, on ext4:
+
+| | After a day | After a week | After two weeks |
+| :-- | --: | --: | --: |
+| The Git directory, packed by the agent | 25 MiB, 5,500 files | 25 MiB, 750 files; between 18 and 51 MiB in the days around it | at most about 75 MiB, extrapolated from 9 days (45 MiB at day 9) |
+| Without the packing (releases before it), for comparison | 53 MiB, 13,000 files | 372 MiB, 90,600 files | about 745 MiB, extrapolated |
+
+So give the claim, besides the files and the history of the repository as you have it, about 30 MiB for the objects that wait to
+be packed, and about 20 MiB a week, about 3 MiB a day, at that rate of changes: what the history grows by, which the repository on
+the host grows by too, and the logs of the refs. A Treebind that commits more, with a higher `commit.maxPerHour`, needs that much
+more for each week. The numbers and how they were measured are in
+[ADR 0043](adr/0043-the-agent-packs-the-objects-of-its-git-directory-with-a-repack-under-the-writer-lock.md).
+
+The repack writes the new pack beside what it packs and then removes that, so it needs free room on the claim for the size of the
+files of the loose objects, and for every pack in one the size of the packs too. When the claim does not have it, the agent
+packs nothing, and the `Pull` check says how much it needs and how much the claim has:
+
+```
+the Git directory was not packed: it has 90535 loose objects and 1 pack, and the repack needs 70.6 MiB free on the volume and the volume has 12.0 MiB; give the claim more room
+```
+
+It looks again an hour later, and the note stays in the `Pull` check until a repack is made. Nothing is packed while the pulls
+fail, as when the host does not answer: the commits go on, and their objects, about 53 MiB and 13,000 files a day at the rate
+above, wait for the first pull that passes. An agent of a release before the packing has all its objects loose, and its first repack needs about
+a fifth of what they take: give the claim that room before you upgrade. A repack that is killed, as when the sync container is
+killed for its memory, leaves the objects as they were and is put right by the next, which waits a day after the kill, and the
+`Pull` check says so. While a repack runs, the agent does not pull, scan, commit or push; that is seconds for the loose objects.
 
 A fetch that has no room on the claim fails, and the `Pull` check says `PullFailed` with what Git said, such as
 `No space left on device`. Git leaves the temporary files of the objects that it was writing in `.treebind/git/objects`,
@@ -220,5 +255,8 @@ that refuses the heartbeat of the lock, because it is full, does not stop it. Wh
 checks, it removes the ones that have not changed for 31 minutes, longer than a Git command of an agent may run, and
 says so in its log: it does not hold the writer lock yet then, and another agent may be writing the newer ones. It
 removes only a regular file whose name is one that `git prune` takes for a temporary file, `tmp_obj_*` in the
-directories of loose objects and `tmp_*` at the top of `objects` and in `objects/pack`, and follows no link. The
+directories of loose objects and `tmp_*` at the top of `objects` and in `objects/pack`, and what a repack or a fetch that was
+killed leaves in `objects/pack`: a `.tmp-*` file, and the `.pack`, `.rev`, `.bitmap` or `.mtimes` of a pack that has no `.idx`,
+which Git does not read. It follows no link, and leaves a `.keep` and a `.promisor`. It does the same behind the writer lock
+before each repack, and after one that failed. The
 objects that a fetch wrote in full stay: free room on the claim, and the next pull fetches the rest.
