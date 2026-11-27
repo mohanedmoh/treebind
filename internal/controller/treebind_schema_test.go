@@ -52,6 +52,7 @@ const (
 	httpsRepositoryURL    = "https://github.com/example/dashboards.git"
 	httpRepositoryURL     = "http://git.internal/example/dashboards.git"
 	upperSSHRepositoryURL = "SSH://git@github.com/example/dashboards.git"
+	upperHTTPSAddress     = "HTTPS://github.com/example/dashboards.git"
 	branchMain            = "main"
 	branchRelease         = "release-1.2"
 	branchReleaseSlash    = "release/1.2"
@@ -119,7 +120,6 @@ var _ = Describe("Treebind schema", func() {
 			KnownHostsConfigMapRef: &treebindv1alpha1.KeySelector{Name: "git-known-hosts", Key: "known_hosts"},
 		}
 		tb.Spec.Target.SubPath = "dashboards"
-		tb.Spec.Target.MountPath = "/work"
 		tb.Spec.Sync.Interval = &metav1.Duration{Duration: 30 * time.Second}
 		tb.Spec.Sync.SettleTime = &metav1.Duration{Duration: 5 * time.Second}
 		tb.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowRemote
@@ -141,9 +141,8 @@ var _ = Describe("Treebind schema", func() {
 		Expect(got.Spec).To(Equal(tb.Spec))
 	})
 
-	It("accepts the reserved placement and agent fields and returns them unchanged", func() {
+	It("accepts the reserved agent fields and returns them unchanged", func() {
 		tb := newTreebind("schema-reserved")
-		tb.Spec.Placement.Mode = treebindv1alpha1.PlacementModeSidecar
 		tb.Spec.Agent = newAgentSpec()
 
 		Expect(k8sClient.Create(ctx, tb)).To(Succeed())
@@ -152,6 +151,17 @@ var _ = Describe("Treebind schema", func() {
 		got := &treebindv1alpha1.Treebind{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tb), got)).To(Succeed())
 		Expect(got.Spec).To(Equal(tb.Spec))
+	})
+
+	It("does not know target.mountPath, and refuses it to a client that asks for strict field validation", func() {
+		object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind("schema-mountpath"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(unstructured.SetNestedField(object, "/work", "spec", "target", "mountPath")).To(Succeed())
+		tb := &unstructured.Unstructured{Object: object}
+		tb.SetGroupVersionKind(treebindv1alpha1.SchemeGroupVersion.WithKind("Treebind"))
+
+		err = client.WithFieldValidation(k8sClient, metav1.FieldValidationStrict).Create(ctx, tb)
+		Expect(err).To(MatchError(ContainSubstring("mountPath")))
 	})
 
 	It("accepts the sample manifest", func() {
@@ -323,9 +333,15 @@ var _ = Describe("Treebind schema", func() {
 			tb.Spec.Repository.URL = sshRepositoryURL
 			tb.Spec.Repository.Auth = newSSHAuth()
 		}),
-		Entry("with an upper-case ssh scheme, a key and known hosts", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Repository.URL = upperSSHRepositoryURL
+		Entry("with an ssh URL of an IPv6 host and a port", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.URL = "ssh://git@[2001:db8::1]:2222/dashboards.git"
 			tb.Spec.Repository.Auth = newSSHAuth()
+		}),
+		Entry("with an https URL that has a port", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Repository.URL = "https://git.example.org:8443/dashboards.git"
+		}),
+		Entry("that only pulls and has no commit block", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Sync.Direction = treebindv1alpha1.SyncDirectionPull
 		}),
 		Entry("with an https URL and an unused key and known hosts", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Repository.Auth = newSSHAuth()
@@ -354,11 +370,8 @@ var _ = Describe("Treebind schema", func() {
 		Entry("with dots inside a release branch name", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Repository.Branch = branchRelease
 		}),
-		Entry("with an absolute mountPath", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Target.MountPath = "/work"
-		}),
-		Entry("with the 1s minimum interval and settle time", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Sync.Interval = &metav1.Duration{Duration: time.Second}
+		Entry("with the minimum interval of 5s and settle time of 1s", func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Sync.Interval = &metav1.Duration{Duration: 5 * time.Second}
 			tb.Spec.Sync.SettleTime = &metav1.Duration{Duration: time.Second}
 		}),
 		Entry("with relative glob patterns", func(tb *treebindv1alpha1.Treebind) {
@@ -440,12 +453,49 @@ var _ = Describe("Treebind schema", func() {
 		Entry("with a parent segment in the subPath",
 			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = "../other" },
 			"spec.target.subPath"),
-		Entry("with a relative mountPath",
-			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.MountPath = "work" },
-			"spec.target.mountPath"),
-		Entry("with a parent segment in the mountPath",
-			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.MountPath = "/work/../etc" },
-			"spec.target.mountPath"),
+		Entry("with an interval under 5s",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Sync.Interval = &metav1.Duration{Duration: 4 * time.Second}
+			},
+			"spec.sync.interval"),
+		Entry("with an upper-case https scheme",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = upperHTTPSAddress
+			},
+			"spec.repository.url"),
+		Entry("with an upper-case ssh scheme, a key and known hosts",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = upperSSHRepositoryURL
+				tb.Spec.Repository.Auth = newSSHAuth()
+			},
+			"spec.repository.url"),
+		Entry("with an ssh URL that has one slash",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "ssh:/h/dashboards.git"
+				tb.Spec.Repository.Auth = newSSHAuth()
+			},
+			"spec.repository.url"),
+		Entry("with an ssh URL that names no host",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "ssh:///dashboards.git"
+				tb.Spec.Repository.Auth = newSSHAuth()
+			},
+			"spec.repository.url"),
+		Entry("with an ssh URL that has a user and no host",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Repository.URL = "ssh://git@/dashboards.git"
+				tb.Spec.Repository.Auth = newSSHAuth()
+			},
+			"spec.repository.url"),
+		Entry("with a commit block on a Treebind that only pulls",
+			func(tb *treebindv1alpha1.Treebind) {
+				tb.Spec.Sync.Direction = treebindv1alpha1.SyncDirectionPull
+				tb.Spec.Commit = &treebindv1alpha1.CommitSpec{MessageTemplate: "sync"}
+			},
+			"commit is only for a bidirectional Treebind"),
+		Entry("with a sidecar placement",
+			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Placement.Mode = "sidecar" },
+			"spec.placement.mode"),
 		Entry("with a double dot in the branch",
 			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "release..main" },
 			"spec.repository.branch"),
@@ -533,7 +583,7 @@ var _ = Describe("Treebind schema", func() {
 		Entry("with a subPath inside the agent's state directory",
 			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.SubPath = subPathStateGit },
 			"spec.target.subPath"),
-		Entry("with a placement mode that is neither standalone nor sidecar",
+		Entry("with a placement mode that is not standalone",
 			func(tb *treebindv1alpha1.Treebind) { tb.Spec.Placement.Mode = "sideCar" },
 			"spec.placement.mode"),
 		Entry("with a negative runAsUser",

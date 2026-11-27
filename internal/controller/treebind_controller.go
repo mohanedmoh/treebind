@@ -242,10 +242,6 @@ func (r *TreebindReconciler) ensureSyncObjects(
 // once it has an entry.
 func unimplementedFields(spec *treebindv1alpha1.TreebindSpec) []string {
 	var fields []string
-	if spec.Placement.Mode == treebindv1alpha1.PlacementModeSidecar {
-		fields = append(fields, "spec.placement.mode")
-	}
-
 	if agent := spec.Agent; agent != nil {
 		resources := agent.Resources
 		for _, field := range []struct {

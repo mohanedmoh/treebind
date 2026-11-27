@@ -30,9 +30,9 @@ import (
 
 // The paths that more than one test names.
 const (
-	fieldNodeSelector  = "spec.agent.nodeSelector"
-	fieldRunAsUser     = "spec.agent.runAsUser"
-	fieldPlacementMode = "spec.placement.mode"
+	fieldNodeSelector = "spec.agent.nodeSelector"
+	fieldRunAsUser    = "spec.agent.runAsUser"
+	fieldTolerations  = "spec.agent.tolerations"
 )
 
 func TestUnimplementedFields(t *testing.T) {
@@ -51,13 +51,6 @@ func TestUnimplementedFields(t *testing.T) {
 			spec: treebindv1alpha1.TreebindSpec{
 				Placement: treebindv1alpha1.PlacementSpec{Mode: treebindv1alpha1.PlacementModeStandalone},
 			},
-		},
-		{
-			name: "sidecar placement is not",
-			spec: treebindv1alpha1.TreebindSpec{
-				Placement: treebindv1alpha1.PlacementSpec{Mode: treebindv1alpha1.PlacementModeSidecar},
-			},
-			want: []string{fieldPlacementMode},
 		},
 		{
 			name: "an agent block that sets nothing",
@@ -82,10 +75,11 @@ func TestUnimplementedFields(t *testing.T) {
 		{
 			name: "a field from each block is listed in sorted order",
 			spec: treebindv1alpha1.TreebindSpec{
-				Placement: treebindv1alpha1.PlacementSpec{Mode: treebindv1alpha1.PlacementModeSidecar},
-				Agent:     &treebindv1alpha1.AgentSpec{NodeSelector: newAgentSpec().NodeSelector},
+				Agent: &treebindv1alpha1.AgentSpec{
+					Tolerations: newAgentSpec().Tolerations, NodeSelector: newAgentSpec().NodeSelector,
+				},
 			},
-			want: []string{fieldNodeSelector, fieldPlacementMode},
+			want: []string{fieldNodeSelector, fieldTolerations},
 		},
 	}
 
@@ -133,8 +127,7 @@ func TestUnimplementedFieldsAgent(t *testing.T) {
 
 	t.Run("every field", func(t *testing.T) {
 		agent := &treebindv1alpha1.AgentSpec{}
-		want := make([]string, 0, len(fields)+1)
-		want = append(want, fieldPlacementMode)
+		want := make([]string, 0, len(fields))
 		for _, field := range fields {
 			field.set(agent)
 			want = append(want, field.path)
@@ -142,8 +135,7 @@ func TestUnimplementedFieldsAgent(t *testing.T) {
 		slices.Sort(want)
 
 		got := unimplementedFields(&treebindv1alpha1.TreebindSpec{
-			Placement: treebindv1alpha1.PlacementSpec{Mode: treebindv1alpha1.PlacementModeSidecar},
-			Agent:     agent,
+			Agent: agent,
 		})
 		if !slices.Equal(got, want) {
 			t.Errorf("unimplementedFields() = %v, want %v", got, want)
@@ -181,11 +173,11 @@ func TestSpecSupportedCondition(t *testing.T) {
 		t.Errorf("no fields: observedGeneration = %d, want 3", supported.ObservedGeneration)
 	}
 
-	ignored := specSupportedCondition([]string{fieldNodeSelector, fieldPlacementMode}, 4)
+	ignored := specSupportedCondition([]string{fieldNodeSelector, fieldTolerations}, 4)
 	if ignored.Status != metav1.ConditionFalse || ignored.Reason != treebindv1alpha1.ReasonNotImplemented {
 		t.Errorf("two fields: got %s/%s, want False/NotImplemented", ignored.Status, ignored.Reason)
 	}
-	wantMessage := "Accepted but ignored until implemented: spec.agent.nodeSelector, spec.placement.mode"
+	wantMessage := "Accepted but ignored until implemented: spec.agent.nodeSelector, spec.agent.tolerations"
 	if ignored.Message != wantMessage {
 		t.Errorf("two fields: message = %q, want %q", ignored.Message, wantMessage)
 	}

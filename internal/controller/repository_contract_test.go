@@ -144,14 +144,9 @@ func TestTheAgentAcceptsTheRepositoriesTheOperatorCanPutInThePod(t *testing.T) {
 			tb.Spec.Repository.URL = sshRepositoryURL
 			tb.Spec.Repository.Auth = newSSHAuth()
 		}},
-		{"an ssh repository in capitals, which the CRD admits", func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Repository.URL = upperSSHRepositoryURL
-			tb.Spec.Repository.Auth = newSSHAuth()
-		}},
 		{"no branch", func(tb *treebindv1alpha1.Treebind) { tb.Spec.Repository.Branch = "" }},
-		{"a sub path and a custom mount path", func(tb *treebindv1alpha1.Treebind) {
+		{"a sub path", func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Target.SubPath = subPathNested
-			tb.Spec.Target.MountPath = testCustomPath
 		}},
 	}
 	for _, tt := range tests {
@@ -199,11 +194,11 @@ func branchCandidates() []string {
 // server and of the agent's CheckRepositoryURL.
 func repositoryURLCandidates() []string {
 	return []string{
-		httpsRepositoryURL, "HTTPS://github.com/example/dashboards.git", "https://example.com:8443/a/b",
+		httpsRepositoryURL, upperHTTPSAddress, "https://example.com:8443/a/b",
 		"https://example.com", "https://example.com/", "https://[::1]:8443/a.git", "https://example.com/a%20b.git",
 		"https://example.com/a?b=c", "https://example.com/a#b", "https://user@example.com/a.git", "https://user:pw@example.com/a.git",
 		"ssh://git@github.com/example/dashboards.git", upperSSHRepositoryURL, "ssh://git@example.com:2222/a.git",
-		"ssh://example.com/a.git", "ssh:///a.git", "ssh://git:secret@example.com/a.git", "ssh://git@[::1]/a.git", "ssh://git@example.com/~user/a.git",
+		"ssh://example.com/a.git", "ssh:///a.git", "ssh:/h/a.git", "ssh://git@/a.git", "Ssh://git@github.com/a.git", "ssh://git:secret@example.com/a.git", "ssh://git@[::1]/a.git", "ssh://git@example.com/~user/a.git",
 		httpRepositoryURL, "HTTP://git.internal/a.git", "http://user@git.internal/a.git",
 		"git://example.com/a.git", "file:///srv/a.git", "ftp://example.com/a.git", "ext::sh -c id", "javascript:alert(1)",
 		"git@github.com:example/dashboards.git", "github.com/example/dashboards.git", "/srv/a.git", "./a.git", "a.git", "ssh", "ssh:", "https:", "https://",
@@ -301,7 +296,7 @@ var _ = Describe("repository.url", func() {
 	// it and says why in Ready (repository_scheme.go). When the CRD stops, this says so.
 	It("admits http://, which the agent refuses at start with its reason and the operator makes no sync pod for", func() {
 		ctx := context.Background()
-		for _, address := range []string{httpRepositoryURL, "HTTP://git.internal/a.git"} {
+		for _, address := range []string{httpRepositoryURL} {
 			ok, err := created(ctx, address)
 			_, agentErr := agentconfig.CheckRepositoryURL(address)
 

@@ -41,11 +41,11 @@ func TestUsesPlainHTTP(t *testing.T) {
 		want          bool
 	}{
 		{"http", httpRepositoryURL, true},
-		{"an upper-case scheme, which the API server takes", "HTTP://git.internal/b.git", true},
+		{"an upper-case scheme, which the API server refuses today", "HTTP://git.internal/b.git", true},
 		{"a mixed-case scheme", "Http://git.internal/a.git", true},
 		{"a port", "http://git.internal:8080/a.git", true},
 		{"https", httpsRepositoryURL, false},
-		{"https in upper case", "HTTPS://github.com/example/dashboards.git", false},
+		{"https in upper case", upperHTTPSAddress, false},
 		{"ssh", sshRepositoryURL, false},
 		{"another scheme that starts like it", "httpx://git.internal/a.git", false},
 		{"a scheme that http is the start of", "http+ssh://git.internal/a.git", false},
@@ -192,7 +192,6 @@ var _ = Describe("A Treebind whose repository address has the scheme http", func
 			}
 		},
 		Entry("with the scheme in lower case", httpRepositoryURL),
-		Entry("with the scheme in upper case, which the API server takes", "HTTP://git.internal/example/dashboards.git"),
 	)
 
 	It("writes nothing when it is looked at again", func() {

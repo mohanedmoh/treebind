@@ -68,7 +68,6 @@ func agentEnvironmentOf(container corev1.Container) map[string]string {
 func TestAgentEnvironmentWithASubPath(t *testing.T) {
 	treebind := newTreebind(testTreebindName)
 	treebind.Namespace = testNamespace
-	treebind.Spec.Target.MountPath = testCustomPath
 	treebind.Spec.Target.SubPath = subPathNested
 
 	container, _ := agentContainer(t, treebind)
@@ -103,21 +102,18 @@ func TestNoSubPathVariableWithoutASubPath(t *testing.T) {
 
 func TestTheAgentWorksOutTheDirectoryTheSpecNames(t *testing.T) {
 	tests := []struct {
-		name, mountPath, subPath string
-		wantWorkTree             string
-		wantGitDirInWorkTree     bool
+		name, subPath        string
+		wantWorkTree         string
+		wantGitDirInWorkTree bool
 	}{
-		{"a sub path", "", subPathOne, defaultMountPath + "/grafana", false},
-		{"a nested sub path at a custom mount path", testCustomPath, subPathNested, testCustomPath + "/team-a/dashboards", false},
-		{"a mount path that is not clean", "/data//grafana/", subPathOne, "/data/grafana/grafana", false},
-		{"no sub path", "", "", defaultMountPath, true},
-		{"no sub path at a custom mount path", testCustomPath, "", testCustomPath, true},
+		{"a sub path of one directory", subPathOne, defaultMountPath + "/grafana", false},
+		{"a nested sub path", subPathNested, defaultMountPath + "/team-a/dashboards", false},
+		{"no sub path", "", defaultMountPath, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			treebind := newTreebind(testTreebindName)
 			treebind.Namespace = testNamespace
-			treebind.Spec.Target.MountPath = tt.mountPath
 			treebind.Spec.Target.SubPath = tt.subPath
 			container, _ := agentContainer(t, treebind)
 			env := agentEnvironmentOf(container)
@@ -150,7 +146,6 @@ func TestTheSyncPodMountsTheWholeClaimAtTheMountPathTheAgentIsTold(t *testing.T)
 		t.Run("sub path "+subPath, func(t *testing.T) {
 			treebind := newTreebind(testTreebindName)
 			treebind.Namespace = testNamespace
-			treebind.Spec.Target.MountPath = testCustomPath
 			treebind.Spec.Target.SubPath = subPath
 			container, _ := agentContainer(t, treebind)
 

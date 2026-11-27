@@ -133,12 +133,6 @@ func TestTheHashVariableChangesWithTheTemplateAndOnlyWithIt(t *testing.T) {
 		wantChange bool
 	}{
 		{name: "the same spec", mutate: none},
-		{name: "an explicit /work is the default mount path", mutate: func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Target.MountPath = defaultMountPath
-		}},
-		{name: "a mount path that is not clean is the clean one", mutate: func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Target.MountPath = defaultMountPath + "/"
-		}},
 		{name: "an explicit followRemote is the default policy", mutate: func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Sync.ConflictPolicy = treebindv1alpha1.ConflictPolicyFollowRemote
 		}},
@@ -151,15 +145,12 @@ func TestTheHashVariableChangesWithTheTemplateAndOnlyWithIt(t *testing.T) {
 		}},
 		{name: "spec.agent and spec.placement, which the operator ignores", mutate: func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Agent = newAgentSpec()
-			tb.Spec.Placement.Mode = treebindv1alpha1.PlacementModeSidecar
+			tb.Spec.Placement.Mode = treebindv1alpha1.PlacementModeStandalone
 		}},
 		{name: "another generation of the same spec", mutate: func(tb *treebindv1alpha1.Treebind) {
 			tb.Generation += 7
 		}},
 		{name: "another image", image: "example.com/treebind-agent:v2", mutate: none, wantChange: true},
-		{name: "another mount path", mutate: func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Target.MountPath = testCustomPath
-		}, wantChange: true},
 		{name: "another claim", mutate: func(tb *treebindv1alpha1.Treebind) {
 			tb.Spec.Target.ClaimName = "other-data"
 		}, wantChange: true},

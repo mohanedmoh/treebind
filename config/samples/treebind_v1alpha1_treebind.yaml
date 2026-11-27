@@ -23,7 +23,6 @@ spec:
   target:
     claimName: grafana-data
     subPath: dashboards
-    mountPath: /work
   sync:
     direction: bidirectional
     interval: 30s

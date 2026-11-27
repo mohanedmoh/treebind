@@ -50,16 +50,13 @@ const (
 
 // PlacementMode says where the sync pod runs in relation to the application
 // that uses the volume.
-// +kubebuilder:validation:Enum=standalone;sidecar
+// +kubebuilder:validation:Enum=standalone
 type PlacementMode string
 
 const (
 	// PlacementModeStandalone runs the sync pod on its own, next to the
 	// application's pods when the claim is ReadWriteOnce.
 	PlacementModeStandalone PlacementMode = "standalone"
-	// PlacementModeSidecar runs the sync container inside the application's own
-	// pods, which is how a ReadWriteOncePod claim can be shared.
-	PlacementModeSidecar PlacementMode = "sidecar"
 )
 
 // KeySelector names a key in a Secret or ConfigMap. The object is always in
@@ -99,13 +96,15 @@ type AuthSpec struct {
 // +kubebuilder:validation:XValidation:rule="!isURL(self.url) || url(self.url).getScheme() != 'ssh' || (has(self.auth) && has(self.auth.sshKeySecretRef) && has(self.auth.knownHostsConfigMapRef))",message="an ssh:// repository needs auth.sshKeySecretRef and auth.knownHostsConfigMapRef; host keys are always verified"
 type RepositorySpec struct {
 	// url is the address of the repository, for example
-	// ssh://git@github.com/acme/dashboards.git. The scheme must be explicit;
-	// the scp-style git@host:path shorthand is not accepted. Credentials never
-	// go in the URL: they are supplied through auth.
+	// ssh://git@github.com/acme/dashboards.git. The scheme must be explicit and
+	// in lower case, because Git refuses it in capitals, and the address has to
+	// name a host; the scp-style git@host:path shorthand is not accepted.
+	// Credentials never go in the URL: they are supplied through auth.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
 	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getScheme() in ['ssh', 'https', 'http']",message="url must use an explicit ssh://, https:// or http:// scheme; scp-style host:path is not accepted"
+	// +kubebuilder:validation:XValidation:rule="!isURL(self) || (self.matches('^(ssh|https|http)://') && url(self).getHostname() != '')",message="url must start with ssh://, https:// or http:// in lower case and name a host"
 	// +kubebuilder:validation:XValidation:rule="!self.matches(r'[\\x00-\\x20\\x7f]')",message="url must not contain whitespace or control characters"
 	// +kubebuilder:validation:XValidation:rule="!self.matches('^[a-zA-Z][a-zA-Z0-9+.-]*://[^/@]*:[^/@]*@')",message="url must not embed a password; supply credentials through auth"
 	// +kubebuilder:validation:XValidation:rule="!self.matches('^https?://[^/]*@')",message="http and https urls must not embed credentials; supply credentials through auth"
@@ -173,13 +172,6 @@ type TargetSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.endsWith('/') && !('.' in self.split('/')) && !('.git' in self.split('/'))",message="subPath must not end with '/' or contain a '.' or '.git' segment"
 	// +kubebuilder:validation:XValidation:rule="self.split('/')[0] != '.treebind'",message="subPath must not start with '.treebind', which the sync agent keeps for its own state"
 	SubPath string `json:"subPath,omitempty"`
-
-	// mountPath is where the claim is mounted inside the sync container. It
-	// does not affect where the application mounts the claim.
-	// +optional
-	// +kubebuilder:validation:MaxLength=1024
-	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !('..' in self.split('/'))",message="mountPath must be an absolute path without '..'"
-	MountPath string `json:"mountPath,omitempty"`
 }
 
 // SyncSpec controls when and in which direction files are synced.
@@ -194,7 +186,7 @@ type SyncSpec struct {
 	// +kubebuilder:default="30s"
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="interval must be at least 1s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5s')",message="interval must be at least 5s"
 	Interval *metav1.Duration `json:"interval,omitempty"`
 
 	// maxDeletions is the most files that one update may remove from the directory. An update that
@@ -312,12 +304,10 @@ type PathsSpec struct {
 	Exclude []string `json:"exclude,omitempty"`
 }
 
-// PlacementSpec says where the sync pod runs. The field is accepted now and
-// takes effect once the placement work lands; until then the operator reports
-// a value that is not implemented in the SpecSupported condition.
+// PlacementSpec says where the sync pod runs.
 type PlacementSpec struct {
-	// mode is standalone to run the sync pod on its own, or sidecar to run the
-	// sync container inside the application's pods.
+	// mode is standalone, which runs the sync pod on its own. It is the only
+	// value: a sync container inside the application's pods is not offered yet.
 	// +optional
 	// +kubebuilder:default=standalone
 	Mode PlacementMode `json:"mode,omitempty"`
@@ -385,6 +375,7 @@ type AgentSpec struct {
 }
 
 // TreebindSpec defines the desired state of Treebind.
+// +kubebuilder:validation:XValidation:rule="self.sync.direction != 'pull' || !has(self.commit)",message="commit is only for a bidirectional Treebind: a Treebind that only pulls makes no commits"
 type TreebindSpec struct {
 	// repository is the Git repository to sync with.
 	// +required

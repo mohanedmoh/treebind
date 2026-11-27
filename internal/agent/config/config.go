@@ -110,7 +110,7 @@ const (
 	// server fills in.
 	DefaultSyncInterval = 30 * time.Second
 	// MinSyncInterval is the shortest interval the CRD admits.
-	MinSyncInterval = time.Second
+	MinSyncInterval = 5 * time.Second
 	// DefaultSettleTime and MinSettleTime are the default and the least of spec.sync.settleTime, which a
 	// test holds to what the API server does.
 	DefaultSettleTime = 5 * time.Second
@@ -532,7 +532,7 @@ const (
 )
 
 // CheckRepositoryURL returns the scheme of the address of a repository, or the reason it
-// cannot be synced with. It is not stricter than the CRD about anything but the scheme: a
+// cannot be synced with. It is not stricter than the CRD about anything but http://: a
 // value that the API server accepts and the agent refuses leaves a sync pod that exits at
 // start for ever, and the one value that does, http://, is the one the agent says so about.
 func CheckRepositoryURL(raw string) (string, error) {
@@ -547,6 +547,13 @@ func CheckRepositoryURL(raw string) (string, error) {
 	}
 	switch parsed.Scheme {
 	case SchemeSSH, SchemeHTTPS:
+		// url.Parse puts the scheme in lower case, and Git does not: it refuses a transport such as SSH.
+		if !strings.HasPrefix(raw, parsed.Scheme+":") {
+			return "", errors.New("must write its scheme in lower case, which Git requires")
+		}
+		if !strings.HasPrefix(raw, parsed.Scheme+"://") || parsed.Hostname() == "" {
+			return "", errors.New("must start with " + parsed.Scheme + ":// and name a host")
+		}
 		return parsed.Scheme, nil
 	case "http":
 		return "", errors.New("must not use http://: Git over plain http sends everything in the clear, and the agent " +

@@ -128,7 +128,7 @@ gains the variable `TREEBIND_TEMPLATE_HASH`, the hash of the rest of the templat
 can tell a report of the current spec from one of the spec before. While a pod is replaced `Ready` says `SyncPodNotReady`, and
 `Synced` and `Conflict` turn `Unknown` until the new pod has pulled: with `AgentOutdated` while the operator reads the old pod,
 and with `SyncPending` once it reads the new one. After that no pod is replaced for a change that the agent does not see, such as
-writing out `mountPath: /work`, which is the default.
+setting a field of `spec.agent`, which the operator does not use yet.
 
 ## The cluster has to allow the call
 
