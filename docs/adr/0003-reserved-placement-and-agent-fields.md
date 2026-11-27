@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-11
 - Issue: #95
+- Superseded in part by: [0041](0041-what-the-breaking-release-before-beta-changes-in-the-api.md), which takes `sidecar` out of
+  `spec.placement.mode`
 
 ## Context
 
