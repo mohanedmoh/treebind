@@ -374,12 +374,14 @@ jobs:
 
   # Labels the pull request from its title, so that the release notes sort themselves. It adds labels and removes
   # none, and ci-gate does not wait for it. A pull request from a fork has a read-only token, so its labels are
-  # set by hand. The script comes from the pull request, which only someone who may write here can have opened
-  # from a branch of this repository.
+  # set by hand, and so are those of Dependabot, which has its own and whose token is read-only too. The script comes
+  # from the pull request, which only someone who may write here can have opened from a branch of this repository.
   label:
     name: label
     needs: approve
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
