@@ -303,7 +303,15 @@ func (p *cutOnce) Pull(ctx context.Context) (pull.Result, error) {
 	return p.rest.Pull(ctx)
 }
 
-func TestAnUpdateCutOffWhileTheAgentRunsHoldsTheCommitsBackPastTheSettleTimeUntilThePullHasPutItRight(t *testing.T) {
+// Recover is the repair of the real puller, which is the one that puts an update right.
+func (p *cutOnce) Recover(ctx context.Context) (string, error) {
+	if repairer, ok := p.rest.(Repairer); ok {
+		return repairer.Recover(ctx)
+	}
+	return "", nil
+}
+
+func TestAnUpdateThatFailsWhileTheAgentRunsIsPutRightAtOnceAndTheCommitsDoNotWaitForTheNextPull(t *testing.T) {
 	f := gittest.New(t)
 	before := f.Publish(testBranch, cutBase)
 	where := f.Layout(subDir)
@@ -348,48 +356,46 @@ func TestAnUpdateCutOffWhileTheAgentRunsHoldsTheCommitsBackPastTheSettleTimeUnti
 	held.Kill()
 	g = clock.wait(t)
 	cutAt := clock.Now()
-	if got, _ := pullCheck(t, r); got.Outcome != outcomeFailed || got.Reason != pull.ReasonPullFailed {
-		t.Fatalf("pull = %+v, want the pull that was cut off failed", got)
-	}
-	expectCutOff(t, where)
-	gittest.Write(t, where, jsonApp, "the application's\n")
 
-	// The files that the update wrote and the application's settle, long before the next pull, and nothing is committed. The
-	// first commit that waits has removed the lock of the index that the killed Git left, as a commit does first, and says so.
-	g = clock.passUntil(t, "the commit that waits for the update to be put right", g, func() bool {
-		got, _ := commitCheck(t, r)
-		return got.Outcome != outcomeSkipped || strings.HasPrefix(got.Message, commitWaitsForRepair)
-	})
-	waited, _ := commitCheck(t, r)
-	if waited.Outcome != outcomeSkipped || waited.Reason != preflight.ReasonNotChecked || !strings.HasPrefix(waited.Message, commitWaitsForRepair) {
-		t.Fatalf("commit = %+v, want it skipped, waiting for the update to be put right", waited)
+	// The pull failed, and the agent put the update right before it waited for the next one: what the update wrote is back as it
+	// was, and the journal is gone, which is what the commit step waits for.
+	got, _ := pullCheck(t, r)
+	if got.Outcome != outcomeFailed || got.Reason != pull.ReasonPullFailed ||
+		!strings.Contains(got.Message, "was cut off, and was undone, and the next pull applies it again: 2 file(s) put back, 1 removed") {
+		t.Fatalf("pull = %+v, want it failed, with the update undone at once", got)
 	}
-	if settled := clock.Now().Sub(cutAt); settled < settleFor {
-		t.Errorf("the commit waited %v after the cut, want at least the settle time: the files had settled", settled)
+	if cut, err := pull.UpdateCutOff(where); err != nil || cut {
+		t.Fatalf("UpdateCutOff = %v, %v after the pull that failed, want the journal gone", cut, err)
 	}
-	if scanned, _ := changesCheck(t, r); !strings.HasPrefix(scanned.Message, "4 files changed on the volume: 4 settled") {
-		t.Errorf("changes = %q, want the three files of the update and the application's settled", scanned.Message)
-	}
-
-	// Until the pull comes the commits wait, at every scan, and the checkout stays where it was.
-	g = clock.passUntil(t, "the pull that puts the update right", g, func() bool {
-		if head := f.InCheckout(where, "rev-parse", "HEAD"); head != before && head != tip {
-			t.Fatalf("the checkout moved to %s before the pull put the update right: a commit was made", shortOf(head))
+	for name, want := range cutBase {
+		if got := gittest.Read(t, where, name); got != want {
+			t.Errorf("%s is %q after the undo, want %q, as the commit before the update has it", name, got, want)
 		}
+	}
+	if gittest.Exists(filepath.Join(where.WorkTree, jsonAdded)) {
+		t.Errorf("%s, which the update added, is still there", jsonAdded)
+	}
+
+	// What the application writes after that is committed within the settle time and the next scan, long before the next pull, and
+	// none of the files of the update is in the commit.
+	gittest.Write(t, where, jsonApp, "the application's\n")
+	g = untilCommitted(t, clock, r, g)
+	if waited := clock.Now().Sub(cutAt); waited >= cutInterval {
+		t.Errorf("the commit came %v after the cut, want it before the pull of the next interval: it waited for the pull", waited)
+	}
+	expectOnlyTheApplicationsFileCommitted(t, f, where, before)
+
+	// The next pull applies the update on top of the application's commit, and both are kept.
+	clock.passUntil(t, "the pull that applies the update", g, func() bool {
 		got, _ := pullCheck(t, r)
 		return got.Outcome == outcomePassed
 	})
-	if got, _ := pullCheck(t, r); !strings.Contains(got.Message, "was cut off, and was undone, and the next pull applies it again: 2 file(s) put back, 1 removed") {
-		t.Errorf("pull = %+v, want the update undone and applied again", got)
-	}
-	if waited := clock.Now().Sub(cutAt); waited < cutInterval {
-		t.Errorf("the pull came %v after the cut, want it after the wait of a pull that failed, which is longer than the interval", waited)
-	}
 	expectWhole(t, where)
-
-	// The application's file is committed after it, alone, and the update's files are in no commit of the agent.
-	untilCommitted(t, clock, r, g)
-	expectOnlyTheApplicationsFileCommitted(t, f, where, tip)
+	if gittest.Read(t, where, jsonApp) != "the application's\n" {
+		t.Error("the application's file was lost")
+	}
+	// The commit of the update is under the checkout: it fails the test when it is not.
+	f.InCheckout(where, "merge-base", "--is-ancestor", tip, "HEAD")
 }
 
 func TestAStartThatFindsAnUpdateCutOffAndCannotReachTheRepositoryCommitsNoneOfTheFilesOfTheUpdate(t *testing.T) {

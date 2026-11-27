@@ -37,9 +37,9 @@ const journalName = "updating"
 
 // UpdateCutOff says whether the journal of an update is in the state directory of the layout: a pull began to apply an
 // update and did not end it, so that the files that the update changes may be half written, and are the agent's to put
-// back and not the application's to commit. Only the repair at the start of the next pull puts them right and removes
-// the journal (docs/adr/0028), so the commit step commits nothing while it is there, and the first pull of a start that
-// finds it does not wait for its phase. It looks with one stat and reads nothing: a journal that cannot be used is
+// back and not the application's to commit. Only the repair puts them right and removes the journal (docs/adr/0028): the
+// pull begins with it, and the agent runs it at once after a pull that failed (Puller.Recover). The commit step commits
+// nothing while the journal is there, and the first pull of a start that finds it does not wait for its phase. It looks with one stat and reads nothing: a journal that cannot be used is
 // there all the same, and the pull removes it. An error is a state directory that could not be looked at, and the
 // answer is then that the update may be cut off, so that what cannot be told is not taken for the application's.
 func UpdateCutOff(l layout.Layout) (bool, error) {

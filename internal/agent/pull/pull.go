@@ -137,6 +137,10 @@ type Error struct {
 	// Repaired says what the pull put right before it failed, such as an update that was cut off, in words for the
 	// check. It is empty when there was nothing to put right.
 	Repaired string
+	// Cut is set when the failure is of an update that was begun and failed in the middle of its files, so that its journal
+	// is in the state directory and some of its files may be written. It is what the agent puts right at once (Puller.Recover).
+	// A failure that is not of an update, such as a repository that cannot be reached or a repair that failed, does not have it.
+	Cut bool
 	// Conflict is set when the checkout and the repository each had commits that the other lacked, and the policy to
 	// resolve that could not be applied (docs/adr/0034). The reason is then the one of the update that failed, which is
 	// the same for an update that is no conflict, and this is what tells the two apart without reading the message.
@@ -314,6 +318,25 @@ func (p *Puller) Pull(ctx context.Context) (Result, error) {
 		failure.Repaired = repaired
 	}
 	return result, err
+}
+
+// Recover puts right what an update that failed in the middle of its files left, as the repair at the start of a pull does,
+// and applies nothing. The agent calls it after a pull that failed, so that its commits do not wait for the next pull, which
+// comes after the longer wait of a pull that failed (docs/adr/0028). It says what it did, in words for the Pull check, and says
+// nothing when there was nothing to put right. As the repair, it writes only after the fence has checked the writer lock.
+func (p *Puller) Recover(ctx context.Context) (string, error) {
+	if err := git.VerifyGitDir(p.o.Layout.GitDir, p.o.Layout.WorkTree); err != nil {
+		return "", p.fail(ReasonPullFailed, "the Git directory cannot be looked at: %v", err)
+	}
+	head, err := p.head(ctx)
+	if err != nil {
+		return "", err
+	}
+	note, failure := p.repair(ctx, head)
+	if failure != nil {
+		return note, failure
+	}
+	return note, nil
 }
 
 // update asks the repository for the tip of the branch and applies what is new, for a checkout that is at head.
@@ -547,8 +570,10 @@ func (p *Puller) apply(ctx context.Context, from, to string, how move) (Result, 
 		failure := p.mergeFailed(ctx, from, to, err)
 		if failure.Reason == ReasonBlocked {
 			// Git refused before it wrote a file. Any other failure may have left some written, and the journal stays
-			// for the next pull to put them back.
+			// for the repair to put them back, which the agent runs at once (Puller.Recover) and the next pull begins with.
 			_ = p.removeJournal()
+		} else {
+			failure.Cut = true
 		}
 		return Result{}, failure
 	}
