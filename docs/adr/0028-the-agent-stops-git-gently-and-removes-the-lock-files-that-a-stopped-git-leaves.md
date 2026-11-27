@@ -8,6 +8,16 @@
   so a settle time shorter than the phase had them committed first, a half file among them. The commit step now commits
   nothing while `updating` is in the state directory, with the `Commit` check `Skipped` and `NotChecked` and saying why,
   whatever the timing and whether the repository answers, and the first pull of a start that finds it comes at once
+- Extended by: #246, on 2026-11-27, which stops the commits waiting for the next pull after an update fails in a running
+  agent. After a pull that failed in the middle of its update, which the failure says (`pull.Error.Cut`), the agent removes the
+  lock files that the failed Git left, and the temporary objects when the volume refused, and puts the update right at once
+  (`Puller.Recover`, the repair that a pull begins with), so that the wait is no longer the interval or the backoff of a pull that
+  failed, up to ten minutes. The commits that follow are on the commit that the checkout is at, which the update has not moved,
+  so a push of them is refused as not a fast-forward until the next pull, which keeps its wait: it applies the update and joins
+  the two as it does for any local commit. A failure that is not of an update, such as a repair that failed, is not repaired
+  again at once, because the cause is still there. A journal that cannot be removed is a failed pull, `PullFailed`, wherever
+  the repair meets one. A pull that applied its update and then could not remove the journal still passes, with a warning, and
+  the repair of the next pull fails for the same cause
 - Extended by: #257, on 2026-11-24, which removes what the last consequence below leaves: the temporary files that Git
   writes in `objects` before it moves them to their names (`tmp_obj_*` in a directory of loose objects, `tmp_*` at the
   top and in `pack`), which a fetch that fails on a full volume leaves and which keep the volume full. They are removed,

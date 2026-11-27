@@ -24,12 +24,12 @@ impact you expect. Do not include real credentials.
 
 ## Supported versions
 
-Treebind is alpha software and has no release yet. Once releases exist, only
-the **latest minor release** receives security fixes.
+Treebind is alpha software. Its releases are pre-releases, and only the
+**latest release** receives security fixes.
 
 | Version | Supported |
 | :-- | :-- |
-| Latest minor release | Yes |
+| Latest release | Yes |
 | Older releases | No |
 
 ## Scope

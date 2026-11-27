@@ -37,8 +37,9 @@ limitations under the License.
 //
 // Nothing is committed while the journal of an update that was cut off is in the state directory (docs/adr/0028):
 // the files that the update had written are what the scan lists as changes, and they are the agent's, half written
-// for some, and not the application's. The repair at the start of the next pull puts them back and applies the
-// update again, and the files that are still changes after it are committed then, by a scan that follows.
+// for some, and not the application's. The repair, which a pull begins with and the agent runs at once after a pull that
+// failed, puts them back, the next pull applies the update again, and the files that are still changes after the repair are
+// committed then, by a scan that follows.
 package commit
 
 import (
