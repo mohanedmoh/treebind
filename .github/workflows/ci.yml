@@ -109,6 +109,27 @@ jobs:
             exit 1
           fi
 
+  # Fails when the code that is built calls a vulnerability that is known, in a module or in the Go standard library of
+  # the version that go.mod names. The database is read at every run, so a new report turns this red until go.mod
+  # moves to a fixed Go or module version: that is what it is for.
+  vulncheck:
+    name: vulncheck
+    needs: approve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check the code for known vulnerabilities
+        run: make vulncheck
+
   unit:
     name: unit
     needs: approve
@@ -456,7 +477,7 @@ jobs:
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [approve, changes, lint, unit, envtest, build, image, chart, dco, pr-title, e2e, e2e-failures, chart-install, quickstart]
+    needs: [approve, changes, lint, vulncheck, unit, envtest, build, image, chart, dco, pr-title, e2e, e2e-failures, chart-install, quickstart]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled
