@@ -1,12 +1,13 @@
 name: Nightly
 
 # Runs the end-to-end suite, the install of the Helm chart and the quickstart against
-# every Kubernetes version in the support window (1.35 to 1.37). It is manual for now:
-# start it from the Actions tab with "Run workflow". To run it every night again, add back
-#   schedule:
-#     - cron: "17 3 * * *"
-# under `on:` (scheduled runs happen on the default branch only).
+# every Kubernetes version in the support window (1.35 to 1.37), every night at 03:17 UTC, and on
+# demand from the Actions tab with "Run workflow". A scheduled run starts without the owner's
+# approval, unlike the runs of CI: it runs what is on main and writes nothing but an issue, when it
+# fails (the job report). Scheduled runs happen on the default branch only.
 on:
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
