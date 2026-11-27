@@ -372,6 +372,38 @@ jobs:
             exit 1
           fi
 
+  # Labels the pull request from its title, so that the release notes sort themselves. It adds labels and removes
+  # none, and ci-gate does not wait for it. A pull request from a fork has a read-only token, so its labels are
+  # set by hand, and so are those of Dependabot, which has its own and whose token is read-only too. The script comes
+  # from the pull request, which only someone who may write here can have opened from a branch of this repository.
+  label:
+    name: label
+    needs: approve
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To add the labels. No other job of this workflow writes anything.
+      pull-requests: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Add the labels of the title
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ github.event.pull_request.title }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          labels=$(hack/pr-labels.sh "$TITLE")
+          for label in $labels; do
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/labels" -f "labels[]=$label" --silent
+          done
+
   e2e:
     name: e2e
     needs: changes
