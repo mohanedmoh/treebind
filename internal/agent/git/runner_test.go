@@ -129,6 +129,9 @@ func TestNew(t *testing.T) {
 	})
 }
 
+// want16m is the bound of the settings that keep the memory of Git within the sync container.
+const want16m = "16m"
+
 // wantSettings is the -c configuration of every command, written out again here
 // so that a change to one of the values, or one that is dropped, fails.
 var wantSettings = map[string]string{
@@ -161,7 +164,9 @@ var wantSettings = map[string]string{
 	"gpg.ssh.defaultKeyCommand": "",
 	"gc.auto":                   "0",
 	"maintenance.auto":          wantFalse,
-	"core.bigFileThreshold":     "16m",
+	"core.bigFileThreshold":     want16m,
+	"pack.deltaCacheSize":       want16m,
+	"core.deltaBaseCacheLimit":  want16m,
 	"safe.directory":            fakeWorkDir,
 }
 

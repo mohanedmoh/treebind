@@ -93,7 +93,15 @@ var fixedSettings = []setting{
 	{"maintenance.auto", falseValue, "a commit, merge or fetch would start maintenance tasks that the config selects"},
 	{"core.bigFileThreshold", bigFileThreshold, "a larger value, Git's default among them, holds a large file whole in " +
 		"memory, beyond the memory limit of the sync container"},
+	{"pack.deltaCacheSize", deltaCacheSize, "the deltas that pack-objects keeps until it writes them, in a repack and a push: " +
+		"Git's default of 256 MiB is twice the memory limit of the sync container (docs/adr/0043)"},
+	{"core.deltaBaseCacheLimit", deltaCacheSize, "the bases of deltas that Git keeps while it reads a pack, in a repack, a " +
+		"fetch and the commands that read objects: Git's default of 96 MiB is most of the memory of the sync container"},
 }
+
+// deltaCacheSize bounds the two caches of deltas, so that they take a small part of the 128 MiB of the sync container
+// (docs/adr/0043). A smaller cache makes Git compute again what it would have kept, which is slower and not wrong.
+const deltaCacheSize = "16m"
 
 // allowedProtocols are the transports Git may use. GIT_ALLOW_PROTOCOL replaces
 // every protocol.<name>.allow in the configuration, so a repository config that
