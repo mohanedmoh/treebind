@@ -18,6 +18,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -58,7 +59,9 @@ func TestTheSettingForAnyUserIDReachesBothControllers(t *testing.T) {
 			t.Errorf("main.go does not hold %q", want)
 		}
 	}
-	if got := strings.Count(text, "AgentArbitraryUserID: agentArbitraryUserID,"); got != 2 {
+	// gofmt aligns the fields of a struct, so the space after the colon is not fixed.
+	field := regexp.MustCompile(`AgentArbitraryUserID:\s+agentArbitraryUserID,`)
+	if got := len(field.FindAllString(text, -1)); got != 2 {
 		t.Errorf("main.go gives the setting to %d controllers, want 2", got)
 	}
 }
