@@ -120,14 +120,15 @@ func (r Result) String() string {
 	var note string
 	switch r.Outcome {
 	case Packed:
-		note = fmt.Sprintf("packed %d loose objects of the Git directory: its objects took %s and take %s",
-			r.Before.Loose, mib(r.Before.Bytes), mib(r.After.Bytes))
+		note = fmt.Sprintf("packed %s of the Git directory: its objects took %s and take %s",
+			plural(r.Before.Loose, "loose object"), mib(r.Before.Bytes), mib(r.After.Bytes))
 	case Consolidated:
-		note = fmt.Sprintf("put the %d packs and %d loose objects of the Git directory in one pack: its objects took %s and take %s",
-			r.Before.Packs, r.Before.Loose, mib(r.Before.Bytes), mib(r.After.Bytes))
+		note = fmt.Sprintf("put %s and %s of the Git directory in one pack: its objects took %s and take %s",
+			plural(r.Before.Packs, "pack"), plural(r.Before.Loose, "loose object"), mib(r.Before.Bytes), mib(r.After.Bytes))
 	case NoRoom:
-		note = fmt.Sprintf("the Git directory was not packed: it has %d loose objects and %d packs, and the repack needs %s free on "+
-			"the volume and the volume has %s; give the claim more room", r.Before.Loose, r.Before.Packs, mib(r.Need), mib(r.Free))
+		note = fmt.Sprintf("the Git directory was not packed: it has %s and %s, and the repack needs %s free on the volume and the "+
+			"volume has %s; give the claim more room", plural(r.Before.Loose, "loose object"), plural(r.Before.Packs, "pack"),
+			mib(r.Need), mib(r.Free))
 	case Held:
 		note = fmt.Sprintf("the Git directory is not packed until %s: a maintenance that began at %s was cut off, as an out-of-memory "+
 			"kill of the sync container does", r.Since.Add(HoldAfterCutOff).UTC().Format(time.RFC3339), r.Since.UTC().Format(time.RFC3339))
@@ -140,6 +141,14 @@ func (r Result) String() string {
 		note += "; " + removed
 	}
 	return note
+}
+
+// plural is a count and a noun, with an s when the count is not one.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // mib is a size in MiB, for people.
