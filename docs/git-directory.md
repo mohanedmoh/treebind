@@ -234,7 +234,9 @@ packs nothing, and the `Pull` check says how much it needs and how much the clai
 the Git directory was not packed: it has 90535 loose objects and 1 pack, and the repack needs 70.6 MiB free on the volume and the volume has 12.0 MiB; give the claim more room
 ```
 
-It looks again an hour later. An agent of a release before the packing has all its objects loose, and its first repack needs about
+It looks again an hour later, and the note stays in the `Pull` check until a repack is made. Nothing is packed while the pulls
+fail, as when the host does not answer: the commits go on, and their objects, about 53 MiB and 13,000 files a day at the rate
+above, wait for the first pull that passes. An agent of a release before the packing has all its objects loose, and its first repack needs about
 a fifth of what they take: give the claim that room before you upgrade. A repack that is killed, as when the sync container is
 killed for its memory, leaves the objects as they were and is put right by the next, which waits a day after the kill, and the
 `Pull` check says so. While a repack runs, the agent does not pull, scan, commit or push; that is seconds for the loose objects.

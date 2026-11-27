@@ -66,14 +66,19 @@ The agent packs the objects of its Git directory with `git repack`, in its loop,
 
 After each pull that passed, the agent looks at two directories, as `gc --auto` looks: `objects/17`, and the packs.
 
-- More loose objects in `objects/17` than a 256th of 6700, rounded up, that is 28, which is about 6,700 in all, `gc.auto`:
-  the loose objects are packed.
+- More loose objects in `objects/17` than a 256th of 6700 rounded up, which is 27, so 28 or more, about 6,700 in all,
+  `gc.auto`: the loose objects are packed.
 - 50 packs that are not kept with a `.keep` file, `gc.autoPackLimit`: every pack is put in one.
 
 At the measured rate that is a repack of the loose objects about every 12 hours, which bounds what loose objects take to
 about 30 MiB and 6,700 inodes, and a repack of every pack after 50 of them, about 25 days. A pull comes every interval and the
-look is two directory listings. A maintenance that failed, found no room or was held (below) is looked for again an hour later,
-and not at the next pull.
+look is two directory listings. A maintenance that failed, found no room, was held (below), left the limit reached, or found
+fewer loose objects than the look at `objects/17` guessed, is looked for again an hour later, and not at the next pull.
+
+A pull that failed is not followed by a maintenance, and that is a limit: while the pulls fail, because the host does not answer
+or the volume refuses, the commits of the application go on adding loose objects, about 53 MiB and 13,000 inodes a day at the
+measured rate, and nothing packs them until a pull passes again. That is what the agent did before this change, for as long
+as the pulls fail.
 
 ### What runs
 
@@ -81,6 +86,9 @@ and not at the next pull.
   a reflog or the index reaches into a new pack, and then removes the loose objects that are in a pack (`prune-packed`).
 - With 50 packs: the same with `-a --keep-unreachable`. It puts every object of every pack and every loose object in one pack,
   the objects that nothing reaches among them, and then removes the packs that it has made redundant and the loose objects.
+- When the repack of the loose objects leaves as many as the limit, which are the loose objects that nothing reaches, it is
+  followed at once by the repack of every pack into one, when the volume has the room for that, behind the fence again. Without
+  the room the result says that the limit is still reached, and the agent looks again an hour later, and not at every pull.
 
 Neither removes an object that is not in the pack it has just written, and neither touches a ref, so the commits that
 `refs/treebind/recovery/*`, `refs/treebind/local/*`, a ref that a person made by hand and the reflogs keep are kept, and so is
@@ -97,7 +105,12 @@ each processor, of up to ten blobs each, and a blob up to `core.bigFileThreshold
 than the 128 MiB of the sync container on a machine with many processors. On copies of the measured Git directory the repack of
 every pack into one had a largest resident set, with what it started, of 65 MiB at day 7, 72 at day 8 and 81 at day 9, and
 `repack -a -d` with Git's defaults 69, 75 and 85, on this machine; the repack of the loose objects 28 to 35 MiB. The memory grows
-with the repository.
+with the repository. Those figures were measured before the next two settings and were not measured again.
+
+The Runner also sets, for every command, `pack.deltaCacheSize=16m` and `core.deltaBaseCacheLimit=16m`. `--window-memory` bounds
+neither, and Git's defaults are 256 MiB for the deltas that `pack-objects` keeps until it writes them and 96 MiB for the bases of
+deltas that Git keeps while it reads a pack, against the 128 MiB of the sync container. A repack, a fetch and a push use them. A
+smaller cache makes Git compute again what it would have kept, which is slower and not wrong.
 
 ### Under the writer lock, in the loop, with a time limit
 
@@ -136,15 +149,23 @@ behind the fence before each repack and after one that failed while the agent ho
 have not changed for 31 minutes, as before. A SIGTERM, which is how the agent stops a command, lets Git remove its own files.
 
 An out-of-memory kill takes the agent with its Git, and a repack that needs more memory than the container has would be killed
-at every start. The agent writes `.treebind/maintaining`, with the time, before a repack and removes it after. When it finds the
-file at a maintenance, the repack was cut off with the agent, and no maintenance is made until a day after that time; the `Pull`
-check says so.
+at every start. The agent writes `.treebind/maintaining`, with the time, before a repack and removes it after, behind the fence:
+an agent that has lost its lock leaves it. When it finds the file at a maintenance, the repack was cut off with the agent, and
+no maintenance is made until a day after that time; the `Pull` check says so. The out-of-memory killer can also take only the
+repack or the `pack-objects` that it started. The agent kills a command only when its context ended, which the Runner says as a
+cancellation or a timeout, so a repack that ended for a SIGKILL, or that says that `pack-objects` died of signal 9, was killed by
+something else: the agent leaves the file then, and holds the maintenance a day as well. A maintenance that is held removes,
+behind the fence, what the repack that was cut off left among the objects, which can keep the volume full, and which the start
+removes only after 31 minutes.
 
 ### What the agent says
 
 What a maintenance did is at the end of the message of the `Pull` check, and in the log, at `INFO` when it packed and at `WARN`
-when it failed, found no room or was held: `packed 6712 loose objects of the Git directory: its objects took 26.2 MiB and take
-2.1 MiB`. A maintenance never fails the pull, and has no check or reason of its own.
+when it failed, found no room, was held or left the limit reached: `packed 6712 loose objects of the Git directory: its objects
+took 26.2 MiB and take 2.1 MiB`. The count is of the objects that the repack packed. What a maintenance that could not be made
+said stays at the end of the message of every `Pull` check, of a pull that failed too, until a maintenance packs or finds nothing
+to pack. The note names ten of the files that were removed at most. A maintenance never fails the pull, and has no check or
+reason of its own.
 
 ## Consequences
 
