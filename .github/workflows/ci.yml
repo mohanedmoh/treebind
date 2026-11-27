@@ -253,8 +253,9 @@ jobs:
           set -euo pipefail
           ko build --push=false --platform=linux/amd64,linux/arm64 $(go list ./cmd/...)
 
-      # The agent has to run Git and ssh as its user, with the settings of the sync
-      # pod. This loads the amd64 image into the runner's Docker and runs it.
+      # The agent has to run Git and ssh as its user, and as a random user ID with the
+      # passwd file of its init container, with the settings of the sync pod. This
+      # loads the amd64 image into the runner's Docker and runs it.
       - name: Run the agent image with the settings of the sync pod
         env:
           KO_DOCKER_REPO: ko.local

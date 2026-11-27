@@ -256,7 +256,7 @@ dev-down: ## Delete the kind cluster used by 'make dev'.
 	@$(KIND) delete cluster --name $(KIND_DEV_CLUSTER)
 
 .PHONY: check-agent-image
-check-agent-image: ko ## Build the agent image with ko and check that it can run Git and ssh as its user.
+check-agent-image: ko ## Build the agent image with ko and check that it runs Git and ssh as its user and as a random user ID (needs the network: it pulls alpine and installs OpenSSH).
 	@image="$$(KO_DOCKER_REPO=ko.local "$(KO)" build --local --bare --platform="linux/$$(go env GOARCH)" ./cmd/agent)" && \
 	hack/check-agent-image.sh "$$image"
 
