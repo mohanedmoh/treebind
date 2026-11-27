@@ -177,7 +177,7 @@ func (r *repository) leftovers() []string {
 // maintainer is a Maintainer of the repository with the options changed.
 func (r *repository) maintainer(change ...func(*Options)) *Maintainer {
 	r.t.Helper()
-	o := Options{Layout: r.l, Git: r.f.GitOptions(), LooseLimit: 1, PackLimit: 100}
+	o := Options{Layout: r.l, Git: r.f.GitOptions(), LooseLimit: 2, PackLimit: 100}
 	for _, c := range change {
 		c(&o)
 	}

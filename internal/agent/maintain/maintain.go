@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -112,7 +113,13 @@ type Result struct {
 	// Removed are the files that a Git that was stopped left among the objects, which were removed before the repack or
 	// after it failed, relative to the Git directory.
 	Removed []string
+	// Remaining is true when the repack left the loose objects or the packs at their limit, as the loose objects that nothing
+	// reaches are when there is no room to put every pack in one: a maintenance now would do nothing more.
+	Remaining bool
 }
+
+// namedRemoved is how many of the files that were removed the note names.
+const namedRemoved = 10
 
 // String says what was done, for the end of the message of the check that the maintenance follows, and is empty when nothing
 // was due.
@@ -121,7 +128,11 @@ func (r Result) String() string {
 	switch r.Outcome {
 	case Packed:
 		note = fmt.Sprintf("packed %s of the Git directory: its objects took %s and take %s",
-			plural(r.Before.Loose, "loose object"), mib(r.Before.Bytes), mib(r.After.Bytes))
+			plural(max(r.Before.Loose-r.After.Loose, 0), "loose object"), mib(r.Before.Bytes), mib(r.After.Bytes))
+		if r.Remaining {
+			note += fmt.Sprintf("; %s that nothing reaches stay loose until the volume has the room to put every pack in one",
+				plural(r.After.Loose, "loose object"))
+		}
 	case Consolidated:
 		note = fmt.Sprintf("put %s and %s of the Git directory in one pack: its objects took %s and take %s",
 			plural(r.Before.Packs, "pack"), plural(r.Before.Loose, "loose object"), mib(r.Before.Bytes), mib(r.After.Bytes))
@@ -134,7 +145,11 @@ func (r Result) String() string {
 			"kill of the sync container does", r.Since.Add(HoldAfterCutOff).UTC().Format(time.RFC3339), r.Since.UTC().Format(time.RFC3339))
 	}
 	if len(r.Removed) > 0 {
-		removed := fmt.Sprintf("removed what a Git command that was stopped left among the objects: %s", strings.Join(r.Removed, ", "))
+		shown := strings.Join(r.Removed[:min(len(r.Removed), namedRemoved)], ", ")
+		if more := len(r.Removed) - namedRemoved; more > 0 {
+			shown += fmt.Sprintf(" and %d more", more)
+		}
+		removed := "removed what a Git command that was stopped left among the objects: " + shown
 		if note == "" {
 			return removed
 		}
@@ -219,7 +234,8 @@ func freeSpace(dir string) (int64, error) {
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return 0, fmt.Errorf("the free room of the volume of %s cannot be read: %w", dir, err)
 	}
-	return int64(st.Bavail) * st.Bsize, nil //nolint:gosec // the free blocks of a volume fit in an int64
+	// Bsize is an int64 on linux/amd64 and a narrower or unsigned integer on other systems, so it is converted.
+	return int64(st.Bavail) * int64(st.Bsize), nil //nolint:gosec,unconvert // the free blocks of a volume fit in an int64
 }
 
 // looseName is the name of a loose object in its directory: the rest of the id after its first two digits, of SHA-1 or SHA-256.
@@ -363,12 +379,12 @@ func blocks(info fs.FileInfo) int64 {
 // out-of-memory kill does, holds every maintenance for HoldAfterCutOff.
 func (m *Maintainer) Maintain(ctx context.Context) (Result, error) {
 	gitDir := m.o.Layout.GitDir
-	since, held, err := m.cutOff()
+	since, held, expired, err := m.cutOff()
 	if err != nil {
 		return Result{}, err
 	}
 	if held {
-		return Result{Outcome: Held, Since: since}, nil
+		return m.held(ctx, since)
 	}
 	before, err := survey(gitDir)
 	if err != nil {
@@ -383,8 +399,7 @@ func (m *Maintainer) Maintain(ctx context.Context) (Result, error) {
 	if res.Free, err = m.o.Free(gitDir); err != nil {
 		return res, err
 	}
-	needLoose := before.looseSize + int64(before.Loose)*indexPerObject + fixedPerPack + m.o.Reserve
-	needFull := needLoose + before.packSize
+	needLoose, needFull := m.need(before)
 	switch {
 	case full && res.Free >= needFull:
 	case loose && res.Free >= needLoose:
@@ -399,6 +414,11 @@ func (m *Maintainer) Maintain(ctx context.Context) (Result, error) {
 	if err := m.fence(ctx); err != nil {
 		return res, err
 	}
+	if expired {
+		if err := m.removeMarker(); err != nil {
+			return res, err
+		}
+	}
 	if res.Removed, err = git.RemoveStaleTempObjects(gitDir, 0); err != nil {
 		return res, fmt.Errorf("the Git directory was not packed: what a Git command that was stopped left among the objects "+
 			"cannot be removed: %w", err)
@@ -406,20 +426,89 @@ func (m *Maintainer) Maintain(ctx context.Context) (Result, error) {
 	if err := m.mark(); err != nil {
 		return res, err
 	}
-	_, err = m.repack(ctx, full)
-	unmarked := m.unmark()
+	res, full, err = m.repackAll(ctx, res, full)
+	unmarked := m.unmarkAfter(ctx, err)
 	if err != nil {
 		res.Removed = append(res.Removed, m.afterFailure(ctx)...)
 		return res, fmt.Errorf("the Git directory could not be packed: %w", err)
-	}
-	if res.After, err = survey(gitDir); err != nil {
-		return res, fmt.Errorf("the objects of the Git directory cannot be looked at after the repack: %w", err)
 	}
 	res.Outcome = Packed
 	if full {
 		res.Outcome = Consolidated
 	}
+	res.Remaining = res.After.Loose >= m.o.LooseLimit || res.After.Packs >= m.o.PackLimit
 	return res, unmarked
+}
+
+// need is the room that a repack of the loose objects needs, and the room that a repack of every pack into one needs.
+func (m *Maintainer) need(s Store) (loose, full int64) {
+	loose = s.looseSize + int64(s.Loose)*indexPerObject + fixedPerPack + m.o.Reserve
+	return loose, loose + s.packSize
+}
+
+// repackAll runs the repack, and then looks at what it left. A repack of the loose objects packs only those that something
+// reaches, and when the loose objects that nothing reaches are still at the limit they are put in one pack with every other
+// object, when the volume has the room and the fence passes. Otherwise a maintenance at the next pull would do the same again.
+func (m *Maintainer) repackAll(ctx context.Context, res Result, full bool) (Result, bool, error) {
+	gitDir := m.o.Layout.GitDir
+	if _, err := m.repack(ctx, full); err != nil {
+		return res, full, err
+	}
+	after, err := survey(gitDir)
+	if err != nil {
+		return res, full, fmt.Errorf("the objects of the Git directory cannot be looked at after the repack: %w", err)
+	}
+	res.After = after
+	if full || after.Loose < m.o.LooseLimit {
+		return res, full, nil
+	}
+	// The volume is asked again, since the first repack has freed the blocks of the loose objects that it packed.
+	_, needFull := m.need(after)
+	if free, err := m.o.Free(gitDir); err != nil || free < needFull {
+		return res, full, nil
+	}
+	if err := m.fence(ctx); err != nil {
+		return res, full, err
+	}
+	if _, err := m.repack(ctx, true); err != nil {
+		return res, full, err
+	}
+	if res.After, err = survey(gitDir); err != nil {
+		return res, true, fmt.Errorf("the objects of the Git directory cannot be looked at after the repack: %w", err)
+	}
+	return res, true, nil
+}
+
+// held is a maintenance that is held. What the repack that was cut off left among the objects can keep the volume full, and the
+// start removes only what has not changed for longer than a Git command of an agent may run, so it is removed here, behind the
+// fence, and only when there is something to remove.
+func (m *Maintainer) held(ctx context.Context, since time.Time) (Result, error) {
+	res := Result{Outcome: Held, Since: since}
+	left, err := git.StaleTempObjects(m.o.Layout.GitDir, 0)
+	if err != nil || len(left) == 0 {
+		return res, err
+	}
+	if err := m.fence(ctx); err != nil {
+		return res, err
+	}
+	res.Removed, err = git.RemoveStaleTempObjects(m.o.Layout.GitDir, 0)
+	return res, err
+}
+
+// killedByAnother reports whether a repack that failed, or the pack-objects that it started, was killed with SIGKILL by
+// something other than the agent, as the out-of-memory killer of the container does. The agent kills a command only when its
+// context ended, which the Runner says as a cancellation or a timeout, and not as the exit of the command.
+func killedByAnother(err error) bool {
+	failure, ok := errors.AsType[*git.Error](err)
+	if !ok {
+		return false
+	}
+	if exit, ok := errors.AsType[*exec.ExitError](failure.Cause); ok {
+		if status, ok := exit.Sys().(syscall.WaitStatus); ok && status.Signaled() && status.Signal() == syscall.SIGKILL {
+			return true
+		}
+	}
+	return strings.Contains(failure.Stderr, "died of signal 9")
 }
 
 // repack runs the repack: of every pack and every loose object into one pack, with the objects that nothing reaches, when full is
@@ -454,30 +543,28 @@ func (m *Maintainer) afterFailure(ctx context.Context) []string {
 	return removed
 }
 
-// cutOff says whether a maintenance was cut off less than HoldAfterCutOff ago, and when it began. A marker that cannot be read
-// as a time is one that was cut off as it was written, before its repack began, and is removed.
-func (m *Maintainer) cutOff() (time.Time, bool, error) {
+// cutOff says whether a maintenance was cut off less than HoldAfterCutOff ago, and when it began, and whether a marker is there
+// that is older, or cannot be read as a time, which is one that was cut off as it was written, before its repack began. Such a
+// marker is removed by the maintenance that follows, behind the fence.
+func (m *Maintainer) cutOff() (since time.Time, held, expired bool, err error) {
 	root, err := os.OpenRoot(m.o.Layout.StateDir)
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("the state directory cannot be opened: %w", err)
+		return time.Time{}, false, false, fmt.Errorf("the state directory cannot be opened: %w", err)
 	}
 	defer func() { _ = root.Close() }()
 	data, err := root.ReadFile(markerName)
 	if errors.Is(err, fs.ErrNotExist) {
-		return time.Time{}, false, nil
+		return time.Time{}, false, false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("%s cannot be read: %w", filepath.Join(m.o.Layout.StateDir, markerName), err)
+		return time.Time{}, false, false, fmt.Errorf("%s cannot be read: %w", filepath.Join(m.o.Layout.StateDir, markerName), err)
 	}
 	unix, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-	since := time.Unix(unix, 0)
+	since = time.Unix(unix, 0)
 	if err == nil && m.o.Now().Sub(since) < HoldAfterCutOff {
-		return since, true, nil
+		return since, true, false, nil
 	}
-	if err := root.Remove(markerName); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return time.Time{}, false, fmt.Errorf("%s cannot be removed: %w", filepath.Join(m.o.Layout.StateDir, markerName), err)
-	}
-	return time.Time{}, false, nil
+	return time.Time{}, false, true, nil
 }
 
 // mark writes the marker, the time of the agent in seconds. It is not synced: a crash of the node that loses it loses one hold.
@@ -494,16 +581,31 @@ func (m *Maintainer) mark() error {
 	return nil
 }
 
-// unmark removes the marker.
-func (m *Maintainer) unmark() error {
+// unmarkAfter removes the marker after a repack, unless the repack was killed by something other than the agent, which the
+// marker then holds for a day, or the fence fails: an agent that has lost its lock writes nothing more. The fence is checked
+// without the context of the loop, which a stop of the agent cancels while it still holds the lock.
+func (m *Maintainer) unmarkAfter(ctx context.Context, failed error) error {
+	if killedByAnother(failed) {
+		return nil
+	}
+	if err := m.fence(context.WithoutCancel(ctx)); err != nil {
+		return err
+	}
+	if err := m.removeMarker(); err != nil {
+		return fmt.Errorf("%w, and no maintenance is tried for a day", err)
+	}
+	return nil
+}
+
+// removeMarker removes the marker. The caller has checked the fence.
+func (m *Maintainer) removeMarker() error {
 	root, err := os.OpenRoot(m.o.Layout.StateDir)
 	if err != nil {
 		return fmt.Errorf("the state directory cannot be opened: %w", err)
 	}
 	defer func() { _ = root.Close() }()
 	if err := root.Remove(markerName); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%s cannot be removed, and no maintenance is tried for a day: %w",
-			filepath.Join(m.o.Layout.StateDir, markerName), err)
+		return fmt.Errorf("%s cannot be removed: %w", filepath.Join(m.o.Layout.StateDir, markerName), err)
 	}
 	return nil
 }
