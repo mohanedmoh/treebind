@@ -87,13 +87,13 @@ output() {
   ' "$1"
 }
 
-# normalize leaves out of a text what differs from one run to the next: commit ids (seven to forty hexadecimal digits with
-# a digit among them), times and ages become placeholders, a run of spaces becomes one space, and a line has none at its
-# ends.
+# normalize leaves out of a text what differs from one run to the next: commit ids (seven to forty hexadecimal digits,
+# also when all of them are letters, as in the short id dcbdcff), times and ages become placeholders, a run of spaces
+# becomes one space, and a line has none at its ends.
 normalize() {
   perl -pe '
     s/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/<time>/g;
-    s/\b(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b/<commit>/g;
+    s/\b[0-9a-f]{7,40}\b/<commit>/g;
     s/\b(?:\d+[smhd])+\b/<age>/g;
     s/[ \t]+/ /g; s/^ //; s/ $//;
   '
