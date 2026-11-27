@@ -365,7 +365,7 @@ func TestOnlyTheSubcommandsOfTheAgentCanBeRun(t *testing.T) {
 	wantAllowed := []string{
 		cmdAdd, cmdCatFile, cmdCheckout, "checkout-index", cmdCommit, "commit-tree", cmdDiffIndex, "diff-tree",
 		cmdFetch, "for-each-ref", "hash-object", "init", "ls-files", cmdLsRemote, "ls-tree", cmdMerge,
-		"merge-base", cmdPush, "read-tree", "reset", "rev-list", "rev-parse", "show-ref", cmdStatus,
+		"merge-base", cmdPush, "read-tree", cmdRepack, "reset", "rev-list", "rev-parse", "show-ref", cmdStatus,
 		"symbolic-ref", "update-index", "update-ref", "version", "write-tree",
 	}
 	if got := slices.Sorted(maps.Keys(allowed)); !slices.Equal(got, wantAllowed) {
@@ -377,7 +377,7 @@ func TestOnlyTheSubcommandsOfTheAgentCanBeRun(t *testing.T) {
 	fake := fakeGit(t, root, fmt.Sprintf("echo ran >> '%s'", marker))
 	for _, args := range [][]string{
 		nil, {""}, {"submodule", "update"}, {"clone", "x"}, {"diff"}, {"log"}, {"show"}, {"config", "alias.x", "!y"},
-		{"pull"}, {"gc"}, {"Status"}, {"treebindtrap"}, {"-c", "core.hooksPath=/x", cmdStatus},
+		{"pull"}, {"gc"}, {"maintenance", "run"}, {"prune"}, {"pack-refs"}, {"reflog", "expire"}, {"Status"}, {"treebindtrap"}, {"-c", "core.hooksPath=/x", cmdStatus},
 		{"--exec-path=/x", cmdStatus}, {"-C", "/", cmdStatus}, {"status\n"}, {gitPath},
 	} {
 		_, err := fake.Run(context.Background(), args...)

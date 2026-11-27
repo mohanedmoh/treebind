@@ -317,14 +317,16 @@ func checkDir(name, path string) error {
 // the place of any name here, and a name that is not here is refused before an
 // alias could answer to it. Left out on purpose: diff, log and show, which run
 // external diff programs and text converters; submodule and clone, which fetch
-// submodules; gc and maintenance, which detach from the call; and every command
-// that starts an editor, a mergetool or another program the agent does not use.
+// submodules; gc and maintenance, which detach from the call and pack the refs; and every
+// command that starts an editor, a mergetool or another program the agent does not use. repack
+// is in, for the maintenance of the Git directory (docs/adr/0043): it runs in the call, and it
+// packs objects and never refs.
 var allowed = map[string]bool{
 	"add": true, "cat-file": true, "checkout": true, "checkout-index": true, "commit": true,
 	"commit-tree": true, "diff-index": true, "diff-tree": true, "fetch": true, "for-each-ref": true,
 	"hash-object": true, "init": true, "ls-files": true, "ls-remote": true, "ls-tree": true,
 	"merge": true, "merge-base": true, subcommandPush: true, "read-tree": true, "reset": true,
-	"rev-list": true, "rev-parse": true, "show-ref": true, "status": true, "symbolic-ref": true,
+	subcommandRepack: true, "rev-list": true, "rev-parse": true, "show-ref": true, "status": true, "symbolic-ref": true,
 	"update-index": true, "update-ref": true, "version": true, "write-tree": true,
 }
 
@@ -352,6 +354,9 @@ func (r *Runner) RunTimeout(ctx context.Context, timeout time.Duration, args ...
 	if option := refusedOption(args[0], args[1:]); option != "" {
 		return Result{}, &Error{Subcommand: args[0], Option: option, Cause: ErrNotAllowed}
 	}
+	if args[0] == subcommandRepack && !repacksWithoutServerInfo(args[1:]) {
+		return Result{}, &Error{Subcommand: args[0], Option: "(without -n)", Cause: ErrNotAllowed}
+	}
 	if args[0] == subcommandPush {
 		if spec, refused := refusedRefspec(args[1:]); refused {
 			if spec == "" {
@@ -377,6 +382,25 @@ const (
 
 // subcommandPush is the subcommand that the guard of a push is for.
 const subcommandPush = "push"
+
+// subcommandRepack is the subcommand that has to be given -n.
+const subcommandRepack = "repack"
+
+// repacksWithoutServerInfo reports whether the options of a repack have -n, alone, before any "--". Without it a repack runs
+// update-server-info, which writes info/refs and objects/info/packs, and the check of the Git directory refuses an info that is
+// not empty (docs/adr/0019), so that the agent would refuse its own Git directory after its own repack. The setting
+// repack.updateServerInfo does not do it on every Git: tried on 2.34.1, which writes info/refs with it set to false.
+func repacksWithoutServerInfo(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-n" {
+			return true
+		}
+	}
+	return false
+}
 
 // noRefspec is what the error of a refused push says of a push that names no refspec.
 const noRefspec = "(none)"
