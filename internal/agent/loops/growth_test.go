@@ -17,17 +17,21 @@ limitations under the License.
 package loops
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/mohanedmoh/treebind/internal/agent/gittest"
+	"github.com/mohanedmoh/treebind/internal/agent/maintain"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 )
 
@@ -38,8 +42,8 @@ import (
 // through in a minute (spec.commit.maxPerHour, 60), and the pull comes every 30 seconds (spec.sync.interval). On the
 // other side another Treebind on the same repository commits and pushes every other minute, so that both sides change
 // all the time and some pushes are refused and resolved. TREEBIND_GROWTH_COMMITS_PER_MINUTE raises the commits of the
-// application, for a Treebind whose limit is raised. TREEBIND_GROWTH_MAINTAIN, when set, is how many minutes pass between
-// two runs of the maintenance of the Git directory.
+// application, for a Treebind whose limit is raised. TREEBIND_GROWTH_MAINTAIN=1 runs the maintenance of the agent after each
+// pull of A, when it is due, as the agent does (docs/adr/0043).
 
 const (
 	gitRepack   = "repack"
@@ -158,6 +162,13 @@ func TestGrowthOfTheGitDirectory(t *testing.T) {
 			n.write(growthName(i), dashboard(values[i]))
 		}
 	}
+	var maintainer *maintain.Maintainer
+	if envInt(t, "TREEBIND_GROWTH_MAINTAIN", 0) == 1 {
+		var err error
+		if maintainer, err = maintain.New(maintain.Options{Layout: a.l, Git: f.GitOptions()}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Logf("start: %s", measure(t, a.l.GitDir))
 	for minute := 1; minute <= minutes; minute++ {
 		b.pull()
@@ -171,35 +182,66 @@ func TestGrowthOfTheGitDirectory(t *testing.T) {
 			a.commit()
 			a.push()
 		}
-		a.pull()
-		a.pull()
+		for range 2 {
+			a.pull()
+			if maintainer != nil {
+				maintainOnce(t, maintainer, minute)
+			}
+		}
 		if minute%every == 0 || minute == minutes {
 			t.Logf("minute %d (%.2f days): A made %d commits, %d resolutions, %d updates: %s",
 				minute, float64(minute)/1440, a.commits, a.resolved, a.advanced, measure(t, a.l.GitDir))
 		}
 		if minute%1440 == 0 || minute == minutes {
-			reclaim(t, f, a)
+			reclaim(t, a)
 		}
 	}
 }
 
+// maintainOnce runs the maintenance when it is due, and says what it did.
+func maintainOnce(t *testing.T, m *maintain.Maintainer, minute int) {
+	t.Helper()
+	due, err := m.Due()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !due {
+		return
+	}
+	started := time.Now()
+	got, err := m.Maintain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("minute %d: maintenance %s in %s: %s", minute, got.Outcome, time.Since(started).Round(time.Millisecond), got)
+}
+
 // reclaim says what maintenance would take back, on copies of the Git directory.
-func reclaim(t *testing.T, f *gittest.Fixture, a *node) {
+func reclaim(t *testing.T, a *node) {
 	t.Helper()
 	try := func(name string, commands ...[]string) {
 		dir := filepath.Join(gittest.TempDir(t), "git")
 		copyDir(t, a.l.GitDir, dir)
+		var rss int64
 		for _, args := range commands {
-			if _, err := f.PlainErr(a.l.StateDir, []string{"GIT_DIR=" + dir}, args...); err != nil {
-				t.Fatalf("%s: %v", name, err)
+			cmd := exec.Command(gittest.Binary(t), args...)
+			cmd.Env = []string{"GIT_DIR=" + dir, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "HOME=/nonexistent"}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s: %v: %s", name, err, out)
+			}
+			// The largest resident set of the command and of the commands that it started, in KiB.
+			if usage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
+				rss = max(rss, usage.Maxrss)
 			}
 		}
-		t.Logf("after %s: %s", name, measure(t, dir))
+		t.Logf("after %s (largest resident set %d MiB): %s", name, rss>>10, measure(t, dir))
 		if err := os.RemoveAll(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
 	try("repack -d (the loose objects packed)", []string{gitRepack, "-d", "-n", "-q"})
+	try("the repack of the agent of every pack into one", []string{gitRepack, "-d", "-n", "-q", "--threads=1", "--window-memory=32m",
+		"-a", "--keep-unreachable"})
 	try("repack -a -d (one pack)", []string{gitRepack, "-a", "-d", "-n", "-q"})
 	try("repack -a -d and prune of what no ref, reflog or index reaches", []string{gitRepack, "-a", "-d", "-n", "-q"},
 		[]string{"prune", expireNow})
