@@ -168,6 +168,8 @@ type pulls struct {
 	// when it could not be made. No maintenance is looked for before maintainAfter.
 	maintainer    Maintainer
 	maintainAfter time.Time
+	// maintenanceNote is what the last maintenance said when it could not be made, and is empty when there is none.
+	maintenanceNote string
 }
 
 // once runs one pull and puts what came of it in the report. It says whether the pull failed in the
@@ -201,57 +203,19 @@ func (l *pulls) once(ctx context.Context) bool {
 		tidied = tempNote(clearTempObjects(ctx, l.options.Layout.GitDir, l.a.fence))
 	}
 	failed := l.report(ctx, result, err, clearedNote(cleared), tidied, l.recovered(ctx, err))
+	note := l.maintenanceNote
 	if err == nil {
-		l.maintain(ctx)
+		note = l.maintain(ctx)
+	}
+	if ctx.Err() == nil {
+		l.addNote(note)
 	}
 	return failed
 }
 
-// maintain packs the objects of the Git directory when they are due, after a pull that passed and in its turn, so that no pull,
-// scan, commit or push runs beside it (docs/adr/0043), and puts what it did at the end of the message of the Pull check, and in
-// the log. A pull that failed is not followed by it: what failed is put right first. It is not tried before maintainAfter.
-func (l *pulls) maintain(ctx context.Context) {
-	if l.a.NewMaintainer == nil || ctx.Err() != nil || l.a.Now().Before(l.maintainAfter) {
-		return
-	}
-	l.a.working()
-	if l.maintainer == nil {
-		made, err := l.a.NewMaintainer(maintain.Options{Layout: l.options.Layout, Git: l.options.Git, Fence: l.a.fence})
-		if err != nil {
-			l.maintainAfter = l.a.Now().Add(maintenanceRetry)
-			l.a.Logger.Warn("the maintenance of the Git directory cannot be set up", "error", err)
-			return
-		}
-		l.maintainer = made
-	}
-	due, err := l.maintainer.Due()
-	if err != nil {
-		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
-		l.a.Logger.Warn("the Git directory cannot be looked at for its maintenance", "error", err)
-		return
-	}
-	if !due {
-		return
-	}
-	result, err := l.maintainer.Maintain(ctx)
-	if ctx.Err() != nil {
-		return
-	}
-	note := result.String()
-	if err != nil {
-		note = joined(note, err.Error())
-	}
-	switch {
-	case err != nil || result.Outcome == maintain.NoRoom || result.Outcome == maintain.Held:
-		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
-		l.a.Logger.Warn("maintenance of the Git directory", "message", note)
-	case result.Outcome == maintain.NotDue:
-		// The look at objects/17 guessed more loose objects than there are. The count of all of them reads every directory of
-		// loose objects, which is not made at every pull.
-		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
-	default:
-		l.a.Logger.Info("maintenance of the Git directory", "message", note)
-	}
+// addNote puts a note at the end of the message of the Pull check, which the report already holds, and publishes it. The log has
+// the note on a line of its own, so the log line of the pull stays what the pull said.
+func (l *pulls) addNote(note string) {
 	if note == "" || l.p.pulling == nil {
 		return
 	}
@@ -259,6 +223,62 @@ func (l *pulls) maintain(ctx context.Context) {
 	checked.Message = shortened(checked.Message + "; " + note)
 	l.p.pulling = &checked
 	l.a.publish(l.p)
+}
+
+// maintain packs the objects of the Git directory when they are due, after a pull that passed and in its turn, so that no pull,
+// scan, commit or push runs beside it (docs/adr/0043), says what it did in the log, and returns the note for the end of the
+// message of the Pull check. A pull that failed is not followed by it: what failed is put right first. It is not tried before
+// maintainAfter. What a maintenance that could not be made said is the note of every pull until one packs, or finds nothing
+// to pack, because the next is an hour later and the pulls of that hour would hide it.
+func (l *pulls) maintain(ctx context.Context) string {
+	if l.a.NewMaintainer == nil || ctx.Err() != nil || l.a.Now().Before(l.maintainAfter) {
+		return l.maintenanceNote
+	}
+	l.a.working()
+	if l.maintainer == nil {
+		made, err := l.a.NewMaintainer(maintain.Options{Layout: l.options.Layout, Git: l.options.Git, Fence: l.a.fence})
+		if err != nil {
+			l.maintainAfter = l.a.Now().Add(maintenanceRetry)
+			l.a.Logger.Warn("the maintenance of the Git directory cannot be set up", "error", err)
+			return l.maintenanceNote
+		}
+		l.maintainer = made
+	}
+	due, err := l.maintainer.Due()
+	if err != nil {
+		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
+		l.a.Logger.Warn("the Git directory cannot be looked at for its maintenance", "error", err)
+		return l.maintenanceNote
+	}
+	if !due {
+		l.maintenanceNote = ""
+		return ""
+	}
+	result, err := l.maintainer.Maintain(ctx)
+	if ctx.Err() != nil {
+		return ""
+	}
+	note := result.String()
+	if err != nil {
+		note = joined(note, err.Error())
+	}
+	l.maintenanceNote = ""
+	switch {
+	case err != nil || result.Outcome == maintain.NoRoom || result.Outcome == maintain.Held:
+		l.maintainAfter, l.maintenanceNote = l.a.Now().Add(maintenanceRetry), note
+		l.a.Logger.Warn("maintenance of the Git directory", "message", note)
+	case result.Outcome == maintain.NotDue:
+		// The look at objects/17 guessed more loose objects than there are. The count of all of them reads every directory of
+		// loose objects, which is not made at every pull.
+		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
+	case result.Remaining:
+		// What is left at the limit is left by the next repack too, until the volume has more room.
+		l.maintainAfter, l.maintenanceNote = l.a.Now().Add(maintenanceRetry), note
+		l.a.Logger.Warn("maintenance of the Git directory", "message", note)
+	default:
+		l.a.Logger.Info("maintenance of the Git directory", "message", note)
+	}
+	return note
 }
 
 // recovered puts right the update that a pull that failed began and did not end, and says what it did, for the end of the

@@ -161,3 +161,63 @@ func TestAMaintenanceThatFailedIsNotTriedAgainForAnHour(t *testing.T) {
 		})
 	}
 }
+
+// What a maintenance that could not be made said stays at the end of the Pull check, also of a pull that failed, until a
+// maintenance packs or finds nothing to pack: the next look is an hour later, and the pulls of that hour would hide it.
+func TestWhatAMaintenanceThatCouldNotBeMadeSaidStaysInThePullCheckUntilOneIsMade(t *testing.T) {
+	var now atomic.Pointer[time.Time]
+	base := time.Unix(1_800_000_000, 0)
+	now.Store(&base)
+	f := newFakePuller()
+	m := &fakeMaintainer{due: true, result: maintain.Result{Outcome: maintain.NoRoom, Need: 20 << 20, Free: 1 << 20}}
+	change, _ := withPuller(f, &loopClock{})
+	maintained, _ := withMaintainer(m)
+	r := start(t, func(o *Options) {
+		change(o)
+		maintained(o)
+		o.Now = func() time.Time { return *now.Load() }
+	})
+	f.awaitBegun(t)
+	const unpacked = "the Git directory was not packed"
+
+	f.answer(t, upToDate(testCommit))
+	f.answer(t, upToDate(testCommit))
+	if got, _ := pullCheck(t, r); !strings.Contains(got.Message, unpacked) {
+		t.Errorf("the pull after the one that found no room says %q, want what the maintenance said", got.Message)
+	}
+	f.answer(t, failedPull(pull.ReasonFetchFailed, "the repository cannot be reached"))
+	if got, _ := pullCheck(t, r); got.Outcome == outcomePassed || !strings.Contains(got.Message, unpacked) {
+		t.Errorf("a pull that failed says %+v, want its failure and what the maintenance said", got)
+	}
+
+	m.mu.Lock()
+	m.result = packed()
+	m.mu.Unlock()
+	later := base.Add(time.Hour)
+	now.Store(&later)
+	f.answer(t, upToDate(testCommit))
+	f.answer(t, upToDate(testCommit))
+	if got, _ := pullCheck(t, r); strings.Contains(got.Message, unpacked) {
+		t.Errorf("the pull after a maintenance that packed says %q, want nothing of the one that found no room", got.Message)
+	}
+}
+
+// A repack that leaves the limit reached, as loose objects that nothing reaches do without the room for one pack, is not made
+// again at the next pull.
+func TestAMaintenanceThatLeavesTheLimitReachedIsNotMadeAgainForAnHour(t *testing.T) {
+	f := newFakePuller()
+	stuck := packed()
+	stuck.Remaining = true
+	m := &fakeMaintainer{due: true, result: stuck}
+	change, _ := withPuller(f, &loopClock{})
+	maintained, _ := withMaintainer(m)
+	start(t, func(o *Options) { change(o); maintained(o) })
+	f.awaitBegun(t)
+
+	f.answer(t, upToDate(testCommit))
+	f.answer(t, upToDate(testCommit))
+
+	if m.count() != 1 {
+		t.Errorf("the maintenance ran %d times, want once: the limit is still reached, and the next is an hour later", m.count())
+	}
+}
