@@ -30,10 +30,10 @@ refuses what is accepted today, a field or a value that is taken away, and a new
 | Change | Why now |
 | :-- | :-- |
 | `spec.placement.mode` loses the value `sidecar`; `standalone` stays | Sidecar placement (#63, #114) comes after beta. A beta should not accept a value that does nothing, and the value can be added back when it works. This reverses ADR 0003 for this value |
-| `spec.target.mountPath` is removed | It only sets where the claim is mounted inside the sync container, which no user of the volume sees |
+| `spec.target.mountPath` is removed | It sets where the claim is mounted inside the sync container, which no user of the volume sees, and changing it on a Treebind that has a checkout breaks the checkout, because the Git directory holds the path |
 | `spec.sync.interval` is at least 5 s (1 s today, ADR 0002) | Every pull asks the Git host. One Treebind at 1 s asks 3600 times an hour. The end-to-end tests and the chart test already use 5 s |
 | `commit` is refused with `direction: pull` (#299) | It is ignored today |
-| A repository URL needs a host, and its scheme in lower case followed by `//` (#298) | `ssh:/h/x.git`, `ssh:///x.git` and `HTTPS://...` are accepted and can never work |
+| A repository URL needs a host, and its scheme in lower case followed by `//` (#298) | `ssh:/h/x.git`, `ssh:///x.git`, `SSH://...` and `HTTPS://...` are accepted and can never work: Git refuses a transport in capitals. The agent has the same rule, as it has for the interval |
 
 `spec.sync.settleTime` stays at 1 s or more: it only decides when the agent looks at its own volume.
 
@@ -68,6 +68,9 @@ breaking release. Until then the API accepts the address and the operator refuse
 - Users move once: delete the Treebinds, install the new release, create them again. The claims keep their data and the
   checkout is reopened (#295 writes and tests the steps). An agent of the old group and one of the new cannot both write
   a volume, because of the writer lock.
+- A Treebind that set a `mountPath` other than `/work` needs one more step. Its Git directory holds the old path in
+  `core.worktree`, and the agent refuses it with `GitDirUnsafe` until that setting of `.treebind/git/config` names the
+  path of the synced directory under `/work`. A test of the checkout holds both.
 - A manifest that sets `sidecar`, an interval under 5 s, or `commit` on a pull Treebind is refused after the move.
   `mountPath` is then a field that the API does not know: `kubectl` refuses it, and a client that does not ask for strict
   field validation gets a warning and has the field dropped. The migration steps list each.
