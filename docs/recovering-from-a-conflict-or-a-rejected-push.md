@@ -125,7 +125,7 @@ listed there.
 ## Before you run a command on the volume
 
 The commands below that set `GIT_DIR` run in a pod that has `git` and a shell and that mounts the **whole claim**, as those of
-[the deletion guard](deletion-guard.md#letting-the-update-through) do, as the user of the agent, `65532`, so that Git and the files keep
+[the deletion guard](deletion-guard.md#letting-the-update-through) do, as the user of the agent (`65532`, or the user ID that the platform gives the sync pod), so that Git and the files keep
 their owner. `MOUNT` is where the claim is mounted in that pod, `SUB` is `spec.target.subPath` (`.` when there is none) and `BRANCH` is
 `spec.repository.branch`. Two things to know first:
 

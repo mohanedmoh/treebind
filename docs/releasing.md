@@ -122,7 +122,11 @@ runs the first before it publishes:
   the sync pod, a read-only root filesystem, no capabilities and no privilege
   escalation. It checks that the user is numeric and not root, that Git is not
   older than `MIN_GIT`, that ssh finds the user in the passwd file, and that Git
-  can make a commit. `make check-agent-image` builds the image and runs it.
+  can make a commit. Then it runs the image as a random user ID with group 0, as a
+  platform may run the sync pod: the agent writes the passwd file as its init
+  container does, and clones over ssh from a throwaway server started from
+  `alpine`, which installs OpenSSH from the network. `make check-agent-image`
+  builds the image and runs it.
 
 ### When Git ships a security release
 

@@ -130,6 +130,10 @@ can tell a report of the current spec from one of the spec before. While a pod i
 and with `SyncPending` once it reads the new one. After that no pod is replaced for a change that the agent does not see, such as
 writing out `mountPath: /work`, which is the default.
 
+A setting of the operator that changes the pod template of every Treebind replaces every sync pod once too, in the same way:
+a new agent image, and turning `AGENT_ARBITRARY_USER_ID` (the chart value `agent.arbitraryUserID`) on or off
+([any user ID](pod-security.md#any-user-id)).
+
 ## The cluster has to allow the call
 
 The operator calls the sync pod on port 8080. In a namespace with a default-deny

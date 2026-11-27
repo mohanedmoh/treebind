@@ -46,7 +46,7 @@ update then has few files left to remove. These commands run in a pod that has `
 the **whole claim**, not only the `subPath`, because the Git directory is beside the directory that is synced
 (see [the Git directory](git-directory.md)). `MOUNT` is where the claim is mounted in that pod, `SUB` is
 `spec.target.subPath` (`.` when there is none) and `BRANCH` is `spec.repository.branch`. Run them as the user of
-the agent, `65532`, so that Git and the files keep their owner.
+the agent (`65532`, or the user ID that the platform gives the sync pod), so that Git and the files keep their owner.
 
 The files the update would remove:
 
