@@ -68,8 +68,9 @@ breaking release. Until then the API accepts the address and the operator refuse
 - Users move once: delete the Treebinds, install the new release, create them again. The claims keep their data and the
   checkout is reopened (#295 writes and tests the steps). An agent of the old group and one of the new cannot both write
   a volume, because of the writer lock.
-- A manifest that sets `sidecar`, `mountPath`, an interval under 5 s, or `commit` on a pull Treebind is refused after
-  the move. The migration steps list each.
+- A manifest that sets `sidecar`, an interval under 5 s, or `commit` on a pull Treebind is refused after the move.
+  `mountPath` is then a field that the API does not know: `kubectl` refuses it, and a client that does not ask for strict
+  field validation gets a warning and has the field dropped. The migration steps list each.
 - Serving two versions later means that removing `v1alpha1` needs the stored objects rewritten first.
 - The versioning and deprecation policy (#69) says what may change from here on.
 - The changes of the table are not released before the group changes, so that users are broken once and not twice.
