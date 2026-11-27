@@ -43,6 +43,7 @@ From a checkout, which has no published images, build them into your cluster and
 | :-- | :-- | :-- |
 | `manager.image.repository`, `manager.image.tag` | `ghcr.io/mohanedmoh/treebind-operator`, `v` and the chart's `appVersion` | The operator image. |
 | `agent.image.repository`, `agent.image.tag` | `ghcr.io/mohanedmoh/treebind-agent`, `v` and the chart's `appVersion` | The image that the operator makes the sync pods from. |
+| `agent.arbitraryUserID` | `false` | Run the sync pods under any user ID that the platform gives them, such as OpenShift's. Turning it on or off replaces every sync pod once; with it on, `kubectl drain` needs `--delete-emptydir-data`, and the agent image has to be of this release or newer, also with `helm upgrade --reuse-values` ([pod-security.md](https://github.com/mohanedmoh/treebind/blob/main/docs/pod-security.md#any-user-id)). |
 | `manager.replicas` | `2` | Operator replicas. Keep `--leader-elect` while it is above 1. |
 | `rbac.namespaced`, `rbac.namespaces` | `false` | Serve only the Treebinds of the namespaces listed, with a Role in each ([rbac.md](https://github.com/mohanedmoh/treebind/blob/main/docs/rbac.md)). |
 | `crd.keep` | `true` | Keep the CRD when the release is uninstalled. |

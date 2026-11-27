@@ -19,7 +19,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -76,6 +78,22 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// arbitraryUserIDEnv is the variable that tells the operator to give every sync pod the passwd file of the user
+// that it runs as, so that it runs under any user ID that the platform gives it (docs/adr/0042).
+const arbitraryUserIDEnv = "AGENT_ARBITRARY_USER_ID"
+
+// parseArbitraryUserID reads the setting of arbitraryUserIDEnv: off when it is empty, and a boolean otherwise.
+func parseArbitraryUserID(value string) (bool, error) {
+	if value == "" {
+		return false, nil
+	}
+	on, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s and --agent-arbitrary-user-id take true or false, not %q", arbitraryUserIDEnv, value)
+	}
+	return on, nil
+}
+
 // envOrDefault returns the value of the environment variable, or fallback when
 // it is unset or empty.
 func envOrDefault(name, fallback string) string {
@@ -96,6 +114,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var agentImage string
+	var arbitraryUserID string
 	var statusIssuer, statusSubject string
 	var watchNamespaces string
 	var tlsOpts []func(*tls.Config)
@@ -120,6 +139,9 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&agentImage, "agent-image", envOrDefault("AGENT_IMAGE", defaultAgentImage),
 		"The image of the sync agent container. Defaults to the AGENT_IMAGE environment variable.")
+	flag.StringVar(&arbitraryUserID, "agent-arbitrary-user-id", os.Getenv(arbitraryUserIDEnv),
+		"true gives every sync pod the passwd file of the user it runs as, so that it runs under any user ID, "+
+			"and replaces every sync pod once. Defaults to the "+arbitraryUserIDEnv+" environment variable, and to false.")
 	flag.StringVar(&statusIssuer, "status-issuer", os.Getenv("STATUS_ISSUER"),
 		"The issuer of the cluster's service account tokens, which the sync agents check in the operator's token. "+
 			"Read from the API server when empty.")
@@ -138,6 +160,12 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	agentArbitraryUserID, err := parseArbitraryUserID(arbitraryUserID)
+	if err != nil {
+		setupLog.Error(err, "Invalid --agent-arbitrary-user-id")
+		os.Exit(1)
+	}
 
 	namespaces, err := controller.ParseWatchNamespaces(watchNamespaces)
 	if err != nil {
@@ -271,11 +299,12 @@ func main() {
 		Scheme:     mgr.GetScheme(),
 		AgentImage: agentImage,
 
-		StatusIssuer:  status.Issuer,
-		StatusSubject: status.Subject,
-		StatusKeys:    statusKeys,
-		Metrics:       treebindMetrics,
-		APIReader:     mgr.GetAPIReader(),
+		AgentArbitraryUserID: agentArbitraryUserID,
+		StatusIssuer:         status.Issuer,
+		StatusSubject:        status.Subject,
+		StatusKeys:           statusKeys,
+		Metrics:              treebindMetrics,
+		APIReader:            mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind")
 		os.Exit(1)
@@ -298,9 +327,10 @@ func main() {
 		Metrics:    treebindMetrics,
 		// The settings of the reconcile of the spec, from which the poller computes the
 		// hash of the pod template that the spec gives.
-		AgentImage:    agentImage,
-		StatusIssuer:  status.Issuer,
-		StatusSubject: status.Subject,
+		AgentImage:           agentImage,
+		AgentArbitraryUserID: agentArbitraryUserID,
+		StatusIssuer:         status.Issuer,
+		StatusSubject:        status.Subject,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "treebind-status")
 		os.Exit(1)

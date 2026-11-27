@@ -20,6 +20,9 @@ limitations under the License.
 // the one that is there, pulls into it, and, for a Treebind that syncs in both directions, looks for what
 // the application changed, commits what has settled, pushes the commits, and serves its status to the operator.
 // It reports itself ready once a pull has passed or a push has worked.
+//
+// Started with the arguments write-passwd and a path, it writes the passwd file of the sync container there and exits
+// (docs/adr/0042).
 package main
 
 import (
@@ -30,6 +33,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/mohanedmoh/treebind/internal/agent/app"
@@ -38,6 +42,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/passwd"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/push"
 	"github.com/mohanedmoh/treebind/internal/agent/scan"
@@ -119,6 +124,10 @@ var newWatcher = func(options watch.Options) (app.Watcher, error) {
 func main() {
 	umask.Set()
 
+	if len(os.Args) > 1 {
+		os.Exit(runCommand(os.Args[1:], os.Stderr))
+	}
+
 	// SIGTERM is the only warning the agent gets that its pod is going away.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -126,6 +135,25 @@ func main() {
 	code := run(ctx, os.Getenv, os.Stderr)
 	stop()
 	os.Exit(code)
+}
+
+// passwdSource is the passwd file of the image, which the one that the agent writes starts from. A test replaces it.
+var passwdSource = passwd.SystemFile
+
+// runCommand runs the agent with arguments, which it takes only to write the passwd file of the sync container. The
+// init container of the sync pod runs it as the user that the platform gives the pod, before the sync container starts
+// with the file mounted over /etc/passwd, so that ssh finds that user (docs/adr/0042).
+func runCommand(args []string, stderr io.Writer) int {
+	if len(args) != 2 || args[0] != passwd.Command || !filepath.IsAbs(args[1]) {
+		_, _ = fmt.Fprintf(stderr, "treebind-agent: the arguments %q are wrong: the agent takes none, or %s and "+
+			"the absolute path of the file to write\n", args, passwd.Command)
+		return exitConfig
+	}
+	if err := passwd.Write(passwdSource, args[1]); err != nil {
+		_, _ = fmt.Fprintf(stderr, "treebind-agent: %v\n", err)
+		return exitFailed
+	}
+	return exitOK
 }
 
 // agentOptions is what the agent runs with: its settings, the check of the operator's token,

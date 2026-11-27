@@ -19,14 +19,72 @@ enforces `pod-security.kubernetes.io/enforce=restricted`:
 | `readOnlyRootFilesystem` | `true` |
 
 Neither pod sets `runAsUser`, `runAsGroup` or `fsGroup`, so each container runs
-as the user its image names. The operator image is built on distroless
-`nonroot`, which is UID 65532 and GID 65532. The agent image is built on
-Chainguard's `git` image, which runs as the user `git`, also UID 65532 and GID
-65532, with a passwd entry and the home directory `/home/git`. It carries Git and
-OpenSSH, and ssh refuses to run for a user that has no passwd entry. The root
-filesystem is read-only, so the home and temporary directories still need
-volumes ([#107](https://github.com/mohanedmoh/treebind/issues/107)). What is in
-the image and how it is kept current is in [releasing](releasing.md#the-agent-image).
+as the user its image names, unless the platform gives the pod another. The
+operator image is built on distroless `nonroot`, which is UID 65532 and GID 65532.
+The agent image is built on Chainguard's `git` image, which runs as the user `git`,
+also UID 65532 and GID 65532. It carries Git and OpenSSH. What is in the image and
+how it is kept current is in [releasing](releasing.md#the-agent-image).
+
+## Any user ID
+
+On a platform that gives the pod a user ID of its own, such as the user ID from the
+range of the namespace with group 0 that OpenShift's `restricted-v2` assigns, ssh
+does not run in the sync pod: it refuses a user that has no passwd entry
+(`No user exists for uid ...`), and the image has one only for 65532. `Synced` then
+says that the repository cannot be asked for its branches. Tell the operator to give
+the sync pods a passwd file for their user:
+
+- with the chart, set `agent.arbitraryUserID=true`;
+- with `install.yaml`, set the variable `AGENT_ARBITRARY_USER_ID` of the operator's
+  Deployment to `"true"`, in the file or afterwards:
+  `kubectl -n treebind-system set env deployment/treebind-controller-manager AGENT_ARBITRARY_USER_ID=true`.
+
+Each sync pod then has an init container, `passwd`, of the agent image. It runs as
+the same user, before the agent, and writes a copy of the image's `/etc/passwd`, with
+an entry for its user ID when the copy has none, into an `emptyDir`. The sync container
+sees that file at `/etc/passwd`, read-only. Both containers start in `/`. The reasons
+are in [ADR 0042](adr/0042-the-sync-pod-can-write-a-passwd-entry-for-its-user-in-an-init-container.md).
+
+What to know before you turn it on:
+
+- Turning it on, or off again, changes the pod template of every Treebind, so every
+  sync pod is replaced once ([upgrading the operator](agent-status.md#upgrading-the-operator)).
+- With it on, the sync pods have an `emptyDir`, so `kubectl drain` refuses them unless
+  you pass `--delete-emptydir-data`. Nothing of value is lost: the file is written
+  again when the pod starts. The pods carry the annotation
+  `cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes: passwd`, so the
+  cluster autoscaler may still take their node down.
+- It needs an agent image of the release that brought it or newer. An older agent
+  ignores the arguments of the init container and starts as the agent, so the init
+  container never finishes and the sync pod never starts. That matters when you pin
+  `agent.image` or `AGENT_IMAGE` to a digest or a mirror, and when you upgrade with
+  `helm upgrade --reuse-values`, which keeps the agent image of the release before.
+
+The agent writes only to the claim. Git and ssh read no home directory and write
+nothing to `/tmp`, so the sync container has no volume for either, and its root
+filesystem stays read-only.
+
+### When the user ID changes
+
+The files the agent makes belong to the user ID it runs as. Its state directory,
+`.treebind` at the root of the claim, is private to that user (mode 0700). If the
+pod later runs as another user ID, after a move to a platform that assigns one or a
+change of the user, the agent refuses the directory with `GitDirUnsafe`, and the
+message names both users. Give the directory to the new user, from a pod that mounts
+the whole claim and runs as root, because only root may give a file to another user
+(on OpenShift that takes a security context constraint such as `anyuid`):
+
+```sh
+chown -R <new uid>:<new gid> "$MOUNT/.treebind"
+```
+
+The agent then carries on with the checkout as it was. Removing `.treebind` instead
+also clears the check, but it loses the commits that were not pushed, and the agent
+makes the checkout as on a first start: it takes the files of the synced directory
+when they match the branch and refuses them with `DirectoryNotEmpty` when they do not
+([the Git directory](git-directory.md#what-the-agent-checks)). The files that it
+synced are group-writable, as below, so they stay writable for a user in the same
+group.
 
 `spec.agent.runAsUser`, `runAsGroup` and `fsGroup` exist in the API but are not
 applied yet. A Treebind that sets them reports `SpecSupported=False` with the
@@ -44,8 +102,11 @@ container mounts. The reasons and the alternatives are in
 
 ## What the volume needs
 
-The agent writes to the claim as UID 65532 and GID 65532, with umask 0002, so
-the files and directories it creates are group-writable (`0664` and `0775`).
+The agent writes to the claim as UID 65532 and GID 65532, or as the user and
+group that the platform gives the pod, with umask 0002, so the files and
+directories it creates are group-writable (`0664` and `0775`). On a platform that
+assigns user IDs, read the user ID of the pod where this section says UID 65532, and
+see below for the group.
 
 For a claim that your application wrote to first:
 
@@ -67,6 +128,14 @@ For your application's pod:
 - Give the application a umask of 0002 as well, or have it create files with
   group write. With the default 0022 the agent cannot change what the
   application creates, even with the same group.
+
+On a platform that assigns the user ID with group 0, such as OpenShift's
+`restricted-v2`, do not set `fsGroup: 65532`, and do not set `fsGroup: 0` either:
+`restricted-v2` refuses both. It gives a pod that sets no `fsGroup` the first group of
+the range of the namespace, the annotation `openshift.io/sa.scc.supplemental-groups`,
+so leave `fsGroup` out of your application's pod, and the sync pod sets none. Both pods
+of the namespace then share that group on the volume. If you set one, take a value of
+that range.
 
 See the Kubernetes documentation on
 [configuring volume permissions](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods)
@@ -92,8 +161,7 @@ and to nothing else
 
 ## What is still to come
 
-- A writable home and temporary directory for the agent. Its root filesystem is
-  read-only and Git and SSH write there, so the agent has to keep them on a
-  temporary volume
-  ([#107](https://github.com/mohanedmoh/treebind/issues/107)).
-- `spec.agent` user, group and `fsGroup` overrides (FR-28).
+- `spec.agent` user, group and `fsGroup` overrides (FR-28,
+  [#96](https://github.com/mohanedmoh/treebind/issues/96)). With
+  `AGENT_ARBITRARY_USER_ID` on, the passwd file of the init container covers
+  whatever user they set.

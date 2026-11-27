@@ -157,6 +157,15 @@ agent:
     ##
     # tag: ""
 
+  ## Run the sync pods under any user ID that the platform gives them, such as the
+  ## user ID from the range of the namespace with group 0 that OpenShift assigns. An
+  ## init container of the agent image writes the passwd file of that user into an
+  ## emptyDir, so that ssh finds it. Turning it on or off replaces every sync pod once,
+  ## with it on kubectl drain needs --delete-emptydir-data, and it needs an agent image
+  ## of this release or newer (docs/pod-security.md#any-user-id).
+  ##
+  arbitraryUserID: false
+
 ## RBAC configuration
 ##
 rbac:

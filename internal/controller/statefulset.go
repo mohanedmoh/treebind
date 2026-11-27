@@ -126,6 +126,9 @@ type agentSettings struct {
 	// StatusIssuer and StatusSubject are the iss and sub claims that the operator's
 	// token carries: the cluster's issuer, and the operator's service account.
 	StatusIssuer, StatusSubject string
+	// ArbitraryUserID gives the sync pod the passwd file of the user it runs as, so that
+	// it runs under any user ID that the platform gives it (withPasswdFile).
+	ArbitraryUserID bool
 }
 
 // validate refuses settings that would start agents that exit at once: an agent
@@ -371,7 +374,7 @@ func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSett
 	)
 
 	runAsNonRoot, noEscalation, readOnlyRoot, noToken := true, false, true, false
-	return corev1.PodTemplateSpec{
+	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: objectLabels(treebind)},
 		Spec: corev1.PodSpec{
 			// The agent holds no Kubernetes credential (docs/adr/0011): the operator
@@ -407,7 +410,12 @@ func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSett
 			}},
 			Volumes: volumes,
 		},
-	}, nil
+	}
+	// Only when the operator is told to, so that a pod template stays the one it was (docs/adr/0042).
+	if agent.ArbitraryUserID {
+		withPasswdFile(&template, agent.Image)
+	}
+	return template, nil
 }
 
 // statusProbe is an HTTP probe of one of the probe paths of the agent. They need
