@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Go modules and GitHub Actions, once a week and each in one pull request, so that the owner approves one run and not
+  # twenty. The titles start with build: and ci:, which the pr-title check takes, and the label dependencies keeps them
+  # out of the release notes (.github/release.yml). The go line of go.mod is not moved by this: the vulncheck job of CI
+  # turns red when a Go release fixes something that the code calls.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    labels: [dependencies, go]
+    commit-message:
+      prefix: build
+    groups:
+      go-modules:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    labels: [dependencies]
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]

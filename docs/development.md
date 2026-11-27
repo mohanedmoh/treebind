@@ -17,6 +17,7 @@ A contributor needs a laptop, a container runtime and no cloud account.
 | kubebuilder | v4.16, only when you scaffold a new API | Code generation for new types |
 | Helm (optional) | Pinned in `release.yml` | Lint and render the chart in `charts/treebind` (`helm lint charts/treebind`). `make test-chart` downloads the pinned version into `bin/` itself (linux/amd64, checked against its SHA-256) |
 | ko | Pinned in the Makefile and `release.yml` | `make dev` downloads it into `bin/`; the release workflow pins the same version |
+| govulncheck | Pinned in the Makefile | `make vulncheck` downloads it into `bin/` and fails when the code calls a known vulnerability, in a module or in the Go standard library of the version in `go.mod`. CI runs it on every pull request; run it with the Go version of `go.mod` as your `go`, because it reads the standard library of the Go that is installed |
 | cosign | Pinned in `release.yml` | Used only by the release workflow; see [releasing.md](releasing.md) |
 
 The Kubernetes versions under test are 1.35 to 1.37. The CI matrix moves up as
