@@ -185,10 +185,17 @@ not at the point of the interval that spreads the pulls, and it puts the update 
 anything, so the wait is short even when the repository does not answer. A pull that cannot put it right is a failed `Pull`
 check that says why, and the commits wait for one that can.
 
-Two limits of that wait. An update that fails in the middle of its files while the agent runs, as on a full volume, leaves the
-journal too, and the commits then wait for the next pull, which comes after the interval or, while the pulls fail, after the wait
-that grows up to ten minutes. And a journal that the pull cannot remove, because the state directory refuses it, is told in the
-note of the `Pull` check, which passes, while the commits keep waiting: look at `.treebind/updating`.
+An update that fails in the middle of its files while the agent runs, as on a full volume or a timeout, leaves the journal
+too. The agent puts that right at once, when the pull that failed has ended, and does not leave it to the next pull, so the
+files that the application writes are committed at the next scan. The `Pull` check, which is failed for the update, says what
+was undone. Those commits are on the commit that the checkout is at, which the update has not moved, so the repository refuses
+a push of them as not a fast-forward until the next pull. It comes after the wait of a pull that failed, applies the update and
+joins it with them as it does for any local commit, and the `Conflict` check says `ConflictResolved` when it had to resolve one.
+
+If the update cannot be put right, the `Pull` check says why and the commits wait until it can be. A journal that the state
+directory refuses to remove is one such cause, and the message names it: look at `.treebind/updating`. A pull that applied its
+update and then could not remove the journal passes, with a warning, and the repair that the next pull begins with fails for
+the same cause.
 
 If the index cannot be read, the agent makes it again from the commit the checkout is at before a pull, and says so. It
 does the same reset when the index holds files that are staged, which nothing here leaves for long. Your files are not
