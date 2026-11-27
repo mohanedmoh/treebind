@@ -57,12 +57,14 @@ var (
 type cut struct {
 	*world
 	from, to string
+	// killed is what the pull whose merge was killed returned.
+	killed error
 }
 
 // cutOff makes a checkout, publishes the update, applies it with a merge that hold keeps in the middle, kills the
 // merge, and returns a world whose Puller is a new one, as a restart makes. The locks that the killed Git left are
 // removed, as the agent removes them before a pull.
-func cutOff(t *testing.T, sub string, hold func(f *gittest.Fixture) *gittest.HeldMerge, change ...func(*Options)) *cut {
+func cutOff(t *testing.T, sub string, hold func(f *gittest.Fixture) *gittest.HeldMerge) *cut {
 	t.Helper()
 	w := newWorldOf(t, sub, before)
 	held := hold(w.f)
@@ -77,14 +79,15 @@ func cutOff(t *testing.T, sub string, hold func(f *gittest.Fixture) *gittest.Hel
 	}()
 	held.WaitHeld()
 	held.Kill()
-	if err := <-done; err == nil {
+	killedErr := <-done
+	if killedErr == nil {
 		t.Fatal("the pull of the merge that was killed did not fail")
 	}
 	if _, err := git.RemoveStaleLocks(w.l.GitDir); err != nil {
 		t.Fatal(err)
 	}
-	w.puller = puller(t, w.f, w.l, change...)
-	return &cut{world: w, from: from, to: to}
+	w.puller = puller(t, w.f, w.l)
+	return &cut{world: w, from: from, to: to, killed: killedErr}
 }
 
 // files says what each of the five files is, or that it is not there.

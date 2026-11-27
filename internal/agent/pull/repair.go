@@ -27,6 +27,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -137,25 +138,26 @@ func (p *Puller) recoverUpdate(ctx context.Context, head string, j journal, prob
 	switch {
 	case problem != nil:
 		note := fmt.Sprintf("a journal of an update was found that cannot be used, and was ignored: %v", problem)
-		if err := p.removeJournal(); err != nil {
-			note += fmt.Sprintf(" (and it cannot be removed: %v)", err)
-		}
-		return note, nil
+		return note, p.dropJournal()
 	case head == j.To:
-		return fmt.Sprintf("the update to %s had finished, and its journal was removed%s", short(j.To), p.journalRemoved()), nil
+		return fmt.Sprintf("the update to %s had finished, and its journal was removed", short(j.To)), p.dropJournal()
 	case head != j.From:
-		return fmt.Sprintf("the journal of the update from %s to %s was removed: the checkout is at %s, which is neither%s",
-			commitName(j.From), short(j.To), commitName(head), p.journalRemoved()), nil
+		return fmt.Sprintf("the journal of the update from %s to %s was removed: the checkout is at %s, which is neither",
+			commitName(j.From), short(j.To), commitName(head)), p.dropJournal()
 	}
 	return p.undo(ctx, j)
 }
 
-// journalRemoved removes the journal and says so when it could not.
-func (p *Puller) journalRemoved() string {
+// dropJournal removes the journal, and fails when it cannot. A journal that stays keeps the commit step from committing
+// anything (docs/adr/0028, commit.Deferred), so a pull that leaves it has not put the update right, and its Pull check
+// says so as a failure and not in a note of a check that passed.
+func (p *Puller) dropJournal() *Error {
 	if err := p.removeJournal(); err != nil {
-		return fmt.Sprintf(" (the journal cannot be removed: %v)", err)
+		return p.fail(ReasonPullFailed,
+			"the journal %s of an update that was begun cannot be removed, and while it is there no commit is made: %v",
+			filepath.Join(p.o.Layout.StateDir, journalName), err)
 	}
-	return ""
+	return nil
 }
 
 // commitName says a commit for a message, or that there is none.
@@ -195,8 +197,7 @@ func (p *Puller) undo(ctx context.Context, j journal) (string, *Error) {
 	if err != nil {
 		note := fmt.Sprintf("the files of the update from %s to %s that was cut off cannot be listed (%v), so none was put back, "+
 			"and the next pull is Blocked by any file that it cannot write over", commitName(j.From), short(j.To), err)
-		_ = p.removeJournal()
-		return note, nil
+		return note, p.dropJournal()
 	}
 	work, err := os.OpenRoot(p.o.Layout.WorkTree)
 	if err != nil {
@@ -239,7 +240,7 @@ func (p *Puller) undo(ctx context.Context, j journal) (string, *Error) {
 	if len(unsure) > 0 {
 		note += fmt.Sprintf("; %d file(s) could not be compared and are left as they are: %s", len(unsure), NameSome(unsure))
 	}
-	return note + p.journalRemoved(), nil
+	return note, p.dropJournal()
 }
 
 // checkoutBatch is how many files one command puts back, so that the command line stays short.

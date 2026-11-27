@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -65,6 +66,14 @@ func firstPullDue(l layout.Layout, phase time.Duration) (time.Duration, string) 
 type Puller interface {
 	Pull(ctx context.Context) (pull.Result, error)
 }
+
+// Repairer is a Puller that can put right what a pull that failed left, without pulling. The Puller of package pull is one,
+// and a puller that is not one is not asked to.
+type Repairer interface {
+	Recover(ctx context.Context) (string, error)
+}
+
+var _ Repairer = (*pull.Puller)(nil)
 
 // pullLoop pulls into the checkout every interval until the agent stops, and says in the report how
 // each pull went (docs/adr/0024). A pull that fails does not end it: the agent stays up, says why, and
@@ -171,7 +180,44 @@ func (l *pulls) once(ctx context.Context) bool {
 		// writer lock needs room. No command runs now.
 		tidied = tempNote(clearTempObjects(ctx, l.options.Layout.GitDir, l.a.fence))
 	}
-	return l.report(ctx, result, err, clearedNote(cleared), tidied)
+	return l.report(ctx, result, err, clearedNote(cleared), tidied, l.recovered(ctx, err))
+}
+
+// recovered puts right the update that a pull that failed began and did not end, and says what it did, for the end of the
+// message of the pull. The commit step commits nothing while the journal of the update is there (docs/adr/0028), and the next
+// pull comes after the longer wait of a pull that failed, so that waiting for it would hold back the application's files for
+// as long as that (#246). It is for a failure of an update that was begun (pull.Error.Cut) and for none other: a pull that
+// failed before it began one, or whose own repair failed, would fail the same way again. It is not tried when the agent has
+// been told to stop: the next start puts the update right. A Git that the failed pull stopped may have left a lock file, which
+// is removed first, and a volume that refused has had its temporary files removed.
+func (l *pulls) recovered(ctx context.Context, failed error) string {
+	if failed == nil || ctx.Err() != nil {
+		return ""
+	}
+	repairer, ok := l.puller.(Repairer)
+	if !ok {
+		return ""
+	}
+	if failure, ok := errors.AsType[*pull.Error](failed); !ok || !failure.Cut {
+		return ""
+	}
+	if cut, err := pull.UpdateCutOff(l.options.Layout); err != nil || !cut {
+		return ""
+	}
+	cleared, err := clearLocks(ctx, l.options.Layout.GitDir, l.a.fence)
+	if err != nil {
+		return joined(clearedNote(cleared), "the update that was cut off was not put right: "+err.Error())
+	}
+	note, err := repairer.Recover(ctx)
+	if err != nil {
+		return joined(clearedNote(cleared), note, err.Error())
+	}
+	return joined(clearedNote(cleared), note)
+}
+
+// joined puts the notes that are not empty one after the other, for the end of a message.
+func joined(notes ...string) string {
+	return strings.Join(slices.DeleteFunc(notes, func(note string) bool { return note == "" }), "; ")
 }
 
 // report publishes and logs the result of a pull, unless the agent was told to stop in the middle of it:
