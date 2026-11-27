@@ -29,6 +29,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/git"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
+	"github.com/mohanedmoh/treebind/internal/agent/maintain"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/syncloop"
@@ -74,6 +75,21 @@ type Repairer interface {
 }
 
 var _ Repairer = (*pull.Puller)(nil)
+
+// Maintainer packs the objects of the Git directory. The Maintainer of package maintain is one.
+type Maintainer interface {
+	// Due says, from a cheap look, whether there is enough to pack.
+	Due() (bool, error)
+	// Maintain packs what there is to pack.
+	Maintain(ctx context.Context) (maintain.Result, error)
+}
+
+var _ Maintainer = (*maintain.Maintainer)(nil)
+
+// maintenanceRetry is how long the agent waits after a maintenance that could not be made, for a failure, a volume without the
+// room or one that was cut off, before it looks again: a pull comes every interval, and a repack that cannot be made now would
+// be tried at each.
+const maintenanceRetry = time.Hour
 
 // pullLoop pulls into the checkout every interval until the agent stops, and says in the report how
 // each pull went (docs/adr/0024). A pull that fails does not end it: the agent stays up, says why, and
@@ -148,6 +164,10 @@ type pulls struct {
 	// resolved is called when a pull resolved a conflict by making a commit, and is nil when there are no scans, so that
 	// nothing is pushed.
 	resolved func()
+	// maintainer packs the objects of the Git directory, and is made at the first pull that passed, and again after an hour
+	// when it could not be made. No maintenance is looked for before maintainAfter.
+	maintainer    Maintainer
+	maintainAfter time.Time
 }
 
 // once runs one pull and puts what came of it in the report. It says whether the pull failed in the
@@ -180,7 +200,60 @@ func (l *pulls) once(ctx context.Context) bool {
 		// writer lock needs room. No command runs now.
 		tidied = tempNote(clearTempObjects(ctx, l.options.Layout.GitDir, l.a.fence))
 	}
-	return l.report(ctx, result, err, clearedNote(cleared), tidied, l.recovered(ctx, err))
+	failed := l.report(ctx, result, err, clearedNote(cleared), tidied, l.recovered(ctx, err))
+	if err == nil {
+		l.maintain(ctx)
+	}
+	return failed
+}
+
+// maintain packs the objects of the Git directory when they are due, after a pull that passed and in its turn, so that no pull,
+// scan, commit or push runs beside it (docs/adr/0043), and puts what it did at the end of the message of the Pull check, and in
+// the log. A pull that failed is not followed by it: what failed is put right first. It is not tried before maintainAfter.
+func (l *pulls) maintain(ctx context.Context) {
+	if l.a.NewMaintainer == nil || ctx.Err() != nil || l.a.Now().Before(l.maintainAfter) {
+		return
+	}
+	l.a.working()
+	if l.maintainer == nil {
+		made, err := l.a.NewMaintainer(maintain.Options{Layout: l.options.Layout, Git: l.options.Git, Fence: l.a.fence})
+		if err != nil {
+			l.maintainAfter = l.a.Now().Add(maintenanceRetry)
+			l.a.Logger.Warn("the maintenance of the Git directory cannot be set up", "error", err)
+			return
+		}
+		l.maintainer = made
+	}
+	due, err := l.maintainer.Due()
+	if err != nil {
+		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
+		l.a.Logger.Warn("the Git directory cannot be looked at for its maintenance", "error", err)
+		return
+	}
+	if !due {
+		return
+	}
+	result, err := l.maintainer.Maintain(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	note := result.String()
+	if err != nil {
+		note = joined(note, err.Error())
+	}
+	if err != nil || result.Outcome == maintain.NoRoom || result.Outcome == maintain.Held {
+		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
+		l.a.Logger.Warn("maintenance of the Git directory", "message", note)
+	} else {
+		l.a.Logger.Info("maintenance of the Git directory", "message", note)
+	}
+	if note == "" || l.p.pulling == nil {
+		return
+	}
+	checked := *l.p.pulling
+	checked.Message = shortened(checked.Message + "; " + note)
+	l.p.pulling = &checked
+	l.a.publish(l.p)
 }
 
 // recovered puts right the update that a pull that failed began and did not end, and says what it did, for the end of the

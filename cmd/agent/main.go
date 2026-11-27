@@ -42,6 +42,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/commit"
 	"github.com/mohanedmoh/treebind/internal/agent/config"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/maintain"
 	"github.com/mohanedmoh/treebind/internal/agent/passwd"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/push"
@@ -111,6 +112,16 @@ var newPusher = func(options push.Options) (app.Pusher, error) {
 	return pusher, nil
 }
 
+// newMaintainer makes what packs the objects of the Git directory. A test replaces it, so that no test starts Git
+// against a repository.
+var newMaintainer = func(options maintain.Options) (app.Maintainer, error) {
+	maintainer, err := maintain.New(options)
+	if err != nil {
+		return nil, err
+	}
+	return maintainer, nil
+}
+
 // newWatcher makes what tells the agent that the directory may have changed. A test replaces it, so that no
 // test puts watches on a directory.
 var newWatcher = func(options watch.Options) (app.Watcher, error) {
@@ -164,7 +175,7 @@ func agentOptions(settings config.Config, verifier status.Verifier, logger *slog
 	return app.Options{
 		Config: settings, Verifier: verifier, Logger: logger, AcquireLock: acquireLock, Checkout: openCheckout,
 		NewPuller: newPuller, NewScanner: newScanner, NewWatcher: newWatcher, NewCommitter: newCommitter,
-		NewPusher: newPusher,
+		NewPusher: newPusher, NewMaintainer: newMaintainer,
 	}
 }
 

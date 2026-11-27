@@ -49,6 +49,7 @@ import (
 	"github.com/mohanedmoh/treebind/internal/agent/heartbeat"
 	"github.com/mohanedmoh/treebind/internal/agent/layout"
 	"github.com/mohanedmoh/treebind/internal/agent/lock"
+	"github.com/mohanedmoh/treebind/internal/agent/maintain"
 	"github.com/mohanedmoh/treebind/internal/agent/preflight"
 	"github.com/mohanedmoh/treebind/internal/agent/pull"
 	"github.com/mohanedmoh/treebind/internal/agent/push"
@@ -133,6 +134,10 @@ type Options struct {
 	// the Runner options of the agent, so that a push tells the liveness probe how long it may take as any Git
 	// command does. It defaults to none, so that nothing is pushed: the agent starts with push.New.
 	NewPusher func(options push.Options) (Pusher, error)
+	// NewMaintainer makes what packs the objects of the Git directory, once the checkout is made. It is asked after each pull
+	// that passed whether the objects are due to be packed, and packs them in the turn of that pull, behind the fence of the
+	// writer lock (docs/adr/0043). It defaults to none, so that nothing is packed: the agent starts with maintain.New.
+	NewMaintainer func(options maintain.Options) (Maintainer, error)
 	// ScanInterval is the longest wait between two scans, and ScanGap the shortest time between the end of a
 	// scan and the next that an event calls for. The defaults of package syncloop when they are zero.
 	ScanInterval, ScanGap time.Duration
