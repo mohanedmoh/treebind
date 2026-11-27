@@ -13,6 +13,9 @@
   after it was open ends after 75, five intervals of 15 seconds. A long transfer does not trip it, because a keep-alive
   counts the silence of the peer and not the time of a transfer. The values are fixed, like the rest of the Runner's
   configuration, and have no setting. A condition that says a host cannot be reached is #77 and is separate
+- Superseded in part by: [0043](0043-the-agent-packs-the-objects-of-its-git-directory-with-a-repack-under-the-writer-lock.md),
+  which allows `repack`, with `-n` and no other way, so that the agent packs the objects of its Git directory. `gc` and
+  `maintenance` stay out, and so do `gc.auto=0` and `maintenance.auto=false`
 
 ## Context
 

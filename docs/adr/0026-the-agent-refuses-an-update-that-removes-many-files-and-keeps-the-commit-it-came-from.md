@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-11-16
 - Issue: #40
+- Extended by: [0043](0043-the-agent-packs-the-objects-of-its-git-directory-with-a-repack-under-the-writer-lock.md), on
+  2026-11-27, after which the agent runs `repack`, which packs objects and never refs, with `--keep-unreachable` when it puts
+  every pack in one. No `packed-refs` appears, and the commits of the recovery refs are kept whether or not anything else
+  reaches them
 
 ## Context
 
