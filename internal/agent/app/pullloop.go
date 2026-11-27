@@ -241,10 +241,15 @@ func (l *pulls) maintain(ctx context.Context) {
 	if err != nil {
 		note = joined(note, err.Error())
 	}
-	if err != nil || result.Outcome == maintain.NoRoom || result.Outcome == maintain.Held {
+	switch {
+	case err != nil || result.Outcome == maintain.NoRoom || result.Outcome == maintain.Held:
 		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
 		l.a.Logger.Warn("maintenance of the Git directory", "message", note)
-	} else {
+	case result.Outcome == maintain.NotDue:
+		// The look at objects/17 guessed more loose objects than there are. The count of all of them reads every directory of
+		// loose objects, which is not made at every pull.
+		l.maintainAfter = l.a.Now().Add(maintenanceRetry)
+	default:
 		l.a.Logger.Info("maintenance of the Git directory", "message", note)
 	}
 	if note == "" || l.p.pulling == nil {

@@ -120,11 +120,13 @@ func TestAPullThatFailedIsNotFollowedByTheMaintenance(t *testing.T) {
 	}
 }
 
-// A maintenance that failed, or found no room, is tried again an hour later and not at the next pull, which is 30 seconds later.
+// A maintenance that failed, or found no room, or found less to pack than the look at objects/17 guessed, is tried again an hour
+// later and not at the next pull, which is 30 seconds later.
 func TestAMaintenanceThatFailedIsNotTriedAgainForAnHour(t *testing.T) {
 	for name, m := range map[string]*fakeMaintainer{
 		"failed":  {due: true, err: errors.New("the Git directory could not be packed: git repack failed with exit status 128")},
 		"no room": {due: true, result: maintain.Result{Outcome: maintain.NoRoom, Need: 20 << 20, Free: 1 << 20}},
+		"not due": {due: true, result: maintain.Result{Outcome: maintain.NotDue}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var now atomic.Pointer[time.Time]
@@ -142,7 +144,7 @@ func TestAMaintenanceThatFailedIsNotTriedAgainForAnHour(t *testing.T) {
 
 			f.answer(t, upToDate(testCommit))
 			got, _ := pullCheck(t, r)
-			if got.Outcome != outcomePassed || !strings.Contains(got.Message, "Git directory") {
+			if got.Outcome != outcomePassed || (name != "not due") != strings.Contains(got.Message, "Git directory") {
 				t.Errorf("pull = %+v, want it passed, with what the maintenance said", got)
 			}
 			f.answer(t, upToDate(testCommit))
