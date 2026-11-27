@@ -90,6 +90,24 @@ same settings for `kubectl` and `kustomize`:
 | `manager.topologySpreadConstraints` | soft spread over nodes | Set it to `[]` to leave the placement to the scheduler, or to your own list. |
 | `manager.affinity` | none | For a required rule, a pod anti-affinity on `kubernetes.io/hostname`. Use it only on a cluster that always has at least two nodes, and set `manager.strategy` to `maxSurge: 0` and `maxUnavailable: 1`: with two nodes the extra pod of a rolling update would otherwise stay Pending. |
 
+## After a node was lost or drained
+
+The spread of the replicas over nodes is a preference of the scheduler when it places
+a pod, and nothing moves a pod that runs. The replica of a node that is lost or
+drained is replaced on a node that is there, which can be the node of the other
+replica, and both stay on it after the first node is back. The loss of that one node
+then takes both, and until a replica runs again no Treebind is reconciled and no
+status is updated, although the sync pods on the other nodes keep syncing. Once every
+node is back, look where the replicas are, and when they share a node, replace them:
+
+```sh
+kubectl -n treebind-system get pods -o wide
+kubectl -n treebind-system rollout restart deployment/treebind-controller-manager
+```
+
+[Issue #302](https://github.com/mohanedmoh/treebind/issues/302) is about doing
+without this step.
+
 ## Running one replica
 
 One replica is enough to develop on, and the operator still works with it: it holds

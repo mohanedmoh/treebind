@@ -422,9 +422,10 @@ deleting the CRD deletes every Treebind of the cluster.
 - **Treebind is alpha.** Its releases are pre-releases, and its API is `v1alpha1`. The API group, `treebind.example.org`, is a
   placeholder that will change before a stable release ([#15](https://github.com/mohanedmoh/treebind/issues/15)), and with it
   the `apiVersion` of every Treebind, which you will then have to create again. Do not use it with data that you cannot lose.
-- **It is tested on kind only.** This page and the end-to-end tests run on kind clusters of one node, with kind's `local-path`
-  storage. No storage class is listed as supported yet ([storage support](storage-support.md)), and managed clusters, network
-  file systems and clusters of several nodes are not tested.
+- **Its tests run on kind.** This page and the end-to-end tests run on kind clusters of one node, with kind's `local-path`
+  storage. `v0.0.1-alpha.5` was also tried once by hand on a kubeadm cluster of two nodes, with `local-path` and NFS volumes,
+  which no test repeats. No storage class is listed as supported yet ([storage support](storage-support.md)), and managed
+  clusters and cloud storage are not tested.
 - **The sync pod is not placed next to the application yet** ([#97](https://github.com/mohanedmoh/treebind/issues/97)). With a
   `ReadWriteOnce` claim on a cluster of several nodes, the scheduler can put the sync pod on another node than the application,
   where it cannot mount the claim.

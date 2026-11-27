@@ -13,8 +13,9 @@ website.
 > **Status: alpha.** A Treebind syncs in both directions, and releases are
 > published as pre-releases. The API is `v1alpha1`, and its group,
 > `treebind.example.org`, is a placeholder that will change before a stable
-> release, and with it the `apiVersion` of every Treebind. It is tested on kind
-> only, and no storage class is listed as supported yet. Do not use it with data
+> release, and with it the `apiVersion` of every Treebind. Its tests run on kind.
+> `v0.0.1-alpha.5` was also tried by hand on a cluster of two nodes, with local and
+> NFS volumes. No storage class is listed as supported yet. Do not use it with data
 > that you cannot lose.
 
 ## Quickstart
