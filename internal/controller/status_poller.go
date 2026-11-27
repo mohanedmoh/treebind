@@ -99,13 +99,14 @@ type StatusPollerReconciler struct {
 	Recorder events.EventRecorder
 	Metrics  *Metrics
 
-	// AgentImage, StatusIssuer and StatusSubject are the settings that the reconcile
+	// AgentImage, StatusIssuer, StatusSubject and AgentArbitraryUserID are the settings that the reconcile
 	// of the spec gives the sync pods, and have to be the TreebindReconciler's. The
 	// poller computes from them the hash of the pod template that the spec gives,
 	// which a report of the current spec carries: with other settings no report would
 	// carry it, and Synced would say AgentOutdated for as long as the operator runs.
 	AgentImage                  string
 	StatusIssuer, StatusSubject string
+	AgentArbitraryUserID        bool
 
 	// now is time.Now unless a test replaces it.
 	now func() time.Time
@@ -123,7 +124,10 @@ type StatusPollerReconciler struct {
 // agentSettings is what the sync pods are given beside the spec of a Treebind, as the
 // reconcile of the spec gives it.
 func (r *StatusPollerReconciler) agentSettings() agentSettings {
-	return agentSettings{Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject}
+	return agentSettings{
+		Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject,
+		ArbitraryUserID: r.AgentArbitraryUserID,
+	}
 }
 
 func (r *StatusPollerReconciler) clock() time.Time {

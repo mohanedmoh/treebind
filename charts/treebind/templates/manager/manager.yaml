@@ -94,6 +94,8 @@ spec:
         env:
         - name: AGENT_IMAGE
           value: {{ include "treebind.image" (dict "repository" .Values.agent.image.repository "tag" .Values.agent.image.tag "context" $) | quote }}
+        - name: AGENT_ARBITRARY_USER_ID
+          value: {{ ternary "true" "false" (eq (toString .Values.agent.arbitraryUserID) "true") | quote }}
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:

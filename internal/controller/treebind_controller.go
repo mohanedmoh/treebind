@@ -44,6 +44,9 @@ type TreebindReconciler struct {
 
 	// AgentImage is the image of the sync container.
 	AgentImage string
+	// AgentArbitraryUserID gives every sync pod the passwd file of the user that it runs
+	// as, so that it runs under any user ID (docs/adr/0042).
+	AgentArbitraryUserID bool
 	// StatusIssuer is the issuer of the cluster's service account tokens, and
 	// StatusSubject the operator's own service account, as the sub claim names it
 	// (system:serviceaccount:<namespace>:<name>). The agent accepts only a token
@@ -66,7 +69,10 @@ type TreebindReconciler struct {
 
 // agentSettings is what the sync pods are given beside the spec of a Treebind.
 func (r *TreebindReconciler) agentSettings() agentSettings {
-	return agentSettings{Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject}
+	return agentSettings{
+		Image: r.AgentImage, StatusIssuer: r.StatusIssuer, StatusSubject: r.StatusSubject,
+		ArbitraryUserID: r.AgentArbitraryUserID,
+	}
 }
 
 func (r *TreebindReconciler) clock() time.Time {

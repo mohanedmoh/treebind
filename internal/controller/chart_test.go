@@ -90,6 +90,7 @@ type chartValues struct {
 		Image struct {
 			Repository string `json:"repository"`
 		} `json:"image"`
+		ArbitraryUserID *bool `json:"arbitraryUserID"`
 	} `json:"agent"`
 }
 
