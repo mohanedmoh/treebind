@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 450" width="920" height="450" role="img" aria-labelledby="t d">
+  <title id="t">How Treebind works</title>
+  <desc id="d">A Git repository and an application share a persistent volume through a Treebind sync agent. Changes in Git are pulled and written to the volume for the application. Edits the application writes to the volume are detected, committed and pushed to Git. The Treebind operator creates the sync pod and writes the Ready, Synced and Conflict conditions on the Treebind resource.</desc>
+
+  <defs>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8250df"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a7f37"/>
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#59636e"/>
+    </marker>
+  </defs>
+
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .zone  { font-size: 13px; font-weight: 600; fill: #59636e; letter-spacing: 0.04em; }
+    .title { font-size: 15px; font-weight: 700; }
+    .sub   { font-size: 12px; fill: #59636e; }
+    .item  { font-size: 12.5px; }
+    .lane  { font-size: 12px; font-weight: 600; }
+    .note  { font-size: 13px; }
+  </style>
+
+  <!-- card -->
+  <rect x="0.5" y="0.5" width="919" height="449" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+
+  <!-- zones -->
+  <rect x="20" y="112" width="170" height="250" rx="12" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="34" y="136" class="zone">GIT HOST</text>
+
+  <rect x="222" y="60" width="680" height="372" rx="12" fill="none" stroke="#8c959f" stroke-dasharray="6 5"/>
+  <text x="238" y="52" class="zone">YOUR KUBERNETES CLUSTER</text>
+
+  <!-- operator and resource -->
+  <rect x="250" y="84" width="240" height="58" rx="10" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="270" y="108" class="title">Treebind operator</text>
+  <text x="270" y="127" class="sub">2 replicas, leader election</text>
+
+  <rect x="640" y="84" width="240" height="58" rx="10" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="660" y="108" class="title">Treebind resource</text>
+  <text x="660" y="127" class="sub">Ready · Synced · Conflict</text>
+
+  <line x1="494" y1="113" x2="636" y2="113" stroke="#59636e" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow-gray)"/>
+  <text x="565" y="106" text-anchor="middle" class="sub">writes status</text>
+
+  <line x1="345" y1="146" x2="345" y2="192" stroke="#59636e" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow-gray)"/>
+  <text x="357" y="174" class="sub">creates the sync pod, reads its report</text>
+
+  <!-- repository (cylinder) -->
+  <path d="M55,208 v110 a50,13 0 0 0 100,0 v-110" fill="#ffffff" stroke="#8c959f" stroke-width="1.5"/>
+  <ellipse cx="105" cy="208" rx="50" ry="13" fill="#ffffff" stroke="#8c959f" stroke-width="1.5"/>
+  <text x="105" y="262" text-anchor="middle" class="title">Repository</text>
+  <text x="105" y="281" text-anchor="middle" class="sub">branch: main</text>
+
+  <!-- sync agent -->
+  <rect x="250" y="196" width="190" height="156" rx="10" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="266" y="222" class="title">Sync agent</text>
+  <text x="266" y="240" class="sub">one pod per Treebind</text>
+  <line x1="266" y1="256" x2="424" y2="256" stroke="#54aeff" stroke-opacity="0.6"/>
+  <text x="266" y="278" class="item">pulls on every interval</text>
+  <text x="266" y="299" class="item">commits settled edits</text>
+  <text x="266" y="320" class="item">applies conflictPolicy</text>
+  <text x="266" y="341" class="item">never force-pushes</text>
+
+  <!-- PVC (cylinder) -->
+  <path d="M545,208 v110 a55,13 0 0 0 110,0 v-110" fill="#ffffff" stroke="#8c959f" stroke-width="1.5"/>
+  <ellipse cx="600" cy="208" rx="55" ry="13" fill="#ffffff" stroke="#8c959f" stroke-width="1.5"/>
+  <text x="600" y="266" text-anchor="middle" class="title">PVC</text>
+  <text x="600" y="285" text-anchor="middle" class="sub">shared volume</text>
+
+  <!-- application -->
+  <rect x="722" y="206" width="158" height="130" rx="10" fill="#ffffff" stroke="#8c959f" stroke-width="1.5"/>
+  <text x="801" y="258" text-anchor="middle" class="title">Your application</text>
+  <text x="801" y="279" text-anchor="middle" class="sub">dashboards, workflows,</text>
+  <text x="801" y="295" text-anchor="middle" class="sub">site, config</text>
+
+  <!-- upper lane: Git to application (purple) -->
+  <line x1="160" y1="250" x2="246" y2="250" stroke="#8250df" stroke-width="2.5" marker-end="url(#arrow-purple)"/>
+  <text x="203" y="241" text-anchor="middle" class="lane" style="fill:#8250df">pull</text>
+  <line x1="444" y1="250" x2="541" y2="250" stroke="#8250df" stroke-width="2.5" marker-end="url(#arrow-purple)"/>
+  <text x="492" y="241" text-anchor="middle" class="lane" style="fill:#8250df">write files</text>
+  <line x1="659" y1="250" x2="718" y2="250" stroke="#8250df" stroke-width="2.5" marker-end="url(#arrow-purple)"/>
+  <text x="688" y="241" text-anchor="middle" class="lane" style="fill:#8250df">read</text>
+
+  <!-- lower lane: application to Git (green) -->
+  <line x1="718" y1="304" x2="659" y2="304" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="688" y="323" text-anchor="middle" class="lane" style="fill:#1a7f37">write</text>
+  <line x1="541" y1="304" x2="444" y2="304" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="492" y="323" text-anchor="middle" class="lane" style="fill:#1a7f37">detect edits</text>
+  <line x1="246" y1="304" x2="160" y2="304" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="203" y="323" text-anchor="middle" class="lane" style="fill:#1a7f37">push</text>
+
+  <!-- legend -->
+  <line x1="250" y1="384" x2="286" y2="384" stroke="#8250df" stroke-width="2.5" marker-end="url(#arrow-purple)"/>
+  <text x="298" y="388" class="note">A push to Git reaches the application at the next pull (30s by default).</text>
+  <line x1="250" y1="409" x2="286" y2="409" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="298" y="413" class="note">An edit is committed and pushed after settleTime of quiet (5s by default).</text>
+</svg>
