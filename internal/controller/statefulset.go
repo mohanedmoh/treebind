@@ -234,13 +234,7 @@ func agentTemplateHash(treebind *treebindv1alpha1.Treebind, agent agentSettings)
 // podTemplateWithoutHash returns the pod template that the spec and the settings of the operator say, without the variable
 // that holds its hash.
 func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSettings) (corev1.PodTemplateSpec, error) {
-	mountPath := treebind.Spec.Target.MountPath
-	if mountPath == "" {
-		mountPath = defaultMountPath
-	}
-	// The agent refuses a path that is not in its shortest form, such as /work/,
-	// which the spec allows and the kubelet treats like /work.
-	mountPath = path.Clean(mountPath)
+	mountPath := defaultMountPath
 
 	volumes := []corev1.Volume{{
 		Name: dataVolumeName,

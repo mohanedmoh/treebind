@@ -116,13 +116,14 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(k8sClient.Status().Update(ctx, statefulSet)).To(Succeed())
 		}
 
-		// breakTemplate makes the pod template invalid: the claim and the SSH key
-		// would both be mounted at the same path, which the API server refuses.
+		// breakTemplate makes the pod template invalid: the file of the SSH key would be
+		// outside its volume, which the API server refuses.
 		breakTemplate := func() {
 			GinkgoHelper()
 			resource := get()
-			resource.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef()}
-			resource.Spec.Target.MountPath = sshMountPath
+			resource.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{
+				SSHKeySecretRef: &treebindv1alpha1.KeySelector{Name: testSSHKeyName, Key: "../id_ed25519"},
+			}
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 		}
 
@@ -213,7 +214,6 @@ var _ = Describe("Treebind Controller", func() {
 			reconcileOnce()
 
 			resource := get()
-			resource.Spec.Placement.Mode = treebindv1alpha1.PlacementModeSidecar
 			resource.Spec.Agent = &treebindv1alpha1.AgentSpec{NodeSelector: newAgentSpec().NodeSelector}
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			reconcileOnce()
@@ -224,12 +224,10 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(condition.Reason).To(Equal(treebindv1alpha1.ReasonNotImplemented))
 			Expect(condition.Message).To(ContainSubstring(fieldNodeSelector))
-			Expect(condition.Message).To(ContainSubstring(fieldPlacementMode))
 			Expect(condition.ObservedGeneration).To(Equal(got.Generation))
 			Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
 			Expect(got.Generation).To(BeNumerically(">", int64(1)))
 
-			got.Spec.Placement.Mode = treebindv1alpha1.PlacementModeStandalone
 			got.Spec.Agent = nil
 			Expect(k8sClient.Update(ctx, got)).To(Succeed())
 			reconcileOnce()
@@ -302,9 +300,8 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(pod.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
 		})
 
-		It("mounts the claim at the requested path and the credentials the spec names", func() {
+		It("mounts the claim and the credentials that the spec names", func() {
 			resource := get()
-			resource.Spec.Target.MountPath = testCustomPath
 			resource.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{
 				SSHKeySecretRef:        sshKeyRef(),
 				KnownHostsConfigMapRef: knownHostsRef(),
@@ -315,7 +312,7 @@ var _ = Describe("Treebind Controller", func() {
 
 			pod := getStatefulSet().Spec.Template.Spec
 			Expect(pod.Containers[0].VolumeMounts).To(ConsistOf(
-				corev1.VolumeMount{Name: dataVolumeName, MountPath: testCustomPath},
+				corev1.VolumeMount{Name: dataVolumeName, MountPath: defaultMountPath},
 				corev1.VolumeMount{Name: statusKeysVolumeName, MountPath: statusKeysMountPath, ReadOnly: true},
 				corev1.VolumeMount{Name: sshVolumeName, MountPath: sshMountPath, ReadOnly: true},
 				corev1.VolumeMount{Name: knownHostsVolumeName, MountPath: knownHostsMountPath, ReadOnly: true},
@@ -359,13 +356,12 @@ var _ = Describe("Treebind Controller", func() {
 			hash := getStatefulSet().Annotations[templateHashAnnotation]
 
 			resource := get()
-			resource.Spec.Target.MountPath = testCustomPath
+			resource.Spec.Repository.Branch = branchRelease
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			reconcileOnce()
 
 			statefulSet := getStatefulSet()
 			Expect(statefulSet.Annotations[templateHashAnnotation]).NotTo(Equal(hash))
-			Expect(statefulSet.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath).To(Equal(testCustomPath))
 			hash = statefulSet.Annotations[templateHashAnnotation]
 
 			resource = get()
@@ -488,7 +484,7 @@ var _ = Describe("Treebind Controller", func() {
 		It("reports a failed reconcile in Ready, publishes the rest of the status and returns the error", func() {
 			breakTemplate()
 
-			Expect(reconcileFails()).To(MatchError(ContainSubstring("must be unique")))
+			Expect(reconcileFails()).To(MatchError(ContainSubstring("must not contain '..'")))
 
 			got := get()
 			ready := meta.FindStatusCondition(got.Status.Conditions, treebindv1alpha1.ConditionReady)
@@ -497,7 +493,7 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(ready.Reason).To(Equal(treebindv1alpha1.ReasonReconcileFailed))
 			Expect(ready.Message).To(And(
 				HavePrefix("The last reconcile failed: ensure StatefulSet default/"+resourceName+"-sync"),
-				ContainSubstring("must be unique"),
+				ContainSubstring("must not contain '..'"),
 			))
 			Expect(ready.ObservedGeneration).To(Equal(got.Generation))
 			Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
@@ -541,7 +537,7 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(reconcileFails()).To(HaveOccurred())
 
 			resource := get()
-			resource.Spec.Target.MountPath = testCustomPath
+			resource.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef()}
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			reconcileOnce()
 

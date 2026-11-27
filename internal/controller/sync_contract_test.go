@@ -181,7 +181,7 @@ func TestNoIntervalVariableWithoutAnInterval(t *testing.T) {
 
 func TestTheAgentAcceptsEveryDirectionAndIntervalTheOperatorCanPutInThePod(t *testing.T) {
 	for _, direction := range []treebindv1alpha1.SyncDirection{treebindv1alpha1.SyncDirectionPull, treebindv1alpha1.SyncDirectionBidirectional} {
-		for _, interval := range []time.Duration{time.Second, 30 * time.Second, 90 * time.Second, 5 * time.Minute, 36 * time.Hour} {
+		for _, interval := range []time.Duration{5 * time.Second, 30 * time.Second, 90 * time.Second, 5 * time.Minute, 36 * time.Hour} {
 			t.Run(fmt.Sprintf("%s every %v", direction, interval), func(t *testing.T) {
 				treebind := newTreebind(testTreebindName)
 				treebind.Spec.Sync.Direction = direction
@@ -205,7 +205,7 @@ func TestTheAgentAcceptsEveryDirectionAndIntervalTheOperatorCanPutInThePod(t *te
 func intervalCandidates() []time.Duration {
 	return []time.Duration{
 		0, 1, time.Millisecond, 999 * time.Millisecond, time.Second - 1, time.Second, time.Second + 1, 1500 * time.Millisecond,
-		30 * time.Second, time.Minute, 90 * time.Second, time.Hour, 36 * time.Hour, 24 * 365 * time.Hour,
+		5*time.Second - 1, 5 * time.Second, 30 * time.Second, time.Minute, 90 * time.Second, time.Hour, 36 * time.Hour, 24 * 365 * time.Hour,
 		math.MaxInt64, -1, -time.Second, -time.Hour, math.MinInt64 + 1,
 	}
 }
@@ -216,7 +216,7 @@ const ninetySeconds = "1m30s"
 // durationTexts are strings that a client can send as a duration, on both sides of every rule of the API
 // server and of the agent.
 var durationTexts = []string{
-	"30s", "1s", "999ms", ninetySeconds, "1h", "1.5s", ".5s", "1.s", "1.0s", "+1s", "-1s", "0", "0s", "30", "1d", "1w", "30S", "1 s", " 1s",
+	"30s", "5s", "4999ms", "1s", "999ms", ninetySeconds, "1h", "1.5s", ".5s", "1.s", "1.0s", "+1s", "-1s", "0", "0s", "30", "1d", "1w", "30S", "1 s", " 1s",
 	"1s ", "1\u00b5s", "1us", "1ns", "100000h", "1e3s", "1m1", "m1s", "1h2m3s4ms", "1s1s", "01s", "1_000s", "NaN", "infinite",
 	"9223372036s", "9223372037s", "2562047h47m16.854775807s", "2562047h47m16.854775808s",
 }
@@ -302,13 +302,13 @@ var _ = Describe("sync.interval", func() {
 	})
 
 	It("has the least that the agent has", func() {
-		Expect(agentconfig.MinSyncInterval).To(Equal(time.Second))
+		Expect(agentconfig.MinSyncInterval).To(Equal(5 * time.Second))
 		ctx := context.Background()
 		treebind, err := created(ctx, &metav1.Duration{Duration: agentconfig.MinSyncInterval})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Delete(ctx, treebind)).To(Succeed())
 		_, err = created(ctx, &metav1.Duration{Duration: agentconfig.MinSyncInterval - 1})
-		Expect(err).To(MatchError(ContainSubstring("interval must be at least 1s")))
+		Expect(err).To(MatchError(ContainSubstring("interval must be at least 5s")))
 	})
 })
 

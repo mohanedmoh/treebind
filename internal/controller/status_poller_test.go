@@ -807,7 +807,7 @@ var _ = Describe("The status poller", func() {
 			// of the same template is of the new generation.
 			same := get()
 			generation := same.Generation
-			same.Spec.Target.MountPath = defaultMountPath
+			same.Spec.Agent = &treebindv1alpha1.AgentSpec{PriorityClassName: "background"}
 			Expect(k8sClient.Update(ctx, same)).To(Succeed())
 			Expect(get().Generation).To(BeNumerically(">", generation))
 			poll()

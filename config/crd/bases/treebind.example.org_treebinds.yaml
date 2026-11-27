@@ -364,11 +364,10 @@ spec:
                   mode:
                     default: standalone
                     description: |-
-                      mode is standalone to run the sync pod on its own, or sidecar to run the
-                      sync container inside the application's pods.
+                      mode is standalone, which runs the sync pod on its own. It is the only
+                      value: a sync container inside the application's pods is not offered yet.
                     enum:
                     - standalone
-                    - sidecar
                     type: string
                 type: object
               repository:
@@ -466,9 +465,10 @@ spec:
                   url:
                     description: |-
                       url is the address of the repository, for example
-                      ssh://git@github.com/acme/dashboards.git. The scheme must be explicit;
-                      the scp-style git@host:path shorthand is not accepted. Credentials never
-                      go in the URL: they are supplied through auth.
+                      ssh://git@github.com/acme/dashboards.git. The scheme must be explicit and
+                      in lower case, because Git refuses it in capitals, and the address has to
+                      name a host; the scp-style git@host:path shorthand is not accepted.
+                      Credentials never go in the URL: they are supplied through auth.
                     maxLength: 2048
                     minLength: 1
                     type: string
@@ -477,6 +477,10 @@ spec:
                         scheme; scp-style host:path is not accepted
                       rule: isURL(self) && url(self).getScheme() in ['ssh', 'https',
                         'http']
+                    - message: url must start with ssh://, https:// or http:// in
+                        lower case and name a host
+                      rule: '!isURL(self) || (self.matches(''^(ssh|https|http)://'')
+                        && url(self).getHostname() != '''')'
                     - message: url must not contain whitespace or control characters
                       rule: '!self.matches(r''[\x00-\x20\x7f]'')'
                     - message: url must not embed a password; supply credentials through
@@ -519,8 +523,8 @@ spec:
                     maxLength: 32
                     type: string
                     x-kubernetes-validations:
-                    - message: interval must be at least 1s
-                      rule: duration(self) >= duration('1s')
+                    - message: interval must be at least 5s
+                      rule: duration(self) >= duration('5s')
                   maxDeletions:
                     description: |-
                       maxDeletions is the most files that one update may remove from the directory. An update that
@@ -555,15 +559,6 @@ spec:
                     maxLength: 253
                     minLength: 1
                     type: string
-                  mountPath:
-                    description: |-
-                      mountPath is where the claim is mounted inside the sync container. It
-                      does not affect where the application mounts the claim.
-                    maxLength: 1024
-                    type: string
-                    x-kubernetes-validations:
-                    - message: mountPath must be an absolute path without '..'
-                      rule: self.startsWith('/') && !('..' in self.split('/'))
                   subPath:
                     description: |-
                       subPath is a directory inside the claim. Only that directory is synced
@@ -604,6 +599,10 @@ spec:
             - sync
             - target
             type: object
+            x-kubernetes-validations:
+            - message: 'commit is only for a bidirectional Treebind: a Treebind that
+                only pulls makes no commits'
+              rule: self.sync.direction != 'pull' || !has(self.commit)
           status:
             description: status defines the observed state of Treebind
             properties:

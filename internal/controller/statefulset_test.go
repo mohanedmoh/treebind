@@ -41,7 +41,6 @@ const (
 	testClaimName    = "grafana-data"
 	testTreebindName = "grafana"
 	testSyncName     = "grafana-sync"
-	testCustomPath   = "/data/grafana"
 	testNamespace    = "apps"
 	testPodName      = "grafana-sync-0"
 	// The field of the pod that the downward API gives its name from.
@@ -109,27 +108,14 @@ func TestDesiredStatefulSetVolumes(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		mountPath   string
 		auth        *treebindv1alpha1.AuthSpec
 		wantVolumes []corev1.Volume
 		wantMounts  []corev1.VolumeMount
 	}{
 		{
-			name:        "the claim is mounted at /work by default and nothing else is",
+			name:        "the claim is mounted at /work and nothing else is",
 			wantVolumes: []corev1.Volume{dataVolume, keysVolume},
 			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, keysMount},
-		},
-		{
-			name:        "a custom mountPath is used as given",
-			mountPath:   testCustomPath,
-			wantVolumes: []corev1.Volume{dataVolume, keysVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}, keysMount},
-		},
-		{
-			name:        "a mountPath that is not in its shortest form is cleaned, as the agent needs it",
-			mountPath:   "/data//grafana/",
-			wantVolumes: []corev1.Volume{dataVolume, keysVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}, keysMount},
 		},
 		{
 			name:        "an empty auth block mounts nothing",
@@ -150,17 +136,15 @@ func TestDesiredStatefulSetVolumes(t *testing.T) {
 			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, keysMount, hostsMount},
 		},
 		{
-			name:        "both are mounted next to a custom mountPath",
-			mountPath:   testCustomPath,
+			name:        "both are mounted next to the claim",
 			auth:        &treebindv1alpha1.AuthSpec{SSHKeySecretRef: sshKeyRef(), KnownHostsConfigMapRef: knownHostsRef()},
 			wantVolumes: []corev1.Volume{dataVolume, keysVolume, sshVolume, hostsVolume},
-			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: testCustomPath}, keysMount, sshMount, hostsMount},
+			wantMounts:  []corev1.VolumeMount{{Name: dataVolumeName, MountPath: defaultMountPath}, keysMount, sshMount, hostsMount},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			treebind := newTreebind(testTreebindName)
-			treebind.Spec.Target.MountPath = tt.mountPath
 			treebind.Spec.Repository.Auth = tt.auth
 
 			pod := mustDesiredStatefulSet(t, treebind, testImage).Spec.Template.Spec
@@ -286,20 +270,9 @@ func TestTemplateHash(t *testing.T) {
 	}{
 		{name: "the same input gives the same hash", mutate: none, image: testImage},
 		{
-			name:   "the default mountPath and an explicit /work are the same template",
-			mutate: func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.MountPath = defaultMountPath },
-			image:  testImage,
-		},
-		{
 			name:       "another image changes it",
 			mutate:     none,
 			image:      "example.com/treebind-agent:v2",
-			wantChange: true,
-		},
-		{
-			name:       "another mountPath changes it",
-			mutate:     func(tb *treebindv1alpha1.Treebind) { tb.Spec.Target.MountPath = testCustomPath },
-			image:      testImage,
 			wantChange: true,
 		},
 		{
@@ -482,7 +455,6 @@ func TestATemplateWithoutListsIsTheOneOfTheOperatorBefore(t *testing.T) {
 	full := func() *treebindv1alpha1.Treebind {
 		treebind := newTreebind(testTreebindName)
 		treebind.Namespace = testNamespace
-		treebind.Spec.Target.MountPath = testCustomPath
 		treebind.Spec.Target.SubPath = subPathNested
 		treebind.Spec.Repository.URL = "ssh://git@example.com/acme/dashboards.git"
 		treebind.Spec.Repository.Auth = &treebindv1alpha1.AuthSpec{
@@ -499,7 +471,9 @@ func TestATemplateWithoutListsIsTheOneOfTheOperatorBefore(t *testing.T) {
 			func() *treebindv1alpha1.Treebind { return newTreebind(testTreebindName) },
 			"8530124d950b17a4134515946055610afff6dea2dd08c84b58550abb27b8e656",
 		},
-		"a Treebind with every other field": {full, "7c7ba5bbc2ed57165528bb8803abda0ee01aecc379c79f2bf3ba7399e0a3a410"},
+		// It moved when spec.target.mountPath was taken out (docs/adr/0041): the claim is mounted at /work for every Treebind.
+		// No sync pod is replaced for it: the Treebinds of the release that drops the field are created again.
+		"a Treebind with every other field": {full, "de161a3b596e45293357d5a1bd280fcf0b9b43374c80d0de86ae8a2b43733180"},
 	} {
 		for _, paths := range withoutLists() {
 			treebind := tt.treebind()
@@ -568,7 +542,6 @@ func TestAgentGetsNoKubernetesCredential(t *testing.T) {
 func TestAgentEnvironment(t *testing.T) {
 	treebind := newTreebind(testTreebindName)
 	treebind.Namespace = testNamespace
-	treebind.Spec.Target.MountPath = testCustomPath
 
 	container, _ := agentContainer(t, treebind)
 
@@ -577,7 +550,7 @@ func TestAgentEnvironment(t *testing.T) {
 		{Name: "TREEBIND_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 		}},
-		{Name: "TREEBIND_MOUNT_PATH", Value: testCustomPath},
+		{Name: "TREEBIND_MOUNT_PATH", Value: defaultMountPath},
 		{Name: "TREEBIND_REPO_URL", Value: httpsRepositoryURL},
 		{Name: "TREEBIND_REPO_BRANCH", Value: branchMain},
 		{Name: "TREEBIND_SYNC_DIRECTION", Value: "bidirectional"},
@@ -644,45 +617,36 @@ func TestAgentEnvironmentWithEverySetting(t *testing.T) {
 // not cure that, so what the operator puts in the pod has to pass the agent's own
 // checks. This reads the environment the way the kubelet gives it to the agent.
 func TestTheAgentAcceptsTheEnvironmentItIsGiven(t *testing.T) {
-	for name, mountPath := range map[string]string{
-		"the default mount path": "",
-		"a custom one":           testCustomPath,
-		"one that is not clean":  "/work//data/",
-	} {
-		t.Run(name, func(t *testing.T) {
-			treebind := newTreebind(testTreebindName)
-			treebind.Namespace = testNamespace
-			treebind.Spec.Target.MountPath = mountPath
-			container, _ := agentContainer(t, treebind)
+	treebind := newTreebind(testTreebindName)
+	treebind.Namespace = testNamespace
+	container, _ := agentContainer(t, treebind)
 
-			env := map[string]string{}
-			for _, variable := range container.Env {
-				if variable.ValueFrom != nil {
-					env[variable.Name] = testNamespace // metadata.namespace, the only field the pod reads
-					continue
-				}
-				env[variable.Name] = variable.Value
-			}
-			config, err := agentconfig.FromEnv(func(name string) string { return env[name] })
+	env := map[string]string{}
+	for _, variable := range container.Env {
+		if variable.ValueFrom != nil {
+			env[variable.Name] = testNamespace // metadata.namespace, the only field the pod reads
+			continue
+		}
+		env[variable.Name] = variable.Value
+	}
+	config, err := agentconfig.FromEnv(func(name string) string { return env[name] })
 
-			if err != nil {
-				t.Fatalf("the agent refuses the environment of its own pod: %v", err)
-			}
-			if config.Namespace != testNamespace || config.Name != testTreebindName ||
-				config.StatusAudience != "treebind.example.org/"+testNamespace+"/"+testTreebindName {
-				t.Errorf("the agent reads %+v", config)
-			}
-			// The mount path in the environment is where the volume is mounted.
-			mounted := ""
-			for _, mount := range container.VolumeMounts {
-				if mount.Name == dataVolumeName {
-					mounted = mount.MountPath
-				}
-			}
-			if config.MountPath != mounted {
-				t.Errorf("the agent writes to %s, the claim is mounted at %s", config.MountPath, mounted)
-			}
-		})
+	if err != nil {
+		t.Fatalf("the agent refuses the environment of its own pod: %v", err)
+	}
+	if config.Namespace != testNamespace || config.Name != testTreebindName ||
+		config.StatusAudience != "treebind.example.org/"+testNamespace+"/"+testTreebindName {
+		t.Errorf("the agent reads %+v", config)
+	}
+	// The mount path in the environment is where the volume is mounted.
+	mounted := ""
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == dataVolumeName {
+			mounted = mount.MountPath
+		}
+	}
+	if config.MountPath != mounted {
+		t.Errorf("the agent writes to %s, the claim is mounted at %s", config.MountPath, mounted)
 	}
 }
 

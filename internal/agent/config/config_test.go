@@ -46,7 +46,10 @@ const (
 	notANumber       = "many"
 	justUnderASecond = "999ms"
 	problemLeast     = "must be at least 1s"
-	problemDuration  = "must be a duration"
+	// The interval has a higher least than the settle time (docs/adr/0041).
+	problemLeastInterval = "must be at least 5s"
+	problemHost          = "name a host"
+	problemDuration      = "must be a duration"
 
 	problemMaxDeletionsLeast   = "must be at least 1"
 	problemMaxDeletionsMost    = "must be at most 2147483647"
@@ -230,16 +233,19 @@ func TestCheckRepositoryURL(t *testing.T) {
 	}{
 		{"ssh", sshURL, SchemeSSH, ""},
 		{"ssh with a port", "ssh://git@example.com:2222/acme/d.git", SchemeSSH, ""},
-		{"ssh in capitals, which the CRD admits", "SSH://git@example.com/acme/d.git", SchemeSSH, ""},
+		{"ssh in capitals, which Git refuses", "SSH://git@example.com/acme/d.git", "", "lower case"},
 		{"https", repoURL, SchemeHTTPS, ""},
-		{"https in capitals", "HTTPS://example.com/acme/d.git", SchemeHTTPS, ""},
+		{"https in capitals, which Git refuses", "HTTPS://example.com/acme/d.git", "", "lower case"},
 		{"https with a port and no .git", "https://example.com:8443/acme/d", SchemeHTTPS, ""},
-		{"an ssh address without a host, which Git refuses and the CRD admits", "ssh:///acme/d.git", SchemeSSH, ""},
+		{"ssh with a user and an IPv6 host", "ssh://git@[2001:db8::1]:2222/d.git", SchemeSSH, ""},
+		{"an ssh address without a host", "ssh:///acme/d.git", "", problemHost},
+		{"an ssh address with a user and no host", "ssh://git@/acme/d.git", "", problemHost},
+		{"an ssh address with one slash", "ssh:/h/d.git", "", problemHost},
 		{"http", "http://example.com/acme/d.git", "", "NFR-15"},
 		{"http in capitals", "HTTP://example.com/acme/d.git", "", "NFR-15"},
 		{"git", "git://example.com/acme/d.git", "", "ssh:// or https://"},
 		{"ftp", "ftp://example.com/d.git", "", "ssh:// or https://"},
-		{"nothing but a scheme", "ssh:", SchemeSSH, ""},
+		{"nothing but a scheme", "ssh:", "", problemHost},
 		{"a tab", "https://example.com/\td", "", "whitespace"},
 		{"a DEL", "https://example.com/\x7fd", "", problemControl},
 	}
@@ -480,9 +486,9 @@ func TestFromEnvRefusesWhatCannotBeSyncedWith(t *testing.T) {
 		{"an interval that is not a duration", map[string]string{EnvSyncInterval: notADuration}, EnvSyncInterval + " must be a duration such as 30s or 5m"},
 		{"an interval in days", map[string]string{EnvSyncInterval: "1d"}, EnvSyncInterval + " " + problemDuration},
 		{"an interval of nothing but a number", map[string]string{EnvSyncInterval: "30"}, EnvSyncInterval + " " + problemDuration},
-		{"an interval below the least", map[string]string{EnvSyncInterval: justUnderASecond}, EnvSyncInterval + " " + problemLeast},
-		{"an interval of nothing", map[string]string{EnvSyncInterval: "0s"}, EnvSyncInterval + " " + problemLeast},
-		{"a negative interval", map[string]string{EnvSyncInterval: "-30s"}, EnvSyncInterval + " " + problemLeast},
+		{"an interval below the least", map[string]string{EnvSyncInterval: "4999ms"}, EnvSyncInterval + " " + problemLeastInterval},
+		{"an interval of nothing", map[string]string{EnvSyncInterval: "0s"}, EnvSyncInterval + " " + problemLeastInterval},
+		{"a negative interval", map[string]string{EnvSyncInterval: "-30s"}, EnvSyncInterval + " " + problemLeastInterval},
 		{"a settle time that is not a duration", map[string]string{EnvSyncSettleTime: notADuration}, EnvSyncSettleTime + " must be a duration such as 5s or 1m"},
 		{"a settle time below the least", map[string]string{EnvSyncSettleTime: justUnderASecond}, EnvSyncSettleTime + " " + problemLeast},
 	}
@@ -520,16 +526,17 @@ func TestCheckSyncInterval(t *testing.T) {
 	}{
 		{"", DefaultSyncInterval, ""},
 		{"30s", 30 * time.Second, ""},
-		{"1s", time.Second, ""},
-		{"1.5s", 1500 * time.Millisecond, ""},
+		{"5s", 5 * time.Second, ""},
+		{"5.5s", 5500 * time.Millisecond, ""},
 		{"1m0s", time.Minute, ""},
 		{"1h30m", 90 * time.Minute, ""},
 		{"2562047h47m16.854775807s", time.Duration(1<<63 - 1), ""},
-		{"1000ms", time.Second, ""},
-		{justUnderASecond, 0, problemLeast},
-		{"0s", 0, problemLeast},
-		{"-1s", 0, problemLeast},
-		{"0", 0, problemLeast},
+		{"5000ms", 5 * time.Second, ""},
+		{"4999ms", 0, problemLeastInterval},
+		{"1s", 0, problemLeastInterval},
+		{"0s", 0, problemLeastInterval},
+		{"-1s", 0, problemLeastInterval},
+		{"0", 0, problemLeastInterval},
 		{"30", 0, problemDuration},
 		{"1d", 0, problemDuration},
 		{" 30s", 0, problemDuration},

@@ -31,7 +31,7 @@ import (
 	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
 )
 
-// The sub path, the mount path, the branch and the address of the repository are passed to the agent as plain environment
+// The sub path, the branch and the address of the repository are passed to the agent as plain environment
 // variables, the kubelet expands $(NAME) and $$ in the value of such a variable (#179), and the CRD takes a '$' in each of them
 // (#208), so the agent has to read each as the spec writes it.
 
@@ -63,15 +63,6 @@ func settingsOfTheSpecWithADollar() []dollarSetting {
 			},
 		},
 		{
-			name: "spec.target.mountPath", env: agentconfig.EnvMountPath,
-			set:  func(tb *treebindv1alpha1.Treebind, v string) { tb.Spec.Target.MountPath = v },
-			read: func(c agentconfig.Config) string { return c.MountPath },
-			values: []string{
-				"/mnt/$(TREEBIND_NAMESPACE)", "/mnt/$(TREEBIND_NAME)", "/mnt/$$", "/mnt/$$(TREEBIND_NAME)", "/mnt/" + loneDollar, "/mnt/data$",
-				"/$", "/$$", "/mnt/$x", "/mnt/$(", "/mnt/x$(NOPE)", "/$(TREEBIND_NAMESPACE)/$(TREEBIND_NAME)$",
-			},
-		},
-		{
 			name: "spec.repository.branch", env: agentconfig.EnvRepoBranch,
 			set:  func(tb *treebindv1alpha1.Treebind, v string) { tb.Spec.Repository.Branch = v },
 			read: func(c agentconfig.Config) string { return c.RepoBranch },
@@ -94,16 +85,15 @@ func settingsOfTheSpecWithADollar() []dollarSetting {
 	}
 }
 
-// treebindForTheSettings is a Treebind that sets all four settings to values that have no '$', so that a variable that comes
+// treebindForTheSettings is a Treebind that sets all three settings to values that have no '$', so that a variable that comes
 // before the one under test is set and can be named in its value.
 func treebindForTheSettings() *treebindv1alpha1.Treebind {
 	treebind := newTreebind(testTreebindName)
-	treebind.Spec.Target.MountPath = testCustomPath
 	treebind.Spec.Target.SubPath = subPathNested
 	return treebind
 }
 
-func TestTheAgentReadsTheSubPathTheMountPathTheBranchAndTheUrlAsTheSpecWritesThemAfterTheKubelet(t *testing.T) {
+func TestTheAgentReadsTheSubPathTheBranchAndTheUrlAsTheSpecWritesThemAfterTheKubelet(t *testing.T) {
 	for _, setting := range settingsOfTheSpecWithADollar() {
 		for _, value := range setting.values {
 			treebind := treebindForTheSettings()
@@ -127,7 +117,7 @@ func TestTheAgentReadsTheSubPathTheMountPathTheBranchAndTheUrlAsTheSpecWritesThe
 // A lone '$' is left as it is by the kubelet, so the test above cannot tell a '$' that was written as '$$' from one that was
 // not. The operator writes every '$' the same way (ADR 0031), and a rule that told them apart would have to know the rules of
 // the kubelet, which is what a record of the form of the value pins.
-func TestEveryDollarOfTheSubPathTheMountPathTheBranchAndTheUrlIsWrittenAsTwoInThePod(t *testing.T) {
+func TestEveryDollarOfTheSubPathTheBranchAndTheUrlIsWrittenAsTwoInThePod(t *testing.T) {
 	for _, setting := range settingsOfTheSpecWithADollar() {
 		for _, value := range setting.values {
 			treebind := treebindForTheSettings()
@@ -146,18 +136,17 @@ func TestEveryDollarOfTheSubPathTheMountPathTheBranchAndTheUrlIsWrittenAsTwoInTh
 // A value that has no '$' is in the pod as the spec writes it, byte for byte, so that the pod template of a Treebind that has
 // none is the one that the operator wrote before it escaped them and none of its sync pods is replaced (#208). The hashes that
 // hold it for whole templates are in TestATemplateWithoutListsIsTheOneOfTheOperatorBefore.
-func TestTheSubPathTheMountPathTheBranchAndTheUrlWithoutADollarAreInThePodAsTheSpecWritesThem(t *testing.T) {
+func TestTheSubPathTheBranchAndTheUrlWithoutADollarAreInThePodAsTheSpecWritesThem(t *testing.T) {
 	var withoutDollar []string
 	for _, candidate := range append(branchCandidates(), repositoryURLCandidates()...) {
 		if candidate != "" && !strings.Contains(candidate, "$") {
 			withoutDollar = append(withoutDollar, candidate)
 		}
 	}
-	// The mount path is cleaned before it is put in the pod and a sub path is relative, so the values of each are of its own
-	// kind. The address and the branch are put in as they are, whatever they hold, and the operator does not judge them.
+	// A sub path is relative, so its values are of its own kind. The address and the branch are put in as they are, whatever
+	// they hold, and the operator does not judge them.
 	values := map[string][]string{
 		"spec.target.subPath":    {subPathOne, subPathNested, subPathLookalike, subPathRelease, " a b ", "é/日本語", "a%b", "a'b", `a"b`},
-		"spec.target.mountPath":  {defaultMountPath, testCustomPath, "/mnt/team-a/data", "/a b", "/é/日本語", "/a%b", "/a'b"},
 		"spec.repository.branch": withoutDollar,
 		"spec.repository.url":    withoutDollar,
 	}
@@ -180,32 +169,7 @@ func TestTheSubPathTheMountPathTheBranchAndTheUrlWithoutADollarAreInThePodAsTheS
 	}
 }
 
-// The mount of the volume is made by the kubelet with the path as it is: it is not a value that the kubelet expands, so the '$'
-// of the mount path is not written twice there, or the sync pod would mount the volume at another path than the one that the
-// agent reads.
-func TestTheVolumeIsMountedAtTheMountPathOfTheSpecAndTheAgentIsToldTheSame(t *testing.T) {
-	for _, mountPath := range []string{"/mnt/$(TREEBIND_NAME)", "/mnt/$$", "/mnt/" + loneDollar, "/mnt/data$", "/$"} {
-		treebind := treebindForTheSettings()
-		treebind.Spec.Target.MountPath = mountPath
-		container, _ := agentContainer(t, treebind)
-
-		var mountedAt []string
-		for _, mount := range container.VolumeMounts {
-			if mount.Name == dataVolumeName {
-				mountedAt = append(mountedAt, mount.MountPath)
-			}
-		}
-
-		if len(mountedAt) != 1 || mountedAt[0] != mountPath {
-			t.Errorf("the volume is mounted at %q, want it at %q, which the kubelet does not expand", mountedAt, mountPath)
-		}
-		if told := environmentAfterTheKubelet(container)[agentconfig.EnvMountPath]; told != mountedAt[0] {
-			t.Errorf("the agent is told %q, but the volume is at %q", told, mountedAt[0])
-		}
-	}
-}
-
-var _ = Describe("a '$' in the sub path, the mount path, the branch and the address of the repository", func() {
+var _ = Describe("a '$' in the sub path, the branch and the address of the repository", func() {
 	It("is taken by the API server, which is why the operator has to write it for the kubelet", func() {
 		ctx := context.Background()
 		var accepted int
