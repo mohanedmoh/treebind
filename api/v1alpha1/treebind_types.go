@@ -368,7 +368,8 @@ type AgentSpec struct {
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// annotations are added to the sync pod. An annotation that the operator sets
-	// keeps the operator's value.
+	// keeps the operator's value, and those of the deprecated AppArmor and seccomp
+	// fields are left out.
 	// +optional
 	// +kubebuilder:validation:MaxProperties=32
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -380,7 +381,8 @@ type AgentSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	RunAsUser *int64 `json:"runAsUser,omitempty"`
 
-	// runAsGroup is the group ID the sync pod runs as.
+	// runAsGroup is the group ID the sync pod runs as. With a runAsUser and no
+	// runAsGroup the sync pod runs in group 65532, the image's, and not in group 0.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	RunAsGroup *int64 `json:"runAsGroup,omitempty"`

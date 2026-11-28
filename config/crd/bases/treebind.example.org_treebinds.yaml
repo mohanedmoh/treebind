@@ -60,7 +60,8 @@ spec:
                       type: string
                     description: |-
                       annotations are added to the sync pod. An annotation that the operator sets
-                      keeps the operator's value.
+                      keeps the operator's value, and those of the deprecated AppArmor and seccomp
+                      fields are left out.
                     maxProperties: 32
                     type: object
                   fsGroup:
@@ -184,7 +185,9 @@ spec:
                         type: object
                     type: object
                   runAsGroup:
-                    description: runAsGroup is the group ID the sync pod runs as.
+                    description: |-
+                      runAsGroup is the group ID the sync pod runs as. With a runAsUser and no
+                      runAsGroup the sync pod runs in group 65532, the image's, and not in group 0.
                     format: int64
                     minimum: 0
                     type: integer
