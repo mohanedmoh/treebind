@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-24
 - Issue: #266, #267
+- Extended by: [0046](0046-the-sync-pod-runs-beside-the-application-on-a-claim-that-one-node-mounts.md), which says in the
+  message of `SyncPodUnschedulable` that a pod with the affinity to the application may only run beside it
 - Extends: [0004](0004-treebind-status-conditions.md), [0015](0015-the-operator-reads-the-agents-status.md), [0037](0037-the-operator-writes-synced-and-conflict-from-the-agents-report-and-ready-follows-only-a-failure-that-waits-for-a-person.md), [0039](0039-ready-names-an-http-repository-address-and-a-sync-container-killed-for-memory-and-the-operator-may-get-a-pod.md)
 
 ## Context

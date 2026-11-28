@@ -7,6 +7,8 @@
   `spec.placement.mode`
 - Superseded in part by: [0044](0044-the-operator-applies-spec-agent-to-the-sync-pod-except-fsgroup.md), which applies every field of
   `spec.agent` but `fsGroup` and `resources.claims` to the sync pod
+- Extended by: [0046](0046-the-sync-pod-runs-beside-the-application-on-a-claim-that-one-node-mounts.md), which adds
+  `spec.placement.appSelector` and says which claims get the pod affinity of standalone placement
 
 ## Context
 
