@@ -117,7 +117,7 @@ Treebind is alpha, and its releases are pre-releases. Read this before you use i
 - **Tested on kind.** The tests run on kind clusters of one node with `local-path` storage. `v0.0.1-alpha.5` was also tried by hand on a cluster of two nodes, with local and NFS volumes. **No storage class is listed as supported yet** ([storage support](docs/storage-support.md)).
 - **The sync pod is not placed next to the application yet** ([#97](https://github.com/mohanedmoh/treebind/issues/97)). With a `ReadWriteOnce` claim on several nodes, the scheduler can put the two on different nodes.
 - **The only credential is an ssh key** ([tokens for https: #58](https://github.com/mohanedmoh/treebind/issues/58)). The agent polls, and webhooks are planned ([#61](https://github.com/mohanedmoh/treebind/issues/61)).
-- **Some fields are accepted and ignored.** `spec.placement.mode: sidecar` and `spec.agent` are not built yet, and the condition `SpecSupported` says so.
+- **Some fields are accepted and ignored.** `spec.placement.mode: sidecar`, `spec.agent.fsGroup` and `spec.agent.resources.claims` are not built yet, and the condition `SpecSupported` says so.
 
 ## Documentation
 

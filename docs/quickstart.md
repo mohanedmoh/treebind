@@ -429,8 +429,8 @@ deleting the CRD deletes every Treebind of the cluster.
 - **The sync pod is not placed next to the application yet** ([#97](https://github.com/mohanedmoh/treebind/issues/97)). With a
   `ReadWriteOnce` claim on a cluster of several nodes, the scheduler can put the sync pod on another node than the application,
   where it cannot mount the claim.
-- **Some fields are accepted and ignored.** `spec.placement.mode: sidecar` and the fields of `spec.agent` are not built yet,
-  and a Treebind that sets one says so in its condition `SpecSupported`.
+- **Some fields are accepted and ignored.** `spec.placement.mode: sidecar`, `spec.agent.fsGroup` and
+  `spec.agent.resources.claims` are not built yet, and a Treebind that sets one says so in its condition `SpecSupported`.
 - **The only credential is an ssh key.** An `https://` address is accepted, but the agent has no credentials to send with it,
   and tokens for https are planned ([#58](https://github.com/mohanedmoh/treebind/issues/58)).
 - **The agent polls.** It asks the repository at every interval; webhooks from Git hosts are planned
