@@ -120,6 +120,10 @@ const awaitingReportMessage = "No report from the sync agent has been received y
 // that the request is retried. An error that a retry makes go away is the
 // exception, because reporting it would only make Ready flap.
 //
+// A claim that cannot be read for now, of a Treebind with an appSelector whose StatefulSet is there, is not a failure
+// of that kind: the StatefulSet keeps its affinity, Ready is computed as always and the error is returned after the
+// status is written (ensureStatefulSet).
+//
 // It puts the cluster's public signing keys in a ConfigMap for the sync agent
 // before it creates the StatefulSet, so that a new pod finds the file when the
 // kubelet mounts the volume instead of waiting for it to appear. A failure to do
@@ -168,9 +172,9 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// The sync pod keeps runAsNonRoot, so the kubelet would refuse a pod for root (agent_overrides.go).
 	rootUser := runsAsRoot(treebind.Spec.Agent)
 	var statefulSet *appsv1.StatefulSet
-	var ensureErr error
+	var claimErr, ensureErr error
 	if !plainHTTP && !rootUser {
-		statefulSet, ensureErr = r.ensureSyncObjects(ctx, treebind)
+		statefulSet, claimErr, ensureErr = r.ensureSyncObjects(ctx, treebind)
 		if ensureErr != nil && resolvesOnRetry(ctx, ensureErr) {
 			return ctrl.Result{}, ensureErr
 		}
@@ -213,6 +217,10 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if ensureErr != nil {
 		return ctrl.Result{}, ensureErr
 	}
+	// The claim could not be read for now. The status says how the sync pod is, and the error asks for another pass.
+	if claimErr != nil {
+		return ctrl.Result{}, claimErr
+	}
 	after := jittered(statusKeysRefresh)
 	if keysErr != nil {
 		after = jittered(statusKeysRetry)
@@ -239,12 +247,12 @@ var syncPodNotReadyReasons = []string{
 
 // ensureSyncObjects creates or updates the Service and then the StatefulSet. It
 // returns the StatefulSet as the API server last reported it, or the error of the
-// step that failed.
+// step that failed. claimErr is the one of ensureStatefulSet.
 func (r *TreebindReconciler) ensureSyncObjects(
 	ctx context.Context, treebind *treebindv1alpha1.Treebind,
-) (*appsv1.StatefulSet, error) {
+) (statefulSet *appsv1.StatefulSet, claimErr, err error) {
 	if err := r.ensureService(ctx, treebind); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return r.ensureStatefulSet(ctx, treebind)
 }
@@ -429,8 +437,9 @@ func (r *TreebindReconciler) whySyncPodNotReady(
 		return ready
 	}
 	if scheduling := unschedulable(pod); scheduling != nil {
-		beside := besideTheApplicationOnly(statefulSet.Spec.Template.Spec.Affinity)
-		return unschedulableCondition(ready, pod.Name, scheduling.Message, beside)
+		// Of the pod and not of the template: while appSelector is added or taken away, the pod that is Pending is of
+		// the revision before.
+		return unschedulableCondition(ready, pod.Name, scheduling.Message, hasRequiredPodAffinity(pod.Spec.Affinity))
 	}
 	if onNodeThatIsNotReady(pod) {
 		return nodeNotReadyCondition(ready, pod.Name, pod.Spec.NodeName)

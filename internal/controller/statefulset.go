@@ -177,6 +177,9 @@ func desiredStatefulSet(
 	if err := agent.validate(); err != nil {
 		return nil, err
 	}
+	if err := checkAppSelector(treebind.Spec.Placement.AppSelector); err != nil {
+		return nil, err
+	}
 	template, err := desiredPodTemplate(treebind, agent, claimModes)
 	if err != nil {
 		return nil, err
@@ -558,22 +561,32 @@ func (r *TreebindReconciler) ensureService(ctx context.Context, treebind *treebi
 // desired state, and returns it as the API server last reported it. It always
 // restores one replica, rewrites the pod template only when its hash changed,
 // and sets the fields a StatefulSet cannot change only on creation, so a
-// reconcile with nothing to do writes nothing. A claim that cannot be read is an
-// error, and the StatefulSet is left as it is.
+// reconcile with nothing to do writes nothing.
+//
+// While the claim cannot be read, no StatefulSet is created, since nothing says
+// where its pod may run, and that is err. One that is there keeps the affinity it
+// has and is otherwise brought up to date as always, so that one failed read does
+// not hold back the replica or a change of the template. The failure is then
+// claimErr when it may pass by itself, and err when only a person cures it.
 func (r *TreebindReconciler) ensureStatefulSet(
 	ctx context.Context, treebind *treebindv1alpha1.Treebind,
-) (*appsv1.StatefulSet, error) {
-	claimModes, err := r.claimAccessModes(ctx, treebind)
-	if err != nil {
-		return nil, err
-	}
+) (ensured *appsv1.StatefulSet, claimErr, err error) {
+	claimModes, readErr := r.claimAccessModes(ctx, treebind)
 	desired, err := desiredStatefulSet(treebind, r.agentSettings(), claimModes...)
 	if err != nil {
-		return nil, fmt.Errorf("build StatefulSet for Treebind %s/%s: %w", treebind.Namespace, treebind.Name, err)
+		return nil, nil, fmt.Errorf("build StatefulSet for Treebind %s/%s: %w", treebind.Namespace, treebind.Name, err)
 	}
 	statefulSet := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, statefulSet, func() error {
+		if readErr != nil {
+			if statefulSet.CreationTimestamp.IsZero() {
+				return readErr
+			}
+			if err := keepAffinity(desired, statefulSet.Spec.Template.Spec.Affinity); err != nil {
+				return err
+			}
+		}
 		statefulSet.Labels = mergeMap(statefulSet.Labels, desired.Labels)
 		if statefulSet.CreationTimestamp.IsZero() {
 			statefulSet.Spec.Selector = desired.Spec.Selector
@@ -590,10 +603,13 @@ func (r *TreebindReconciler) ensureStatefulSet(
 		return controllerutil.SetControllerReference(treebind, statefulSet, r.Scheme)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ensure StatefulSet %s/%s: %w", desired.Namespace, desired.Name, err)
+		return nil, nil, fmt.Errorf("ensure StatefulSet %s/%s: %w", desired.Namespace, desired.Name, err)
 	}
 	logResult(ctx, "StatefulSet", client.ObjectKeyFromObject(statefulSet).String(), result)
-	return statefulSet, nil
+	if onlyAPersonCures(readErr) {
+		return statefulSet, nil, readErr
+	}
+	return statefulSet, readErr, nil
 }
 
 func mergeMap(dst, src map[string]string) map[string]string {

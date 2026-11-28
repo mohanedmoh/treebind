@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -40,6 +42,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
+	agentconfig "github.com/mohanedmoh/treebind/internal/agent/config"
 )
 
 // The sync pod of a claim that one node mounts at a time has to run on the node of the application (FR-25, R-4):
@@ -217,23 +220,71 @@ func TestTheAffinityChangesTheTemplateAndNotTheHashThatThePollerExpects(t *testi
 }
 
 // A sync pod with the affinity waits for a pod of the application, which the scheduler's words alone ("didn't match pod
-// affinity rules") do not say.
+// affinity rules") do not say. It is the Pending pod that says it: while appSelector is added or taken away, that pod is
+// of another revision than the template of the StatefulSet.
 func TestReadySaysThatAPendingSyncPodWaitsForTheApplication(t *testing.T) {
 	const words = "0/3 nodes are available: 3 node(s) didn't match pod affinity rules."
-	reconciler := &TreebindReconciler{
-		APIReader: &podReader{pod: pendingSyncPod(corev1.ConditionFalse, corev1.PodReasonUnschedulable, words)},
-	}
-	statefulSet := statefulSetFor(t, treebindBesideItsApplication(), corev1.ReadWriteOnce)
-	notReady := metav1.Condition{
-		Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
-		Reason: treebindv1alpha1.ReasonSyncPodNotReady, Message: messageNoPodReady,
-	}
+	const pending = messageNoPodReady + ": the sync pod " + podOfSync + " is Pending, because the scheduler cannot place it"
+	with := statefulSetFor(t, treebindBesideItsApplication(), corev1.ReadWriteOnce)
+	without := statefulSetFor(t, newTreebind(testTreebindName))
 
-	got := reconciler.whySyncPodNotReady(context.Background(), statefulSet, notReady)
+	for name, tt := range map[string]struct {
+		podOf, template *appsv1.StatefulSet
+		want            string
+	}{
+		"the pod has the affinity, and so does the template": {with, with,
+			pending + ", and it may only run on the node of a pod that spec.placement.appSelector selects: " + words},
+		"the pod has the affinity, which the template has no more": {with, without,
+			pending + ", and it may only run on the node of a pod that spec.placement.appSelector selects: " + words},
+		"the pod is of before the affinity that the template has": {without, with, pending + ": " + words},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := pendingSyncPod(corev1.ConditionFalse, corev1.PodReasonUnschedulable, words)
+			pod.Spec.Affinity = tt.podOf.Spec.Template.Spec.Affinity
+			reconciler := &TreebindReconciler{APIReader: &podReader{pod: pod}}
+			notReady := metav1.Condition{
+				Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+				Reason: treebindv1alpha1.ReasonSyncPodNotReady, Message: messageNoPodReady,
+			}
 
-	assertReady(t, got, metav1.ConditionFalse, treebindv1alpha1.ReasonSyncPodUnschedulable,
-		messageNoPodReady+": the sync pod "+podOfSync+" is Pending, because the scheduler cannot place it, and it may "+
-			"only run on the node of a pod that spec.placement.appSelector selects: "+words)
+			got := reconciler.whySyncPodNotReady(context.Background(), tt.template, notReady)
+
+			assertReady(t, got, metav1.ConditionFalse, treebindv1alpha1.ReasonSyncPodUnschedulable, tt.want)
+		})
+	}
+}
+
+// A selector that Kubernetes does not take is refused whatever the claim, also when the sync pod gets no affinity and the
+// API server so never sees the selector.
+func TestASelectorThatKubernetesDoesNotTakeMakesNoStatefulSet(t *testing.T) {
+	for name, selector := range badSelectors() {
+		for _, tt := range accessModeCases {
+			treebind := newTreebind(testTreebindName)
+			treebind.Spec.Placement.AppSelector = selector
+
+			_, err := desiredStatefulSet(treebind,
+				agentSettings{Image: testImage, StatusIssuer: testIssuer, StatusSubject: testSubject}, tt.modes...)
+
+			if err == nil || !strings.Contains(err.Error(), "spec.placement.appSelector") {
+				t.Errorf("%s, claim %s: error = %v, want one that names spec.placement.appSelector", name, tt.name, err)
+			}
+		}
+	}
+}
+
+func badSelectors() map[string]*metav1.LabelSelector {
+	expression := func(operator metav1.LabelSelectorOperator, values ...string) *metav1.LabelSelector {
+		return &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: appLabelKey, Operator: operator, Values: values},
+		}}
+	}
+	return map[string]*metav1.LabelSelector{
+		"an unknown operator":   expression("Matches", appLabelValue),
+		"In with no value":      expression(metav1.LabelSelectorOpIn),
+		"Exists with a value":   expression(metav1.LabelSelectorOpExists, appLabelValue),
+		"a value with a space":  {MatchLabels: map[string]string{appLabelKey: "two words"}},
+		"a key that is not one": {MatchLabels: map[string]string{"not a key": appLabelValue}},
+	}
 }
 
 // claimReader reads from the API server, counts the claims it is asked for, and fails them with err when it is set.
@@ -412,33 +463,104 @@ var _ = Describe("The placement of the sync pod", func() {
 		Expect(statefulSet().ResourceVersion).To(Equal(written), "a pass with nothing to do writes nothing")
 	})
 
-	It("says in Ready why the claim cannot be read, and changes no sync pod meanwhile", func() {
-		createClaim(corev1.ReadWriteMany)
+	// makeReady gives the StatefulSet a ready pod, so that Ready is True.
+	makeReady := func() {
+		GinkgoHelper()
+		got := statefulSet()
+		got.Status.Replicas, got.Status.ReadyReplicas, got.Status.ObservedGeneration = 1, 1, got.Generation
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+	}
+	// changeWhileTheClaimCannotBeRead scales the sync pod away and changes a setting of the agent, which the next pass
+	// has to put right whether it can read the claim or not, and returns the error of that pass.
+	changeWhileTheClaimCannotBeRead := func(readError error) error {
+		GinkgoHelper()
+		scaled := statefulSet()
+		none := int32(0)
+		scaled.Spec.Replicas = &none
+		Expect(k8sClient.Update(ctx, scaled)).To(Succeed())
+		treebind := &treebindv1alpha1.Treebind{}
+		Expect(k8sClient.Get(ctx, key, treebind)).To(Succeed())
+		treebind.Spec.Sync.Interval = &metav1.Duration{Duration: 45 * time.Second}
+		Expect(k8sClient.Update(ctx, treebind)).To(Succeed())
+
+		reader.err = readError
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+
+		got := statefulSet()
+		Expect(got.Spec.Replicas).To(HaveValue(BeEquivalentTo(1)), "the replica is not restored")
+		Expect(agentEnvironmentOf(got.Spec.Template.Spec.Containers[0])).To(
+			HaveKeyWithValue(agentconfig.EnvSyncInterval, "45s"), "the template is not updated")
+		Expect(got.Spec.Template.Spec.Affinity).To(Equal(besideTheApplication()), "the affinity is not kept")
+		return err
+	}
+
+	DescribeTable("keeps the affinity and Ready, and tries again, when the claim cannot be read for now",
+		func(readError error) {
+			createClaim(corev1.ReadWriteOnce)
+			createTreebind(appSelector())
+			reconcileOnce()
+			makeReady()
+			reconcileOnce()
+			Expect(ready().Status).To(Equal(metav1.ConditionTrue))
+			written := statefulSet().ResourceVersion
+
+			reader.err = readError
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+
+			Expect(err).To(MatchError(readError), "the error asks for another pass")
+			Expect(ready().Status).To(Equal(metav1.ConditionTrue))
+			Expect(statefulSet().ResourceVersion).To(Equal(written), "a pass with nothing to change writes nothing")
+
+			Expect(changeWhileTheClaimCannotBeRead(readError)).To(MatchError(readError))
+			Expect(ready().Reason).NotTo(Equal(treebindv1alpha1.ReasonReconcileFailed))
+		},
+		Entry("too many requests", apierrors.NewTooManyRequests("slow down", 1)),
+		Entry("an internal error", apierrors.NewInternalError(errors.New("etcd leader changed"))),
+		Entry("a timeout of the server", apierrors.NewTimeoutError("timed out", 1)),
+		Entry("a timeout of the call", context.DeadlineExceeded),
+	)
+
+	// No retry cures a right that is missing, so Ready says it, and the sync pod is still looked after.
+	It("says in Ready that the operator may not read the claim, and still looks after the sync pod", func() {
+		createClaim(corev1.ReadWriteOnce)
 		createTreebind(appSelector())
 		reconcileOnce()
-		written := statefulSet().ResourceVersion
+		forbidden := apierrors.NewForbidden(corev1.Resource("persistentvolumeclaims"), claimName, errors.New("no rule"))
 
-		reader.err = apierrors.NewForbidden(corev1.Resource("persistentvolumeclaims"), claimName, errors.New("no rule"))
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		err := changeWhileTheClaimCannotBeRead(forbidden)
 
 		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "got %v", err)
 		Expect(ready().Reason).To(Equal(treebindv1alpha1.ReasonReconcileFailed))
-		Expect(ready().Message).To(And(ContainSubstring("PersistentVolumeClaim "+namespace+"/"+claimName), ContainSubstring("forbidden")))
-		Expect(statefulSet().ResourceVersion).To(Equal(written))
+		Expect(ready().Message).To(And(
+			ContainSubstring("PersistentVolumeClaim "+namespace+"/"+claimName), ContainSubstring("forbidden")))
 	})
 
-	// The CRD only refuses a selector that selects everything. The rest of a selector is the API server's to judge,
-	// which it does when the StatefulSet is written.
-	It("says in Ready what the API server refuses of a selector", func() {
-		createClaim(corev1.ReadWriteOnce)
-		createTreebind(&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-			{Key: appLabelKey, Operator: "Matches", Values: []string{appLabelValue}},
-		}})
+	It("makes no sync pod while the claim has never been read", func() {
+		createClaim(corev1.ReadWriteMany)
+		createTreebind(appSelector())
+		reader.err = apierrors.NewTooManyRequests("slow down", 1)
 
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 
-		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsTooManyRequests(err)).To(BeTrue(), "got %v", err)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, syncKey, &appsv1.StatefulSet{}))).To(BeTrue())
 		Expect(ready().Reason).To(Equal(treebindv1alpha1.ReasonReconcileFailed))
-		Expect(ready().Message).To(ContainSubstring("podAffinity"))
 	})
+
+	DescribeTable("says in Ready that a selector is one that Kubernetes does not take, whatever the claim",
+		func(accessMode corev1.PersistentVolumeAccessMode) {
+			createClaim(accessMode)
+			createTreebind(badSelectors()["an unknown operator"])
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+
+			Expect(err).To(HaveOccurred())
+			Expect(ready().Reason).To(Equal(treebindv1alpha1.ReasonReconcileFailed))
+			Expect(ready().Message).To(And(ContainSubstring("spec.placement.appSelector"), ContainSubstring("Matches")))
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, syncKey, &appsv1.StatefulSet{}))).To(BeTrue())
+		},
+		Entry("ReadWriteOnce", corev1.ReadWriteOnce),
+		Entry("ReadWriteMany", corev1.ReadWriteMany),
+		Entry("ReadOnlyMany", corev1.ReadOnlyMany),
+	)
 })

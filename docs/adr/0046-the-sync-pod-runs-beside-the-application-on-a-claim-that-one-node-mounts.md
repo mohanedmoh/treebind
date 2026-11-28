@@ -27,8 +27,10 @@ What bears on it:
 ## Decision
 
 `spec.placement.appSelector` is an optional label selector. The CRD refuses one with no entry in `matchLabels` and no
-entry in `matchExpressions`, which would select every pod of the namespace. What else a selector may hold is left to the
-API server, which refuses a bad one when the StatefulSet is written: `Ready` is `False` with `ReconcileFailed`.
+entry in `matchExpressions`, which would select every pod of the namespace. The rest of what makes a selector the
+operator checks before it builds the StatefulSet, as Kubernetes does (`metav1.LabelSelectorAsSelector`): `Ready` is
+`False` with `ReconcileFailed`, and the StatefulSet is neither made nor changed. The API server alone would not do,
+because it sees the selector only in the affinity, which a claim that many nodes mount does not get.
 
 With an `appSelector` the operator reads `spec.accessModes` of the claim and gives the pod template a
 `requiredDuringSchedulingIgnoredDuringExecution` pod affinity with the topology key `kubernetes.io/hostname`, in the
@@ -65,13 +67,22 @@ change of the affinity replaces the pod. `TREEBIND_TEMPLATE_HASH` covers the tem
 nothing that the agent does, and including it would have the status poller read the claim at every poll to expect the
 same hash, and take a good report for an outdated one when the two had read different claims.
 
-**`SyncPodUnschedulable` says it.** When the template has the affinity, the message says that the pod may only run on
+**`SyncPodUnschedulable` says it.** When the pod that is `Pending` has the affinity, which the template may have gained
+or lost since, the message says that the pod may only run on
 the node of a pod that `spec.placement.appSelector` selects, before the scheduler's words, which only say that pod
 affinity rules did not match. No condition or reason is added.
 
 **The operator may `get` claims**, read from the API server and not from a cache, as for pods (ADR 0039): no `list` and
-no `watch`. A read that fails, other than for a claim that is not there, is `ReconcileFailed`, and the StatefulSet is
-left as it is.
+no `watch`.
+
+**A read that fails**, other than for a claim that is not there, leaves open which affinity is right:
+
+- With no StatefulSet yet, none is made, and `Ready` is `False` with `ReconcileFailed`.
+- A StatefulSet that is there keeps its affinity and is otherwise brought up to date as always, so that one timeout or
+  throttled call does not hold back the restore of the replica or a change of the template.
+- A right that is missing (`Forbidden`, `Unauthorized`) is `ReconcileFailed`, because only a person cures it. Any other
+  failure changes no condition: the status is written as always and the error is returned, so the pass is tried again
+  with a growing delay.
 
 ## Consequences
 
@@ -83,6 +94,8 @@ left as it is.
   that stays keeps the volume attached to its node, and an application pod on another node cannot mount it until the sync
   pod is deleted. #113 does that; it deletes the pod, and the template and the hashes need no change for it.
 - Adding, changing or removing `appSelector` replaces the sync pod when the template changes with it.
+- While a claim cannot be read for now, an `appSelector` that was just added or changed waits for the read, and `Ready`
+  does not say so.
 - The operator can read any claim where its role applies, by name. It could read none before.
 - Whether the scheduler places the pods as meant, and how a detach and attach goes when an application moves, needs a
   cluster of several nodes with a volume that one node mounts. The tests of the operator have no scheduler.

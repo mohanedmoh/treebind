@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,6 +55,19 @@ func (r *TreebindReconciler) claimAccessModes(
 		return nil, fmt.Errorf("get PersistentVolumeClaim %s: %w", key, err)
 	}
 	return claim.Spec.AccessModes, nil
+}
+
+// checkAppSelector refuses a selector that Kubernetes does not take, such as one with an unknown operator. The CRD does
+// not, and the API server only sees the selector in the affinity, which not every claim gets (appAffinity). So that the
+// answer does not depend on the claim, the operator asks first.
+func checkAppSelector(selector *metav1.LabelSelector) error {
+	if selector == nil {
+		return nil
+	}
+	if _, err := metav1.LabelSelectorAsSelector(selector); err != nil {
+		return fmt.Errorf("spec.placement.appSelector: %w", err)
+	}
+	return nil
 }
 
 // appAffinity returns the affinity that puts the sync pod on the node of a pod that selector selects, or nil when the
@@ -98,9 +112,27 @@ func manyNodesCanMount(claimModes []corev1.PersistentVolumeAccessMode) bool {
 		!slices.Contains(claimModes, corev1.ReadWriteOncePod)
 }
 
-// besideTheApplicationOnly says whether the pod template of the StatefulSet has a required pod affinity, which only
-// appAffinity gives it.
-func besideTheApplicationOnly(affinity *corev1.Affinity) bool {
+// keepAffinity gives the template of desired the affinity of the StatefulSet that is there, and the hash of the
+// template with it, for a pass that could not read the claim and so does not know what the affinity should be.
+func keepAffinity(desired *appsv1.StatefulSet, affinity *corev1.Affinity) error {
+	desired.Spec.Template.Spec.Affinity = affinity.DeepCopy()
+	hash, err := templateHash(desired.Spec.Template)
+	if err != nil {
+		return err
+	}
+	desired.Annotations[templateHashAnnotation] = hash
+	return nil
+}
+
+// onlyAPersonCures says whether a failure to read a claim lasts until a person changes something: the operator may not
+// read it. Anything else, such as a timeout, too many requests or an error of the API server, may pass by itself.
+func onlyAPersonCures(err error) bool {
+	return apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err)
+}
+
+// hasRequiredPodAffinity says whether the affinity of a sync pod has a required pod affinity, which the operator gives
+// it for appSelector.
+func hasRequiredPodAffinity(affinity *corev1.Affinity) bool {
 	return affinity != nil && affinity.PodAffinity != nil &&
 		len(affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0
 }
