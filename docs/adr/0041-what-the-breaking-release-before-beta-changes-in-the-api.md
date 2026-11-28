@@ -4,6 +4,8 @@
 - Date: 2026-11-27
 - Issue: #305
 - Supersedes: the part of [ADR 0003](0003-reserved-placement-and-agent-fields.md) that accepts `placement.mode: sidecar`
+- Extended by: [0046](0046-the-sync-pod-runs-beside-the-application-on-a-claim-that-one-node-mounts.md), which adds
+  `spec.placement.appSelector` as decided below
 
 ## Context
 

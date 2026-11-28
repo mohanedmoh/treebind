@@ -121,7 +121,8 @@ func TestTheAgentReadsTheHashItIsGiven(t *testing.T) {
 // The variable changes when the template does, and when nothing but the template does. A Treebind that says what the
 // agent does without it, or changes what it ignores, is the same template, and its pod is not replaced (ADRs 0024,
 // 0026, 0031, 0034, 0036). The hash of the whole template, in the annotation, is what decides whether the operator
-// writes the template, so each case holds the two to each other.
+// writes the template, so each case holds the two to each other. The affinity to the application is the one part of
+// the template that the variable leaves out (docs/adr/0046), which placement_test.go holds.
 func TestTheHashVariableChangesWithTheTemplateAndOnlyWithIt(t *testing.T) {
 	limit := func(n int32) *int32 { return &n }
 	none := func(*treebindv1alpha1.Treebind) {}

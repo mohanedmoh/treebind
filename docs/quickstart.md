@@ -215,9 +215,12 @@ What the Treebind says:
 
 The operator makes a StatefulSet `quickstart-sync` with one pod, which mounts the claim, clones the repository into `files/` and
 then syncs it. A `ReadWriteOnce` claim can be mounted on one node only, so the sync pod and the application have to run on the
-same node, which on a cluster of one node, as here, they always do. The application here runs as root; an application that
-runs as another user needs the settings of [Pod Security and file ownership](pod-security.md#what-the-volume-needs), so that it
-and the agent can change each other's files.
+same node, which on a cluster of one node, as here, they always do. On more nodes, name the application's pods in
+`spec.placement.appSelector`, which is newer than the release that this page installs
+([where the sync pod runs](storage-support.md#access-modes-and-where-the-sync-pod-runs)). The application here runs as root;
+an application that runs as another user needs the settings of
+[Pod Security and file ownership](pod-security.md#what-the-volume-needs), so that it and the agent can change each other's
+files.
 
 ## 5. See the files of the repository in the pod
 
@@ -426,9 +429,11 @@ deleting the CRD deletes every Treebind of the cluster.
   storage. `v0.0.1-alpha.5` was also tried once by hand on a kubeadm cluster of two nodes, with `local-path` and NFS volumes,
   which no test repeats. No storage class is listed as supported yet ([storage support](storage-support.md)), and managed
   clusters and cloud storage are not tested.
-- **The sync pod is not placed next to the application yet** ([#97](https://github.com/mohanedmoh/treebind/issues/97)). With a
-  `ReadWriteOnce` claim on a cluster of several nodes, the scheduler can put the sync pod on another node than the application,
-  where it cannot mount the claim.
+- **The release that this page installs does not place the sync pod next to the application.** With a `ReadWriteOnce` claim
+  on a cluster of several nodes, the scheduler can put the sync pod on another node than the application, where it cannot
+  mount the claim. `spec.placement.appSelector`, which a later release has, keeps them on one node
+  ([where the sync pod runs](storage-support.md#access-modes-and-where-the-sync-pod-runs)). Even with it, the sync pod does
+  not follow an application that moves later ([#113](https://github.com/mohanedmoh/treebind/issues/113)).
 - **Some fields are accepted and ignored.** `spec.placement.mode: sidecar`, `spec.agent.fsGroup` and
   `spec.agent.resources.claims` are not built yet, and a Treebind that sets one says so in its condition `SpecSupported`.
 - **The only credential is an ssh key.** An `https://` address is accepted, but the agent has no credentials to send with it,

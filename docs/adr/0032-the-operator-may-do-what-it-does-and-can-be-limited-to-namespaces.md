@@ -7,6 +7,8 @@
   on `events` of `events.k8s.io` to the manager role, for the events of the sync outcome
 - Extended by: [0039](0039-ready-names-an-http-repository-address-and-a-sync-container-killed-for-memory-and-the-operator-may-get-a-pod.md), which
   adds `get` on `pods` to the manager role, for the sync pod that `Ready` reads while no sync pod is ready
+- Extended by: [0046](0046-the-sync-pod-runs-beside-the-application-on-a-claim-that-one-node-mounts.md), which adds `get`
+  on `persistentvolumeclaims` to the manager role, for the access modes of a claim
 
 ## Context
 

@@ -40,6 +40,12 @@ spec:
       - "*.swp"
   placement:
     mode: standalone
+    # On a ReadWriteOnce claim, name the pods of the application that mounts it, and only
+    # those: the sync pod then runs on their node, and is Pending while there is none
+    # (docs/storage-support.md#access-modes-and-where-the-sync-pod-runs).
+    # appSelector:
+    #   matchLabels:
+    #     app.kubernetes.io/name: grafana
   # The agent block overrides parts of the sync pod (docs/pod-security.md). fsGroup is
   # accepted but not applied yet. A runAsUser changes who owns the agent's state
   # directory, .treebind, on the claim: on a claim the agent used before as another
