@@ -162,9 +162,11 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	// The agent refuses an http:// address at start, so a sync pod made for one would only crash (repository_scheme.go).
 	plainHTTP := usesPlainHTTP(treebind.Spec.Repository.URL)
+	// The sync pod keeps runAsNonRoot, so the kubelet would refuse a pod for root (agent_overrides.go).
+	rootUser := runsAsRoot(treebind.Spec.Agent)
 	var statefulSet *appsv1.StatefulSet
 	var ensureErr error
-	if !plainHTTP {
+	if !plainHTTP && !rootUser {
 		statefulSet, ensureErr = r.ensureSyncObjects(ctx, treebind)
 		if ensureErr != nil && resolvesOnRetry(ctx, ensureErr) {
 			return ctrl.Result{}, ensureErr
@@ -176,6 +178,8 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	switch {
 	case plainHTTP:
 		ready = unsupportedRepositorySchemeCondition(treebind.Generation)
+	case rootUser:
+		ready = unsupportedAgentUserCondition(treebind.Generation)
 	case ensureErr != nil:
 		ready = reconcileFailedCondition(ensureErr, treebind.Generation)
 	default:
@@ -252,27 +256,15 @@ func unimplementedFields(spec *treebindv1alpha1.TreebindSpec) []string {
 		fields = append(fields, "spec.placement.mode")
 	}
 
+	// The rest of spec.agent is applied to the sync pod (agent_overrides.go). The claims of the resources have no
+	// counterpart in the pod, and fsGroup is held back because the agent refuses its own directory after the kubelet
+	// has walked the claim for one (docs/adr/0044).
 	if agent := spec.Agent; agent != nil {
-		resources := agent.Resources
-		for _, field := range []struct {
-			path string
-			set  bool
-		}{
-			{"spec.agent.resources", resources != nil &&
-				(len(resources.Limits) > 0 || len(resources.Requests) > 0 || len(resources.Claims) > 0)},
-			{"spec.agent.nodeSelector", len(agent.NodeSelector) > 0},
-			{"spec.agent.tolerations", len(agent.Tolerations) > 0},
-			{"spec.agent.priorityClassName", agent.PriorityClassName != ""},
-			{"spec.agent.imagePullSecrets", len(agent.ImagePullSecrets) > 0},
-			{"spec.agent.labels", len(agent.Labels) > 0},
-			{"spec.agent.annotations", len(agent.Annotations) > 0},
-			{"spec.agent.runAsUser", agent.RunAsUser != nil},
-			{"spec.agent.runAsGroup", agent.RunAsGroup != nil},
-			{"spec.agent.fsGroup", agent.FSGroup != nil},
-		} {
-			if field.set {
-				fields = append(fields, field.path)
-			}
+		if agent.Resources != nil && len(agent.Resources.Claims) > 0 {
+			fields = append(fields, "spec.agent.resources.claims")
+		}
+		if agent.FSGroup != nil {
+			fields = append(fields, "spec.agent.fsGroup")
 		}
 	}
 

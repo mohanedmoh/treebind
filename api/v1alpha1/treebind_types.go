@@ -323,12 +323,16 @@ type PlacementSpec struct {
 	Mode PlacementMode `json:"mode,omitempty"`
 }
 
-// AgentSpec overrides how the sync pod is scheduled and run. Every field is
-// accepted now and takes effect once the placement work lands; until then the
-// operator ignores them and reports each one that is set in the SpecSupported
-// condition.
+// AgentSpec overrides how the sync pod is scheduled and run. What the operator
+// sets itself, the labels that select the pod, its annotations and the security
+// context that keeps it non-root, is not overridden. resources.claims and fsGroup
+// are accepted but not applied, and the SpecSupported condition reports them when
+// they are set.
 type AgentSpec struct {
-	// resources are the compute resources of the sync container.
+	// resources are the compute resources of the sync container. Each request
+	// and limit takes the place of the default of its resource (requests 10m CPU
+	// and 32Mi memory, limit 128Mi memory), and a default is raised or lowered so
+	// that it never conflicts with what is set. claims are not applied.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
@@ -357,28 +361,34 @@ type AgentSpec struct {
 	// +kubebuilder:validation:items:XValidation:rule="size(self.name) > 0",message="imagePullSecrets entries need a name"
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
-	// labels are added to the sync pod.
+	// labels are added to the sync pod. A label that the operator sets keeps the
+	// operator's value.
 	// +optional
 	// +kubebuilder:validation:MaxProperties=32
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// annotations are added to the sync pod.
+	// annotations are added to the sync pod. An annotation that the operator sets
+	// keeps the operator's value.
 	// +optional
 	// +kubebuilder:validation:MaxProperties=32
 	Annotations map[string]string `json:"annotations,omitempty"`
 
-	// runAsUser is the user ID the sync container runs as.
+	// runAsUser is the user ID the sync pod runs as. 0 is refused: the sync pod
+	// runs as non-root. A user other than 65532, the image's, gives the sync pod
+	// a passwd entry for it in an init container.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	RunAsUser *int64 `json:"runAsUser,omitempty"`
 
-	// runAsGroup is the group ID the sync container runs as.
+	// runAsGroup is the group ID the sync pod runs as.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	RunAsGroup *int64 `json:"runAsGroup,omitempty"`
 
 	// fsGroup is the group ID that owns the mounted volume, so the sync
 	// container can write to a claim that the application's user created.
+	// It is not applied yet: the agent refuses its own state directory once the
+	// kubelet has given it to the group.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	FSGroup *int64 `json:"fsGroup,omitempty"`
@@ -498,6 +508,10 @@ const (
 	// which the sync agent refuses at start. The operator creates no sync pod for it and
 	// leaves one that exists as it is, and the message says to use ssh:// or https://.
 	ReasonUnsupportedRepositoryScheme = "UnsupportedRepositoryScheme"
+	// ReasonUnsupportedAgentUser means spec.agent.runAsUser is 0. The sync pod keeps
+	// runAsNonRoot, so the kubelet would refuse to start it as root. The operator creates
+	// no sync pod for it and leaves one that exists as it is.
+	ReasonUnsupportedAgentUser = "UnsupportedAgentUser"
 
 	// ConditionSynced is the type of the condition that says whether the volume
 	// matches the repository at status.lastSyncedCommit. It is True when no step

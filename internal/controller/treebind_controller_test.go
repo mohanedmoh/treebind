@@ -214,7 +214,7 @@ var _ = Describe("Treebind Controller", func() {
 
 			resource := get()
 			resource.Spec.Placement.Mode = treebindv1alpha1.PlacementModeSidecar
-			resource.Spec.Agent = &treebindv1alpha1.AgentSpec{NodeSelector: newAgentSpec().NodeSelector}
+			resource.Spec.Agent = &treebindv1alpha1.AgentSpec{FSGroup: newAgentSpec().FSGroup}
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			reconcileOnce()
 
@@ -223,7 +223,7 @@ var _ = Describe("Treebind Controller", func() {
 			Expect(condition).NotTo(BeNil())
 			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(condition.Reason).To(Equal(treebindv1alpha1.ReasonNotImplemented))
-			Expect(condition.Message).To(ContainSubstring(fieldNodeSelector))
+			Expect(condition.Message).To(ContainSubstring(fieldFSGroup))
 			Expect(condition.Message).To(ContainSubstring(fieldPlacementMode))
 			Expect(condition.ObservedGeneration).To(Equal(got.Generation))
 			Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))

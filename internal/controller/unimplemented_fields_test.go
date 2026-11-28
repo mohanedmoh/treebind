@@ -30,8 +30,8 @@ import (
 
 // The paths that more than one test names.
 const (
-	fieldNodeSelector  = "spec.agent.nodeSelector"
-	fieldRunAsUser     = "spec.agent.runAsUser"
+	fieldFSGroup       = "spec.agent.fsGroup"
+	fieldClaims        = "spec.agent.resources.claims"
 	fieldPlacementMode = "spec.placement.mode"
 )
 
@@ -75,17 +75,28 @@ func TestUnimplementedFields(t *testing.T) {
 			}},
 		},
 		{
-			name: "run as user 0 is still a choice",
-			spec: treebindv1alpha1.TreebindSpec{Agent: &treebindv1alpha1.AgentSpec{RunAsUser: &zero}},
-			want: []string{fieldRunAsUser},
+			name: "fsGroup 0 is still a choice",
+			spec: treebindv1alpha1.TreebindSpec{Agent: &treebindv1alpha1.AgentSpec{FSGroup: &zero}},
+			want: []string{fieldFSGroup},
 		},
 		{
 			name: "a field from each block is listed in sorted order",
 			spec: treebindv1alpha1.TreebindSpec{
 				Placement: treebindv1alpha1.PlacementSpec{Mode: treebindv1alpha1.PlacementModeSidecar},
-				Agent:     &treebindv1alpha1.AgentSpec{NodeSelector: newAgentSpec().NodeSelector},
+				Agent: &treebindv1alpha1.AgentSpec{
+					FSGroup:   &zero,
+					Resources: &corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: testResourceClaim}}},
+				},
 			},
-			want: []string{fieldNodeSelector, fieldPlacementMode},
+			want: []string{fieldFSGroup, fieldClaims, fieldPlacementMode},
+		},
+		{
+			name: "every field that the operator applies is not listed",
+			spec: treebindv1alpha1.TreebindSpec{Agent: func() *treebindv1alpha1.AgentSpec {
+				agent := newAgentSpec()
+				agent.FSGroup = nil
+				return agent
+			}()},
 		},
 	}
 
@@ -99,76 +110,34 @@ func TestUnimplementedFields(t *testing.T) {
 	}
 }
 
-// TestUnimplementedFieldsAgent checks that each agent field is reported under
-// its own path, and that setting all of them lists every path once, sorted.
-func TestUnimplementedFieldsAgent(t *testing.T) {
+// The list in unimplementedFields is kept by hand. Each field of AgentSpec either changes the pod template, when it is
+// the only one set, or is reported, so that a field added to AgentSpec and not applied is not taken for supported.
+func TestEveryAgentFieldIsAppliedOrReported(t *testing.T) {
 	full := newAgentSpec()
-	fields := []struct {
-		path string
-		set  func(*treebindv1alpha1.AgentSpec)
-	}{
-		{"spec.agent.resources", func(a *treebindv1alpha1.AgentSpec) { a.Resources = full.Resources }},
-		{fieldNodeSelector, func(a *treebindv1alpha1.AgentSpec) { a.NodeSelector = full.NodeSelector }},
-		{"spec.agent.tolerations", func(a *treebindv1alpha1.AgentSpec) { a.Tolerations = full.Tolerations }},
-		{"spec.agent.priorityClassName", func(a *treebindv1alpha1.AgentSpec) { a.PriorityClassName = full.PriorityClassName }},
-		{"spec.agent.imagePullSecrets", func(a *treebindv1alpha1.AgentSpec) { a.ImagePullSecrets = full.ImagePullSecrets }},
-		{"spec.agent.labels", func(a *treebindv1alpha1.AgentSpec) { a.Labels = full.Labels }},
-		{"spec.agent.annotations", func(a *treebindv1alpha1.AgentSpec) { a.Annotations = full.Annotations }},
-		{fieldRunAsUser, func(a *treebindv1alpha1.AgentSpec) { a.RunAsUser = full.RunAsUser }},
-		{"spec.agent.runAsGroup", func(a *treebindv1alpha1.AgentSpec) { a.RunAsGroup = full.RunAsGroup }},
-		{"spec.agent.fsGroup", func(a *treebindv1alpha1.AgentSpec) { a.FSGroup = full.FSGroup }},
-	}
-
-	for _, field := range fields {
-		t.Run(field.path, func(t *testing.T) {
-			agent := &treebindv1alpha1.AgentSpec{}
-			field.set(agent)
-
-			got := unimplementedFields(&treebindv1alpha1.TreebindSpec{Agent: agent})
-			if want := []string{field.path}; !slices.Equal(got, want) {
-				t.Errorf("unimplementedFields() = %v, want %v", got, want)
-			}
-		})
-	}
-
-	t.Run("every field", func(t *testing.T) {
-		agent := &treebindv1alpha1.AgentSpec{}
-		want := make([]string, 0, len(fields)+1)
-		want = append(want, fieldPlacementMode)
-		for _, field := range fields {
-			field.set(agent)
-			want = append(want, field.path)
-		}
-		slices.Sort(want)
-
-		got := unimplementedFields(&treebindv1alpha1.TreebindSpec{
-			Placement: treebindv1alpha1.PlacementSpec{Mode: treebindv1alpha1.PlacementModeSidecar},
-			Agent:     agent,
-		})
-		if !slices.Equal(got, want) {
-			t.Errorf("unimplementedFields() = %v, want %v", got, want)
-		}
-	})
-}
-
-// The list in unimplementedFields is kept by hand. This test fails when a field
-// is added to AgentSpec without being added there, which would make the
-// condition report the new field as supported.
-func TestUnimplementedFieldsCoverEveryAgentField(t *testing.T) {
-	agent := newAgentSpec()
-	got := unimplementedFields(&treebindv1alpha1.TreebindSpec{Agent: agent})
-
-	value := reflect.ValueOf(agent).Elem()
+	without := mustDesiredStatefulSet(t, newTreebind(testTreebindName), testImage).Annotations[templateHashAnnotation]
+	value := reflect.ValueOf(full).Elem()
 	for i := range value.NumField() {
 		field := value.Type().Field(i)
 		if value.Field(i).IsZero() {
 			t.Errorf("newAgentSpec leaves AgentSpec.%s unset; set it so this test covers the field", field.Name)
 			continue
 		}
+		agent := &treebindv1alpha1.AgentSpec{}
+		reflect.ValueOf(agent).Elem().Field(i).Set(value.Field(i))
+		treebind := newTreebind(testTreebindName)
+		treebind.Spec.Agent = agent
+
 		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-		if path := "spec.agent." + name; !slices.Contains(got, path) {
-			t.Errorf("unimplementedFields does not report %s; add it, or the condition says the field is supported", path)
+		path := "spec.agent." + name
+		applied := mustDesiredStatefulSet(t, treebind, testImage).Annotations[templateHashAnnotation] != without
+		reported := slices.Contains(unimplementedFields(&treebind.Spec), path)
+		if applied == reported {
+			t.Errorf("%s: applied to the pod = %v and reported = %v, want exactly one", path, applied, reported)
 		}
+	}
+	claims := &treebindv1alpha1.AgentSpec{Resources: &corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: testResourceClaim}}}}
+	if got := unimplementedFields(&treebindv1alpha1.TreebindSpec{Agent: claims}); !slices.Equal(got, []string{fieldClaims}) {
+		t.Errorf("unimplementedFields() of resources.claims = %v, want %v", got, []string{fieldClaims})
 	}
 }
 
@@ -181,11 +150,11 @@ func TestSpecSupportedCondition(t *testing.T) {
 		t.Errorf("no fields: observedGeneration = %d, want 3", supported.ObservedGeneration)
 	}
 
-	ignored := specSupportedCondition([]string{fieldNodeSelector, fieldPlacementMode}, 4)
+	ignored := specSupportedCondition([]string{fieldFSGroup, fieldPlacementMode}, 4)
 	if ignored.Status != metav1.ConditionFalse || ignored.Reason != treebindv1alpha1.ReasonNotImplemented {
 		t.Errorf("two fields: got %s/%s, want False/NotImplemented", ignored.Status, ignored.Reason)
 	}
-	wantMessage := "Accepted but ignored until implemented: spec.agent.nodeSelector, spec.placement.mode"
+	wantMessage := "Accepted but ignored until implemented: spec.agent.fsGroup, spec.placement.mode"
 	if ignored.Message != wantMessage {
 		t.Errorf("two fields: message = %q, want %q", ignored.Message, wantMessage)
 	}
