@@ -312,15 +312,27 @@ type PathsSpec struct {
 	Exclude []string `json:"exclude,omitempty"`
 }
 
-// PlacementSpec says where the sync pod runs. The field is accepted now and
-// takes effect once the placement work lands; until then the operator reports
-// a value that is not implemented in the SpecSupported condition.
+// PlacementSpec says where the sync pod runs.
 type PlacementSpec struct {
 	// mode is standalone to run the sync pod on its own, or sidecar to run the
-	// sync container inside the application's pods.
+	// sync container inside the application's pods. sidecar is not implemented
+	// yet: the sync pod runs on its own, and the SpecSupported condition says so.
 	// +optional
 	// +kubebuilder:default=standalone
 	Mode PlacementMode `json:"mode,omitempty"`
+
+	// appSelector selects the pods of the application that uses the claim, in the
+	// namespace of the Treebind. Name pods that mount the claim, and only those.
+	// Unless the claim lists ReadWriteMany, or only ReadOnlyMany, the sync pod
+	// gets a required pod affinity to them, so that it runs on their node: it is
+	// Pending while there is none. A claim that is not there counts as one that
+	// one node mounts. Sync pods are never counted as the application's. The
+	// affinity holds when the sync pod is scheduled; the sync pod does not follow
+	// an application that moves to another node later. Without appSelector the
+	// scheduler puts the sync pod anywhere.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="appSelector needs an entry in matchLabels or matchExpressions: an empty selector would match every pod"
+	AppSelector *metav1.LabelSelector `json:"appSelector,omitempty"`
 }
 
 // AgentSpec overrides how the sync pod is scheduled and run. What the operator

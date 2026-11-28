@@ -375,11 +375,73 @@ spec:
                   placement says where the sync pod runs. It is defaulted as a whole so a
                   Treebind without it reads back as standalone.
                 properties:
+                  appSelector:
+                    description: |-
+                      appSelector selects the pods of the application that uses the claim, in the
+                      namespace of the Treebind. Name pods that mount the claim, and only those.
+                      Unless the claim lists ReadWriteMany, or only ReadOnlyMany, the sync pod
+                      gets a required pod affinity to them, so that it runs on their node: it is
+                      Pending while there is none. A claim that is not there counts as one that
+                      one node mounts. Sync pods are never counted as the application's. The
+                      affinity holds when the sync pod is scheduled; the sync pod does not follow
+                      an application that moves to another node later. Without appSelector the
+                      scheduler puts the sync pod anywhere.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                    x-kubernetes-validations:
+                    - message: 'appSelector needs an entry in matchLabels or matchExpressions:
+                        an empty selector would match every pod'
+                      rule: (has(self.matchLabels) && size(self.matchLabels) > 0)
+                        || (has(self.matchExpressions) && size(self.matchExpressions)
+                        > 0)
                   mode:
                     default: standalone
                     description: |-
                       mode is standalone to run the sync pod on its own, or sidecar to run the
-                      sync container inside the application's pods.
+                      sync container inside the application's pods. sidecar is not implemented
+                      yet: the sync pod runs on its own, and the SpecSupported condition says so.
                     enum:
                     - standalone
                     - sidecar

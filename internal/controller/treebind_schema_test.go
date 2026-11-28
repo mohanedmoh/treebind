@@ -593,6 +593,51 @@ var _ = Describe("Treebind schema", func() {
 			"spec.repository"),
 	)
 
+	DescribeTable("accepts an appSelector that selects by a label or by an expression",
+		func(name string, selector *metav1.LabelSelector) {
+			tb := newTreebind(name)
+			tb.Spec.Placement.AppSelector = selector
+
+			Expect(k8sClient.Create(ctx, tb)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, tb)).To(Succeed()) })
+
+			got := &treebindv1alpha1.Treebind{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tb), got)).To(Succeed())
+			Expect(got.Spec.Placement.AppSelector).To(Equal(selector))
+			Expect(got.Spec.Placement.Mode).To(Equal(treebindv1alpha1.PlacementModeStandalone))
+		},
+		Entry("by a label", "schema-selector-label",
+			&metav1.LabelSelector{MatchLabels: map[string]string{"app": "grafana"}}),
+		Entry("by an expression", "schema-selector-expression",
+			&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: "app", Operator: metav1.LabelSelectorOpExists},
+			}}),
+	)
+
+	// An empty selector selects every pod of the namespace. It is sent as unstructured, because the Go types leave an
+	// empty map and an empty list out.
+	DescribeTable("refuses an appSelector that selects every pod",
+		func(name string, selector map[string]any) {
+			fields, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newTreebind(name))
+			Expect(err).NotTo(HaveOccurred())
+			tb := &unstructured.Unstructured{Object: fields}
+			tb.SetGroupVersionKind(treebindv1alpha1.GroupVersion.WithKind("Treebind"))
+			Expect(unstructured.SetNestedMap(tb.Object, selector, "spec", "placement", "appSelector")).To(Succeed())
+
+			err = k8sClient.Create(ctx, tb)
+
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+			Expect(err).To(MatchError(And(ContainSubstring("spec.placement.appSelector"),
+				ContainSubstring("an empty selector would match every pod"))))
+		},
+		Entry("with nothing in it", "schema-selector-empty", map[string]any{}),
+		Entry("with an empty matchLabels", "schema-selector-no-labels", map[string]any{"matchLabels": map[string]any{}}),
+		Entry("with an empty matchExpressions", "schema-selector-no-expressions",
+			map[string]any{"matchExpressions": []any{}}),
+		Entry("with both empty", "schema-selector-both-empty",
+			map[string]any{"matchLabels": map[string]any{}, "matchExpressions": []any{}}),
+	)
+
 	It("tells the user what an ssh repository is missing", func() {
 		tb := newTreebind("schema-ssh-message")
 		tb.Spec.Repository.URL = sshRepositoryURL
