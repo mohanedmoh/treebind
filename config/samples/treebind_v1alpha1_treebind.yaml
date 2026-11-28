@@ -40,7 +40,10 @@ spec:
       - "*.swp"
   placement:
     mode: standalone
-  # The agent block is accepted but not implemented yet, so it stays commented out.
+  # The agent block overrides parts of the sync pod (docs/pod-security.md). fsGroup is
+  # accepted but not applied yet. A runAsUser changes who owns the agent's state
+  # directory, .treebind, on the claim: on a claim the agent used before as another
+  # user, the agent refuses it until it is given to the new user.
   # agent:
   #   resources:
   #     requests:

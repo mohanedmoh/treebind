@@ -48,6 +48,9 @@ even without the right to create pods
   only when nobody who may create a Treebind there should get past it.
 - **`labels`**: any label but the ones that the operator sets, so a NetworkPolicy, a Service or a PodDisruptionBudget
   that selects pods by label may select the sync pod.
+- **`annotations`**: any annotation but the ones that the operator sets and those of the deprecated AppArmor and seccomp
+  fields, which the operator leaves out. A mutating webhook that acts on annotations, such as a service mesh or a secret
+  injector, acts on the sync pod too, and may add containers or volumes to it.
 - **`imagePullSecrets`**: any Secret of the namespace, which the kubelet uses to pull the agent image. The image is the
   one the operator names, and the Secret is not mounted into the pod.
 - **`runAsUser` and `runAsGroup`**: any user and group but user 0. The pod stays non-root, keeps its seccomp profile

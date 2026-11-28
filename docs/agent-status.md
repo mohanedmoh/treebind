@@ -134,6 +134,20 @@ A setting of the operator that changes the pod template of every Treebind replac
 a new agent image, and turning `AGENT_ARBITRARY_USER_ID` (the chart value `agent.arbitraryUserID`) on or off
 ([any user ID](pod-security.md#any-user-id)).
 
+The operators before this release accepted `spec.agent` and ignored it. From this release on it applies
+([the overrides](pod-security.md#the-overrides-of-specagent)), so a Treebind that sets any field of it but `fsGroup` and
+`resources.claims` gets a new pod template at the upgrade, and its sync pod is replaced:
+
+- A `runAsUser` that is not 65532 runs the new pod as that user, with the `passwd` init container. On a claim that the agent
+  used before as 65532 the agent refuses its state directory with `GitDirUnsafe`
+  ([when the user ID changes](pod-security.md#when-the-user-id-changes)). The init container needs an agent image of this
+  release or newer, which `helm upgrade --reuse-values` and a pinned `agent.image` or `AGENT_IMAGE` do not give.
+- `runAsUser: 0` turns `Ready` `False` with `UnsupportedAgentUser`, and the old pod is left running.
+- A label value that a label cannot have stops the rollout with `ReconcileFailed`, and a priority class that does not exist
+  with `FailedCreate` in the events of the StatefulSet: the old pod is gone and no new one is made.
+
+Read `spec.agent` of your Treebinds before the upgrade: `kubectl get treebinds -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}: {.spec.agent}{"\n"}{end}'`.
+
 ## The cluster has to allow the call
 
 The operator calls the sync pod on port 8080. In a namespace with a default-deny
@@ -204,7 +218,7 @@ says `the loop of the agent did not beat within what it promised`, with how late
 | The same, with `BranchGone` | The repository has no such branch, or no commit at all yet | Put a commit on the branch, or set `spec.repository.branch` to one that exists. A Treebind that syncs in both directions turns ready by itself when its first commit is pushed |
 | The same, and the `Pull` check is `Skipped` with `NotChecked` | The volume, the lock or the checkout has not passed | The check that failed, in the same report |
 | There is no sync pod, and `Ready` is `False` with `UnsupportedRepositoryScheme` | `spec.repository.url` has the scheme `http://`, which the agent refuses, so the operator creates no sync pod. A sync pod that the Treebind had is left as it was, and `Synced` says `AgentOutdated` for it | Use an `ssh://` or `https://` address: [the checkout](checkout.md#things-to-know) says why |
-| There is no new sync pod, and `Ready` is `False` with `UnsupportedAgentUser` | `spec.agent.runAsUser` is `0`, and the sync pod does not run as root. The operator creates or changes no sync object, and a sync pod that the Treebind had is left as it was | Set another user, or leave `runAsUser` out ([the overrides of the sync pod](pod-security.md#the-overrides-of-specagent)) |
+| There is no new sync pod, and `Ready` is `False` with `UnsupportedAgentUser` | `spec.agent.runAsUser` is `0`, and the sync pod does not run as root. The operator creates or changes no sync object, and a sync pod that the Treebind had is left as it was and runs on: `Synced` and `Conflict` turn `Unknown` with `AgentOutdated`, since its reports are of the template before | Set another user, or leave `runAsUser` out ([the overrides of the sync pod](pod-security.md#the-overrides-of-specagent)) |
 | `Ready` is `False` with `ReconcileFailed`, and the message holds `spec.template` | The API server refused the StatefulSet for what `spec.agent` gives the pod, such as a label value that a label cannot have, or a quantity that it does not take. The message gives its words | The field that the message names, under `spec.agent` |
 | The pod is not there, `Ready` is `False` with `SyncPodNotReady`, and `kubectl describe statefulset <name>-sync` shows `FailedCreate` | The StatefulSet was taken, but its pod was refused when it was made: a priority class that does not exist, a quota, or the pod security admission of the namespace | What the event says. A priority class has to exist before the pod is made |
 | The pod is `1/1`, and `Ready` is `False` with `NotSynced` | A step of the sync failed for a reason that a person puts right | `Synced`: its reason and message, then the check of the same name in the report ([`Synced` and `Ready`](#ready)) |
