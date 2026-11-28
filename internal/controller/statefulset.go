@@ -50,6 +50,10 @@ const (
 	sshMountPath        = "/etc/treebind/ssh"
 	knownHostsMountPath = "/etc/treebind/known-hosts"
 
+	// managedByLabel is on every object that the operator makes, the sync pod included, with managedByOperator.
+	managedByLabel    = "app.kubernetes.io/managed-by"
+	managedByOperator = "treebind-operator"
+
 	agentContainerName   = "agent"
 	dataVolumeName       = "data"
 	sshVolumeName        = "ssh-key"
@@ -98,7 +102,7 @@ func podLabels(treebind *treebindv1alpha1.Treebind) map[string]string {
 
 func objectLabels(treebind *treebindv1alpha1.Treebind) map[string]string {
 	labels := podLabels(treebind)
-	labels["app.kubernetes.io/managed-by"] = "treebind-operator"
+	labels[managedByLabel] = managedByOperator
 	return labels
 }
 
@@ -164,12 +168,16 @@ func desiredService(treebind *treebindv1alpha1.Treebind) *corev1.Service {
 
 // desiredStatefulSet returns the StatefulSet that runs the single sync pod of
 // a Treebind, with the hash of its pod template in templateHashAnnotation. The
-// owner reference is added by the caller.
-func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agent agentSettings) (*appsv1.StatefulSet, error) {
+// owner reference is added by the caller. claimModes are the access modes of the
+// claim, none when they are not known; they matter only to a Treebind with an
+// appSelector (appAffinity).
+func desiredStatefulSet(
+	treebind *treebindv1alpha1.Treebind, agent agentSettings, claimModes ...corev1.PersistentVolumeAccessMode,
+) (*appsv1.StatefulSet, error) {
 	if err := agent.validate(); err != nil {
 		return nil, err
 	}
-	template, err := desiredPodTemplate(treebind, agent)
+	template, err := desiredPodTemplate(treebind, agent, claimModes)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +215,14 @@ func desiredStatefulSet(treebind *treebindv1alpha1.Treebind, agent agentSettings
 // report is of. The variable is a function of the rest of the template, so the template changes exactly when it did
 // without the variable, and once more when the operator first sets it: every sync pod is replaced at that upgrade, and
 // that is meant.
-func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings) (corev1.PodTemplateSpec, error) {
+//
+// The affinity to the application is not part of the rest that the hash covers. It is where the pod runs and changes
+// nothing that the agent does, and it depends on the claim, which the status poller would otherwise have to read to
+// expect the same hash. A change of it still replaces the pod: the annotation of the StatefulSet covers the whole
+// template.
+func desiredPodTemplate(
+	treebind *treebindv1alpha1.Treebind, agent agentSettings, claimModes []corev1.PersistentVolumeAccessMode,
+) (corev1.PodTemplateSpec, error) {
 	hash, err := agentTemplateHash(treebind, agent)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, err
@@ -218,13 +233,15 @@ func desiredPodTemplate(treebind *treebindv1alpha1.Treebind, agent agentSettings
 	}
 	container := &template.Spec.Containers[0]
 	container.Env = append(container.Env, corev1.EnvVar{Name: agentconfig.EnvTemplateHash, Value: hash})
+	template.Spec.Affinity = appAffinity(treebind.Spec.Placement.AppSelector, claimModes)
 	return template, nil
 }
 
 // agentTemplateHash returns the hash that the agent of the Treebind is given in its pod template, the hash of the rest
-// of the template that the spec and the settings of the operator give. The status poller compares the hash in a report
-// with it to tell a report of the current spec from one of the spec before, so this is the one place it is computed:
-// a poller that computed it another way would take every report for one of another template.
+// of the template that the spec and the settings of the operator give, without the affinity (desiredPodTemplate). The
+// status poller compares the hash in a report with it to tell a report of the current spec from one of the spec before,
+// so this is the one place it is computed: a poller that computed it another way would take every report for one of
+// another template.
 func agentTemplateHash(treebind *treebindv1alpha1.Treebind, agent agentSettings) (string, error) {
 	template, err := podTemplateWithoutHash(treebind, agent)
 	if err != nil {
@@ -234,7 +251,7 @@ func agentTemplateHash(treebind *treebindv1alpha1.Treebind, agent agentSettings)
 }
 
 // podTemplateWithoutHash returns the pod template that the spec and the settings of the operator say, without the variable
-// that holds its hash.
+// that holds its hash and without the affinity.
 func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSettings) (corev1.PodTemplateSpec, error) {
 	mountPath := treebind.Spec.Target.MountPath
 	if mountPath == "" {
@@ -541,11 +558,16 @@ func (r *TreebindReconciler) ensureService(ctx context.Context, treebind *treebi
 // desired state, and returns it as the API server last reported it. It always
 // restores one replica, rewrites the pod template only when its hash changed,
 // and sets the fields a StatefulSet cannot change only on creation, so a
-// reconcile with nothing to do writes nothing.
+// reconcile with nothing to do writes nothing. A claim that cannot be read is an
+// error, and the StatefulSet is left as it is.
 func (r *TreebindReconciler) ensureStatefulSet(
 	ctx context.Context, treebind *treebindv1alpha1.Treebind,
 ) (*appsv1.StatefulSet, error) {
-	desired, err := desiredStatefulSet(treebind, r.agentSettings())
+	claimModes, err := r.claimAccessModes(ctx, treebind)
+	if err != nil {
+		return nil, err
+	}
+	desired, err := desiredStatefulSet(treebind, r.agentSettings(), claimModes...)
 	if err != nil {
 		return nil, fmt.Errorf("build StatefulSet for Treebind %s/%s: %w", treebind.Namespace, treebind.Name, err)
 	}

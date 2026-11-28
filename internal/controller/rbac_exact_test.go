@@ -39,7 +39,9 @@ import (
 //   - the events of a change of Synced and Conflict, which the recorder of the events.k8s.io API creates, and
 //     patches when it counts one again (docs/adr/0038);
 //   - a Get of the sync pod by its name, past the cache, while it is not ready, to say whether its container
-//     was killed for memory: get, and no list or watch.
+//     was killed for memory: get, and no list or watch;
+//   - a Get of the claim of a Treebind with an appSelector by its name, past the cache, for its access modes
+//     (docs/adr/0046): get, and no list or watch.
 //
 // It deletes nothing: the garbage collector removes what a deleted Treebind owns.
 const (
@@ -64,6 +66,7 @@ var managerGrants = map[string][]string{
 	"/" + configMaps:                         {verbCreate, verbPatch},
 	"events.k8s.io/events":                   {verbCreate, verbPatch},
 	"/pods":                                  {verbGet},
+	"/" + claims:                             {verbGet},
 }
 
 // volumeReadGrants is what the optional role reads: the volumes and the storage classes that the status of a

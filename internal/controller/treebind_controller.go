@@ -57,10 +57,11 @@ type TreebindReconciler struct {
 	// Metrics holds the metrics of the Treebinds, which the status poller shares. The reconcile records in it the
 	// conditions that it owns, Ready and SpecSupported (metrics.go).
 	Metrics *Metrics
-	// APIReader reads the sync pod from the API server and not from the cache, so that the operator needs only get on
-	// pods and not a watch of every pod (docs/rbac.md). The reconcile reads the pod only while it is not ready, to say
-	// whether the scheduler cannot place it, its node is not ready or its container was killed for memory.
-	// SetupWithManager requires it, and a reconciler without one, as a test makes, reads no pod.
+	// APIReader reads the sync pod and the claim from the API server and not from the cache, so that the operator needs
+	// only get on them and not a watch of every one (docs/rbac.md). The reconcile reads the pod only while it is not
+	// ready, to say whether the scheduler cannot place it, its node is not ready or its container was killed for
+	// memory, and the claim only of a Treebind with an appSelector, for its access modes. SetupWithManager requires it,
+	// and a reconciler without one, as a test makes, reads neither.
 	APIReader client.Reader
 
 	// now is time.Now unless a test replaces it.
@@ -86,6 +87,7 @@ func (r *TreebindReconciler) clock() time.Time {
 // status, and it creates and updates the StatefulSet and the Service that a Treebind owns, which the garbage
 // collector deletes with it. The finalizers verb is for the owner reference of what it creates, which sets
 // blockOwnerDeletion. It gets the sync pod by its name, and lists and watches no pod, to say why the pod is not ready.
+// It gets the claim of a Treebind with an appSelector by its name, for its access modes (placement.go).
 // The ConfigMap of the keys is in statuskeys.go. rbac_exact_test.go holds each list.
 // +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds,verbs=get;list;watch
 // +kubebuilder:rbac:groups=treebind.example.org,resources=treebinds/status,verbs=update
@@ -93,6 +95,7 @@ func (r *TreebindReconciler) clock() time.Time {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get
 
 // awaitingReportMessage is the message of the Synced and Conflict conditions
 // until the sync agent's first report arrives.
@@ -426,7 +429,8 @@ func (r *TreebindReconciler) whySyncPodNotReady(
 		return ready
 	}
 	if scheduling := unschedulable(pod); scheduling != nil {
-		return unschedulableCondition(ready, pod.Name, scheduling.Message)
+		beside := besideTheApplicationOnly(statefulSet.Spec.Template.Spec.Affinity)
+		return unschedulableCondition(ready, pod.Name, scheduling.Message, beside)
 	}
 	if onNodeThatIsNotReady(pod) {
 		return nodeNotReadyCondition(ready, pod.Name, pod.Spec.NodeName)
@@ -458,8 +462,10 @@ func unschedulable(pod *corev1.Pod) *corev1.PodCondition {
 
 // unschedulableCondition returns the Ready condition of a sync pod that is Pending because the scheduler cannot place it,
 // with the reason SyncPodUnschedulable and the scheduler's words, cut as the error of a failed reconcile is. While it
-// is Pending the pod has no address, so the operator cannot read the agent, and nothing is synced.
-func unschedulableCondition(ready metav1.Condition, pod, scheduler string) metav1.Condition {
+// is Pending the pod has no address, so the operator cannot read the agent, and nothing is synced. beside says that the
+// pod has the affinity to the application, which the message names: the scheduler's words say that pod affinity rules
+// did not match, and not that there is no pod of the application to run beside.
+func unschedulableCondition(ready metav1.Condition, pod, scheduler string, beside bool) metav1.Condition {
 	why := strings.TrimSpace(scheduler)
 	if len(why) > maxFailureText {
 		why = strings.ToValidUTF8(why[:maxFailureText], "") + "..."
@@ -468,8 +474,12 @@ func unschedulableCondition(ready metav1.Condition, pod, scheduler string) metav
 		why = "kubectl describe pod " + pod + " says why"
 	}
 	ready.Reason = treebindv1alpha1.ReasonSyncPodUnschedulable
-	ready.Message = fmt.Sprintf("%s: the sync pod %s is Pending, because the scheduler cannot place it: %s",
-		ready.Message, pod, why)
+	only := ""
+	if beside {
+		only = ", and it may only run on the node of a pod that spec.placement.appSelector selects"
+	}
+	ready.Message = fmt.Sprintf("%s: the sync pod %s is Pending, because the scheduler cannot place it%s: %s",
+		ready.Message, pod, only, why)
 	return ready
 }
 
@@ -592,9 +602,9 @@ func (r *TreebindReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Metrics == nil {
 		return errors.New("the metrics of the Treebinds are required")
 	}
-	// Without it Ready would not say why the sync pod does not run.
+	// Without it Ready would not say why the sync pod does not run, and no claim would be read.
 	if r.APIReader == nil {
-		return errors.New("a reader of the sync pods is required")
+		return errors.New("a reader of the sync pods and the claims is required")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&treebindv1alpha1.Treebind{}).
