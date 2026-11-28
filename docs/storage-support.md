@@ -17,6 +17,45 @@ and as people report results.
 | Azure Files / Disk | | Not tested | | | | |
 | GCP Filestore / PD | | Not tested | | | | |
 
+## Status values
+
+- **Supported**: The conformance suite has successfully passed on that storage
+  class. This is the only condition under which a storage class may be marked
+  Supported.
+- **Partial**: Some checks passed, but others failed. The row must explicitly
+  identify which checks failed.
+- **Failed**: The conformance run failed.
+- **Not tested**: No valid conformance result is available.
+
+A storage class is never advertised as Supported without a passing conformance
+run. Other evidence, benchmarks or manual checks do not qualify.
+
+## Seen by hand
+
+These notes are from runs by hand. They are not conformance results and change no
+row of the matrix.
+
+- **NFS mounted with `vers=4.1` failed to list directories.** With the userspace
+  NFS-Ganesha server of `registry.k8s.io/sig-storage/nfs-provisioner:v4.0.8` and
+  nodes that run Linux 7.0, listings of a directory of a volume failed time and again
+  with `Remote I/O error`, on both nodes. Volumes of the same server that were mounted
+  with `vers=4.0` or `vers=3` listed every time. If a directory of an NFS volume fails
+  to list now and then, try `vers=4.0` in the `mountOptions` of the StorageClass or of
+  the PersistentVolume
+  ([#303](https://github.com/mohanedmoh/treebind/issues/303)).
+
+## Report a result
+
+Once the suite exists (`make conformance STORAGE_CLASS=<name>`), run it against
+a cluster that uses your storage class and open a
+[storage conformance report](https://github.com/mohanedmoh/treebind/issues/new?template=conformance_report.yml).
+Please remove credentials and private hostnames from the output first.
+
+Community results arrive through that form. Use the date the report issue was
+opened as the `Date` value, and link that report issue in the `Report` column so
+anyone can check the result. The form has no separate date field; the report
+issue is the source of the date.
+
 ## Access modes and where the sync pod runs
 
 A `ReadWriteOnce` claim is mounted on one node at a time, so the sync pod and the application have to run on the same
@@ -34,7 +73,9 @@ spec:
 ```
 
 `appSelector` is a label selector for pods in the namespace of the Treebind, and needs an entry in `matchLabels` or
-`matchExpressions`. It is newer than 0.0.1-alpha.5. The operator reads the access modes that the claim asks for
+`matchExpressions`. One that Kubernetes does not take, such as one with an unknown operator, is accepted when it is
+written and then makes `Ready` `False` with `ReconcileFailed`, whatever the claim: no sync pod is made or changed until
+it is put right. `appSelector` is newer than 0.0.1-alpha.5. The operator reads the access modes that the claim asks for
 (`spec.accessModes`), and not those of the volume that it is bound to:
 
 | The claim lists | The sync pod |
@@ -44,6 +85,10 @@ spec:
 | `ReadWriteOncePod` | Gets the same affinity, but only one pod can use such a claim: [see below](#readwriteoncepod) |
 | `ReadOnlyMany` alone | Runs anywhere. The agent has to write to the volume, which such a claim does not promise |
 | The claim is not there yet | Waits as for `ReadWriteOnce`, until the operator has read the claim, which it asks again about every 30 seconds while the sync pod is not ready |
+
+A read of the claim that fails for another reason does not move a sync pod that there is: it keeps its affinity, the
+operator tries again, and the rest of the sync objects is kept up to date meanwhile. `Ready` says `ReconcileFailed`
+only when no sync pod was made yet, or when the operator may not read the claim.
 
 Without `appSelector` the operator does not read the claim, and the scheduler puts the sync pod anywhere, as before.
 That is right for a `ReadWriteMany` claim. For a `ReadWriteOnce` claim on a cluster of several nodes the sync pod can
@@ -92,42 +137,3 @@ wherever they run, and Treebind cannot sync such a claim while the application u
 With `appSelector`, and a selector that names the pod that uses the claim, the sync pod is not scheduled before that pod,
 so it does not take the claim first and leave the application `Pending`: it stays `Pending` itself. Without
 `appSelector`, whichever pod is scheduled first has the claim, and the other is `Pending`.
-
-## Status values
-
-- **Supported**: The conformance suite has successfully passed on that storage
-  class. This is the only condition under which a storage class may be marked
-  Supported.
-- **Partial**: Some checks passed, but others failed. The row must explicitly
-  identify which checks failed.
-- **Failed**: The conformance run failed.
-- **Not tested**: No valid conformance result is available.
-
-A storage class is never advertised as Supported without a passing conformance
-run. Other evidence, benchmarks or manual checks do not qualify.
-
-## Seen by hand
-
-These notes are from runs by hand. They are not conformance results and change no
-row of the matrix.
-
-- **NFS mounted with `vers=4.1` failed to list directories.** With the userspace
-  NFS-Ganesha server of `registry.k8s.io/sig-storage/nfs-provisioner:v4.0.8` and
-  nodes that run Linux 7.0, listings of a directory of a volume failed time and again
-  with `Remote I/O error`, on both nodes. Volumes of the same server that were mounted
-  with `vers=4.0` or `vers=3` listed every time. If a directory of an NFS volume fails
-  to list now and then, try `vers=4.0` in the `mountOptions` of the StorageClass or of
-  the PersistentVolume
-  ([#303](https://github.com/mohanedmoh/treebind/issues/303)).
-
-## Report a result
-
-Once the suite exists (`make conformance STORAGE_CLASS=<name>`), run it against
-a cluster that uses your storage class and open a
-[storage conformance report](https://github.com/mohanedmoh/treebind/issues/new?template=conformance_report.yml).
-Please remove credentials and private hostnames from the output first.
-
-Community results arrive through that form. Use the date the report issue was
-opened as the `Date` value, and link that report issue in the `Report` column so
-anyone can check the result. The form has no separate date field; the report
-issue is the source of the date.
