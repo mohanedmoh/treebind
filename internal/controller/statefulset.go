@@ -30,7 +30,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -395,13 +394,7 @@ func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSett
 				ReadinessProbe: statusProbe(status.ReadyPath),
 				LivenessProbe:  statusProbe(status.HealthPath),
 				VolumeMounts:   mounts,
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("10m"),
-						corev1.ResourceMemory: resource.MustParse("32Mi"),
-					},
-					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
-				},
+				Resources:      defaultAgentResources(),
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: &noEscalation,
 					ReadOnlyRootFilesystem:   &readOnlyRoot,
@@ -411,10 +404,16 @@ func podTemplateWithoutHash(treebind *treebindv1alpha1.Treebind, agent agentSett
 			Volumes: volumes,
 		},
 	}
-	// Only when the operator is told to, so that a pod template stays the one it was (docs/adr/0042).
-	if agent.ArbitraryUserID {
+	// What spec.agent says of the pod, before the passwd file, whose init container takes the resources of the sync
+	// container (docs/adr/0044).
+	withAgentPodSpec(&template, treebind.Spec.Agent)
+	// Only when the operator is told to, or spec.agent names a user that the image has no entry for, so that a pod
+	// template stays the one it was (docs/adr/0042).
+	if agent.ArbitraryUserID || needsPasswdFile(treebind.Spec.Agent) {
 		withPasswdFile(&template, agent.Image)
 	}
+	// Last, so that a label or an annotation that the operator sets keeps its value.
+	withAgentMetadata(&template.ObjectMeta, treebind.Spec.Agent)
 	return template, nil
 }
 

@@ -50,3 +50,17 @@ func unsupportedRepositorySchemeCondition(generation int64) metav1.Condition {
 		ObservedGeneration: generation,
 	}
 }
+
+// unsupportedAgentUserCondition is Ready for a Treebind whose spec.agent.runAsUser is 0. The sync pod keeps runAsNonRoot,
+// which the kubelet holds against user 0, so the operator makes no pod of it and leaves the one there was as it is
+// (docs/adr/0044).
+func unsupportedAgentUserCondition(generation int64) metav1.Condition {
+	return metav1.Condition{
+		Type:   treebindv1alpha1.ConditionReady,
+		Status: metav1.ConditionFalse,
+		Reason: treebindv1alpha1.ReasonUnsupportedAgentUser,
+		Message: "spec.agent.runAsUser is 0, and the sync pod does not run as root: it keeps runAsNonRoot. Set another " +
+			"user, or leave runAsUser out (see docs/pod-security.md). No sync pod is created or changed until then",
+		ObservedGeneration: generation,
+	}
+}

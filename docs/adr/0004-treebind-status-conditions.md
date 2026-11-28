@@ -14,6 +14,8 @@
 - Extended by: [0040](0040-ready-names-a-sync-pod-that-cannot-be-placed-and-a-node-that-is-not-ready-and-synced-is-unknown-without-a-report.md),
   which gives `Ready` two more reasons of its own: `SyncPodUnschedulable` for a sync pod that the scheduler cannot place, and
   `SyncPodNodeNotReady` for a sync pod whose node is not ready
+- Extended by: [0044](0044-the-operator-applies-spec-agent-to-the-sync-pod-except-fsgroup.md), which gives `Ready` the reason
+  `UnsupportedAgentUser` for `spec.agent.runAsUser: 0`, and makes `SyncPodOOMKilled` name the `passwd` init container too
 
 ## Context
 

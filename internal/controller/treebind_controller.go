@@ -162,9 +162,11 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	// The agent refuses an http:// address at start, so a sync pod made for one would only crash (repository_scheme.go).
 	plainHTTP := usesPlainHTTP(treebind.Spec.Repository.URL)
+	// The sync pod keeps runAsNonRoot, so the kubelet would refuse a pod for root (agent_overrides.go).
+	rootUser := runsAsRoot(treebind.Spec.Agent)
 	var statefulSet *appsv1.StatefulSet
 	var ensureErr error
-	if !plainHTTP {
+	if !plainHTTP && !rootUser {
 		statefulSet, ensureErr = r.ensureSyncObjects(ctx, treebind)
 		if ensureErr != nil && resolvesOnRetry(ctx, ensureErr) {
 			return ctrl.Result{}, ensureErr
@@ -176,6 +178,8 @@ func (r *TreebindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	switch {
 	case plainHTTP:
 		ready = unsupportedRepositorySchemeCondition(treebind.Generation)
+	case rootUser:
+		ready = unsupportedAgentUserCondition(treebind.Generation)
 	case ensureErr != nil:
 		ready = reconcileFailedCondition(ensureErr, treebind.Generation)
 	default:
@@ -243,36 +247,25 @@ func (r *TreebindReconciler) ensureSyncObjects(
 }
 
 // unimplementedFields returns the dotted JSON paths of the spec fields that are
-// set but have no effect yet, sorted. A pointer counts as set once it points at
-// a value, because runAsUser: 0 is a choice, and a collection counts as set
-// once it has an entry.
+// set but have no effect yet, sorted: the sidecar placement, the claims of
+// spec.agent.resources and spec.agent.fsGroup. A pointer counts as set once it
+// points at a value, because fsGroup: 0 is a choice, and a collection counts as
+// set once it has an entry.
 func unimplementedFields(spec *treebindv1alpha1.TreebindSpec) []string {
 	var fields []string
 	if spec.Placement.Mode == treebindv1alpha1.PlacementModeSidecar {
 		fields = append(fields, "spec.placement.mode")
 	}
 
+	// The rest of spec.agent is applied to the sync pod (agent_overrides.go). The claims of the resources have no
+	// counterpart in the pod, and fsGroup is held back because the agent refuses its own directory after the kubelet
+	// has walked the claim for one (docs/adr/0044).
 	if agent := spec.Agent; agent != nil {
-		resources := agent.Resources
-		for _, field := range []struct {
-			path string
-			set  bool
-		}{
-			{"spec.agent.resources", resources != nil &&
-				(len(resources.Limits) > 0 || len(resources.Requests) > 0 || len(resources.Claims) > 0)},
-			{"spec.agent.nodeSelector", len(agent.NodeSelector) > 0},
-			{"spec.agent.tolerations", len(agent.Tolerations) > 0},
-			{"spec.agent.priorityClassName", agent.PriorityClassName != ""},
-			{"spec.agent.imagePullSecrets", len(agent.ImagePullSecrets) > 0},
-			{"spec.agent.labels", len(agent.Labels) > 0},
-			{"spec.agent.annotations", len(agent.Annotations) > 0},
-			{"spec.agent.runAsUser", agent.RunAsUser != nil},
-			{"spec.agent.runAsGroup", agent.RunAsGroup != nil},
-			{"spec.agent.fsGroup", agent.FSGroup != nil},
-		} {
-			if field.set {
-				fields = append(fields, field.path)
-			}
+		if agent.Resources != nil && len(agent.Resources.Claims) > 0 {
+			fields = append(fields, "spec.agent.resources.claims")
+		}
+		if agent.FSGroup != nil {
+			fields = append(fields, "spec.agent.fsGroup")
 		}
 	}
 
@@ -525,8 +518,26 @@ const recentKill = 10 * time.Minute
 // memory limit of the sync container, when the container is not ready and was killed for memory (#256): it is ended by
 // the kill now, it waits to start again after one, or it runs again after one that ended at most recentKill before now.
 // Git needs the memory, on a large file, and every restart tries the same update and is killed again, which
-// SyncPodNotReady alone does not say. Any other pod leaves the condition as it is.
+// SyncPodNotReady alone does not say. The passwd init container is looked at the same way, and first. Any other pod
+// leaves the condition as it is.
 func oomKilledCondition(ready metav1.Condition, pod *corev1.Pod, now time.Time) metav1.Condition {
+	// The passwd init container has the memory limit of the sync container (docs/adr/0042), and one of spec.agent that is
+	// too low for it kills it before the sync container starts. Once it has written the file, a kill before is over.
+	for _, status := range pod.Status.InitContainerStatuses {
+		done := status.State.Terminated != nil && status.State.Terminated.ExitCode == 0
+		if status.Name != passwdContainerName || done || !killedForMemoryLately(status, now) {
+			continue
+		}
+		cause := "the passwd init container was killed for memory"
+		for _, container := range pod.Spec.InitContainers {
+			if limit, ok := container.Resources.Limits[corev1.ResourceMemory]; ok && container.Name == passwdContainerName {
+				cause = "the passwd init container was killed for using more than its memory limit of " + limit.String()
+			}
+		}
+		ready.Reason = treebindv1alpha1.ReasonSyncPodOOMKilled
+		ready.Message = fmt.Sprintf("%s: %s (%s)", ready.Message, cause, reasonOOMKilled)
+		return ready
+	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.Name != agentContainerName || status.Ready {
 			continue

@@ -5,6 +5,8 @@
 - Issue: #95
 - Superseded in part by: [0041](0041-what-the-breaking-release-before-beta-changes-in-the-api.md), which takes `sidecar` out of
   `spec.placement.mode`
+- Superseded in part by: [0044](0044-the-operator-applies-spec-agent-to-the-sync-pod-except-fsgroup.md), which applies every field of
+  `spec.agent` but `fsGroup` and `resources.claims` to the sync pod
 
 ## Context
 

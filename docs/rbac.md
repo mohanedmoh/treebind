@@ -33,6 +33,33 @@ the operator makes, and stay (see [deleting a Treebind](deleting-a-treebind.md))
 Tests hold each of these on every role that the repository ships, in the kustomize base and in the chart, and
 hold each list above exactly, so a verb cannot be added by accident.
 
+## What a Treebind chooses for its sync pod
+
+The operator makes the sync pod, so a person who may create or change a Treebind chooses, through
+`spec.agent`, some of what a person who may create a pod chooses, for that one pod in the namespace of the Treebind,
+even without the right to create pods
+([the overrides](pod-security.md#the-overrides-of-specagent),
+[ADR 0044](adr/0044-the-operator-applies-spec-agent-to-the-sync-pod-except-fsgroup.md)):
+
+- **`priorityClassName`**: any priority class of the cluster, so the sync pod may preempt pods of a lower priority. A
+  ResourceQuota with a `scopeSelector` on `PriorityClass` in the namespace limits which classes it may use, as it does
+  for any pod.
+- **`tolerations` and `nodeSelector`**: the nodes it may run on, tainted ones included. A taint keeps the sync pod away
+  only when nobody who may create a Treebind there should get past it.
+- **`labels`**: any label but the ones that the operator sets, so a NetworkPolicy, a Service or a PodDisruptionBudget
+  that selects pods by label may select the sync pod.
+- **`annotations`**: any annotation but the ones that the operator sets and those of the deprecated AppArmor and seccomp
+  fields, which the operator leaves out. A mutating webhook that acts on annotations, such as a service mesh or a secret
+  injector, acts on the sync pod too, and may add containers or volumes to it.
+- **`imagePullSecrets`**: any Secret of the namespace, which the kubelet uses to pull the agent image. The image is the
+  one the operator names, and the Secret is not mounted into the pod.
+- **`runAsUser` and `runAsGroup`**: any user and group but user 0. The pod stays non-root, keeps its seccomp profile
+  and drops every capability, so the pod security admission of the namespace sees the same pod but for the IDs.
+- **`resources`**: requests and limits, within the quotas and LimitRanges of the namespace.
+
+The pod security admission and quotas of the namespace hold for the sync pod as for any other: it is made in that
+namespace, by the StatefulSet controller.
+
 ## Install in some namespaces only
 
 By default the operator serves the Treebinds of every namespace, and its role is a ClusterRole. With the chart

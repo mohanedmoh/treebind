@@ -149,10 +149,13 @@ func TestTheHashVariableChangesWithTheTemplateAndOnlyWithIt(t *testing.T) {
 			tb.Spec.Commit = &treebindv1alpha1.CommitSpec{}
 			tb.Spec.Paths = &treebindv1alpha1.PathsSpec{Include: []string{}, Exclude: []string{}}
 		}},
-		{name: "spec.agent and spec.placement, which the operator ignores", mutate: func(tb *treebindv1alpha1.Treebind) {
-			tb.Spec.Agent = newAgentSpec()
+		{name: "what the operator ignores of spec.agent, and spec.placement", mutate: func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Agent = &treebindv1alpha1.AgentSpec{FSGroup: newAgentSpec().FSGroup}
 			tb.Spec.Placement.Mode = treebindv1alpha1.PlacementModeSidecar
 		}},
+		{name: "spec.agent", mutate: func(tb *treebindv1alpha1.Treebind) {
+			tb.Spec.Agent = newAgentSpec()
+		}, wantChange: true},
 		{name: "another generation of the same spec", mutate: func(tb *treebindv1alpha1.Treebind) {
 			tb.Generation += 7
 		}},

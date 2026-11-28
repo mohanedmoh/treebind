@@ -86,9 +86,53 @@ when they match the branch and refuses them with `DirectoryNotEmpty` when they d
 synced are group-writable, as below, so they stay writable for a user in the same
 group.
 
-`spec.agent.runAsUser`, `runAsGroup` and `fsGroup` exist in the API but are not
-applied yet. A Treebind that sets them reports `SpecSupported=False` with the
-reason `NotImplemented`.
+`spec.agent.runAsUser` changes the user ID of the sync pod, and the same applies:
+see [the overrides of `spec.agent`](#the-overrides-of-specagent).
+
+## The overrides of spec.agent
+
+A Treebind can change some of its sync pod with `spec.agent`. What the operator sets
+itself stays: `runAsNonRoot`, the seccomp profile, the security context of the
+container, the labels that select the pod and the annotations the operator puts on
+it. [ADR 0044](adr/0044-the-operator-applies-spec-agent-to-the-sync-pod-except-fsgroup.md)
+has the reasons. Each field that is set changes the pod template, so the sync pod is
+replaced once when you set or change one.
+
+| Field | What it does |
+| :-- | :-- |
+| `resources` | The requests and limits of the sync container. Each one takes the place of the default of its resource (requests of `10m` CPU and `32Mi` memory, a limit of `128Mi` memory). A default limit below a request that you set is raised to it, and a default request above a limit that you set is lowered to it. A request above a limit, both set, is refused by the API server. `claims` is not applied |
+| `nodeSelector`, `tolerations`, `priorityClassName`, `imagePullSecrets` | Those of the pod, as set |
+| `labels`, `annotations` | Added to the pod. A key that the operator sets keeps the operator's value. The annotations of the deprecated security fields, `container.apparmor.security.beta.kubernetes.io/*`, `seccomp.security.alpha.kubernetes.io/*` and `container.seccomp.security.alpha.kubernetes.io/*`, are left out, so that they cannot loosen the profile of the pod |
+| `runAsUser`, `runAsGroup` | The user and the group of the pod, the init container's too. `0` is refused, and a user without a group gets group 65532 (below) |
+| `fsGroup` | Not applied yet, and reported in `SpecSupported` (below) |
+
+- **A user other than 65532**, the image's, gives that sync pod the `passwd` init
+  container of [any user ID](#any-user-id), whatever the operator's setting, because
+  ssh refuses a user without a passwd entry. Its `emptyDir` means that `kubectl drain`
+  of the node needs `--delete-emptydir-data`. The init container needs an agent image
+  of this release or newer, as with the setting: mind a pinned `agent.image` or
+  `AGENT_IMAGE` and `helm upgrade --reuse-values`.
+- **A user without a group** runs in group 65532, the image's, and not in group 0,
+  which is what the runtime gives a pod that sets only `runAsUser`. The files of the
+  claim are shared with that group (below). Set `runAsGroup` for another.
+- **`runAsUser: 0`** gets no sync pod: the kubelet would refuse to start a pod that
+  is non-root as root. `Ready` is `False` with `UnsupportedAgentUser`, the operator
+  creates or changes no sync object, and a sync pod that the Treebind had runs on as
+  it was until you set another user.
+- **A change of the user** on a claim that the agent has used is refused by the
+  agent with `GitDirUnsafe`, because its state directory belongs to the user before:
+  see [when the user ID changes](#when-the-user-id-changes).
+- **`fsGroup`** is not applied ([#313](https://github.com/mohanedmoh/treebind/issues/313)).
+  For a volume that supports it, the kubelet gives every file of the claim the group,
+  with group read and write, also the agent's own `.treebind`, and the agent refuses
+  its state directory once it is open to the group: see
+  [what the volume needs](#what-the-volume-needs) for the same walk from the
+  application's pod, and the repair.
+- **What the API server refuses**, such as a label value that a label cannot have,
+  makes `Ready` `False` with `ReconcileFailed` and the API server's words. A pod that
+  is refused only when it is made, for a priority class that does not exist or a
+  quota, shows as `FailedCreate` in the events of the StatefulSet
+  ([what you see](agent-status.md)).
 
 ## The SSH key
 
@@ -125,6 +169,22 @@ For your application's pod:
   group. Not every storage driver supports this, NFS for one: on those the
   setting has no effect, so set the owner, the group and the mode on the storage
   side instead.
+- Set `fsGroupChangePolicy: OnRootMismatch` beside it. Where Kubernetes applies
+  `fsGroup`, it otherwise walks the whole claim at every start of the pod and gives
+  every file the group with group read and write, the agent's `.treebind` too, which
+  then has mode `2770`. The agent refuses it at its next start, and the sync stops:
+  the check `GitDir` fails with `GitDirUnsafe` and `open to group or others`
+  ([#313](https://github.com/mohanedmoh/treebind/issues/313)). With `OnRootMismatch`
+  Kubernetes skips the walk once the root of the volume has the group and its mode,
+  but the first mount of a root that does not match still walks once.
+- To repair a `.treebind` that a walk has opened, run once, as UID 65532 (or the
+  user the agent runs as), in a pod that mounts the claim:
+
+  ```sh
+  chmod -R g-rwxs "$MOUNT/.treebind"
+  ```
+
+  The check `GitDir` then passes, and the agent goes on by itself.
 - Give the application a umask of 0002 as well, or have it create files with
   group write. With the default 0022 the agent cannot change what the
   application creates, even with the same group.
@@ -161,7 +221,6 @@ and to nothing else
 
 ## What is still to come
 
-- `spec.agent` user, group and `fsGroup` overrides (FR-28,
-  [#96](https://github.com/mohanedmoh/treebind/issues/96)). With
-  `AGENT_ARBITRARY_USER_ID` on, the passwd file of the init container covers
-  whatever user they set.
+- `spec.agent.fsGroup` (FR-28, [#96](https://github.com/mohanedmoh/treebind/issues/96)),
+  once the agent keeps its state directory private on a claim that the kubelet has
+  given to a group ([#313](https://github.com/mohanedmoh/treebind/issues/313)).
