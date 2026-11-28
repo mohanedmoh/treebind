@@ -115,9 +115,7 @@ The application adds a panel to the dashboard, and writes a cache file beside it
 
 <!-- tested: save-a-dashboard -->
 ```sh
-kubectl -n demo exec -i dashboards-app -- sh -c 'cat > /var/lib/dashboards/sales.json' <<'EOF'
-{"title": "Sales", "panels": 3}
-EOF
+kubectl -n demo exec dashboards-app -- sh -c 'echo "$1" > /var/lib/dashboards/sales.json' sh '{"title": "Sales", "panels": 3}'
 kubectl -n demo exec dashboards-app -- sh -c 'echo "rendered at startup" > /var/lib/dashboards/render-cache.txt'
 ```
 
@@ -148,9 +146,7 @@ Now the application renames the dashboard and, before the agent commits that, so
 
 <!-- tested: change-it-on-both-sides -->
 ```sh
-kubectl -n demo exec -i dashboards-app -- sh -c 'cat > /var/lib/dashboards/sales.json' <<'EOF'
-{"title": "Sales (edited in the application)", "panels": 3}
-EOF
+kubectl -n demo exec dashboards-app -- sh -c 'echo "$1" > /var/lib/dashboards/sales.json' sh '{"title": "Sales (edited in the application)", "panels": 3}'
 kubectl -n git-server exec -i deploy/git-server -- su git -c sh <<'EOF'
 cd ~/dashboards
 git pull -q
