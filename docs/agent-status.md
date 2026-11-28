@@ -143,8 +143,10 @@ The operators before this release accepted `spec.agent` and ignored it. From thi
   ([when the user ID changes](pod-security.md#when-the-user-id-changes)). The init container needs an agent image of this
   release or newer, which `helm upgrade --reuse-values` and a pinned `agent.image` or `AGENT_IMAGE` do not give.
 - `runAsUser: 0` turns `Ready` `False` with `UnsupportedAgentUser`, and the old pod is left running.
-- A label value that a label cannot have stops the rollout with `ReconcileFailed`, and a priority class that does not exist
-  with `FailedCreate` in the events of the StatefulSet: the old pod is gone and no new one is made.
+- A label value that a label cannot have is refused by the API server: `Ready` turns `False` with `ReconcileFailed`, and the
+  old pod runs on.
+- A priority class that does not exist is refused only when the new pod is made: the old pod is gone, no new one is made, and
+  the events of the StatefulSet say `FailedCreate`.
 
 Read `spec.agent` of your Treebinds before the upgrade: `kubectl get treebinds -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}: {.spec.agent}{"\n"}{end}'`.
 
