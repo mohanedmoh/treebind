@@ -396,6 +396,42 @@ func TestReadyNamesTheMemoryLimitOfASyncContainerThatWasKilledForMemory(t *testi
 	}
 }
 
+// testPasswdSyncName is the StatefulSet of the test of the passwd init container.
+const testPasswdSyncName = "app-sync"
+
+// The passwd init container has the memory limit of the sync container (docs/adr/0042), and a limit of spec.agent that is
+// too low for it kills it for memory before the sync container starts. Ready says so, as for the sync container.
+func TestReadyNamesTheMemoryLimitOfAPasswdContainerThatWasKilledForMemory(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	initializing := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}
+	pod := syncPodWith(false, initializing, corev1.ContainerState{})
+	pod.Spec.InitContainers = []corev1.Container{{
+		Name:      passwdContainerName,
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Mi")}},
+	}}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+		Name: passwdContainerName, State: waitingToStartAgain(), LastTerminationState: oomKilledAt(now.Add(-time.Minute)),
+	}}
+	reconciler := &TreebindReconciler{APIReader: &podReader{pod: pod}, now: func() time.Time { return now }}
+	statefulSet := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: testPasswdSyncName, Namespace: nsApps}}
+	notReady := metav1.Condition{
+		Type: treebindv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+		Reason: treebindv1alpha1.ReasonSyncPodNotReady, Message: messageNoPodReady,
+	}
+
+	got := reconciler.whySyncPodNotReady(context.Background(), statefulSet, notReady)
+
+	assertReady(t, got, metav1.ConditionFalse, treebindv1alpha1.ReasonSyncPodOOMKilled, messageNoPodReady+
+		": the passwd init container was killed for using more than its memory limit of 4Mi (OOMKilled)")
+
+	// Once it has written the file, a kill before is over: the sync container is what is not ready.
+	pod.Status.InitContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		ExitCode: 0, Reason: "Completed",
+	}}
+	got = reconciler.whySyncPodNotReady(context.Background(), statefulSet, notReady)
+	assertReady(t, got, metav1.ConditionFalse, treebindv1alpha1.ReasonSyncPodNotReady, messageNoPodReady)
+}
+
 // The names of the sync pod and of its node in the tests of why the pod does not run, and the words of the scheduler
 // on the kind cluster of #266 after a drain of the node of a claim of local-path.
 const (

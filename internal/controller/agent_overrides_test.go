@@ -40,6 +40,7 @@ import (
 const (
 	testLabelKey        = "team"
 	testLabelValue      = "storage"
+	testAnnotationKey   = "owner"
 	testAnnotationValue = "storage-team"
 	testResourceClaim   = "gpu"
 )
@@ -175,7 +176,7 @@ func TestTheAgentOverridesReachTheSyncPod(t *testing.T) {
 	if !reflect.DeepEqual(spec.ImagePullSecrets, agent.ImagePullSecrets) {
 		t.Errorf("imagePullSecrets = %v, want %v", spec.ImagePullSecrets, agent.ImagePullSecrets)
 	}
-	if pod.Labels[testLabelKey] != testLabelValue || pod.Annotations["owner"] != testAnnotationValue {
+	if pod.Labels[testLabelKey] != testLabelValue || pod.Annotations[testAnnotationKey] != testAnnotationValue {
 		t.Errorf("labels %v and annotations %v miss the ones of spec.agent", pod.Labels, pod.Annotations)
 	}
 
@@ -251,7 +252,7 @@ func TestSpecAgentDoesNotOverrideWhatTheOperatorSets(t *testing.T) {
 		Labels: map[string]string{
 			"app.kubernetes.io/instance": "someone-else", "app.kubernetes.io/managed-by": "me", testLabelKey: testLabelValue,
 		},
-		Annotations: map[string]string{safeToEvictLocalVolumes: "data", "owner": testAnnotationValue},
+		Annotations: map[string]string{safeToEvictLocalVolumes: "data", testAnnotationKey: testAnnotationValue},
 	}
 	statefulSet := mustDesiredStatefulSet(t, treebind, testImage)
 	pod := statefulSet.Spec.Template
@@ -269,6 +270,45 @@ func TestSpecAgentDoesNotOverrideWhatTheOperatorSets(t *testing.T) {
 	}
 	if !reflect.DeepEqual(statefulSet.Spec.Selector.MatchLabels, podLabels(treebind)) {
 		t.Errorf("selector = %v, want %v", statefulSet.Spec.Selector.MatchLabels, podLabels(treebind))
+	}
+}
+
+// A user without a group would run in group 0, the default of the runtime, and not in the group 65532 that the files of
+// the claim are shared with (docs/pod-security.md).
+func TestAUserWithoutAGroupRunsInTheImagesGroup(t *testing.T) {
+	user, group := int64(1000), int64(3000)
+	for name, tt := range map[string]struct {
+		agent     *treebindv1alpha1.AgentSpec
+		wantGroup *int64
+	}{
+		"no user and no group": {agent: &treebindv1alpha1.AgentSpec{}},
+		"a user only":          {agent: &treebindv1alpha1.AgentSpec{RunAsUser: &user}, wantGroup: new(imageGroupID)},
+		"a user and a group":   {agent: &treebindv1alpha1.AgentSpec{RunAsUser: &user, RunAsGroup: &group}, wantGroup: &group},
+		"a group only":         {agent: &treebindv1alpha1.AgentSpec{RunAsGroup: &group}, wantGroup: &group},
+	} {
+		treebind := newTreebind(testTreebindName)
+		treebind.Spec.Agent = tt.agent
+		got := mustDesiredStatefulSet(t, treebind, testImage).Spec.Template.Spec.SecurityContext.RunAsGroup
+		if !reflect.DeepEqual(got, tt.wantGroup) {
+			t.Errorf("%s: runAsGroup = %v, want %v", name, got, tt.wantGroup)
+		}
+	}
+}
+
+// The annotations of the deprecated security fields would loosen the profile of the pod on a cluster that still reads
+// them, and the sync pod keeps its own (docs/adr/0044). Every other annotation is passed on.
+func TestSpecAgentAnnotationsCannotLoosenTheSecurityOfThePod(t *testing.T) {
+	const unconfined = "unconfined"
+	treebind := newTreebind(testTreebindName)
+	treebind.Spec.Agent = &treebindv1alpha1.AgentSpec{Annotations: map[string]string{
+		"container.apparmor.security.beta.kubernetes.io/agent": unconfined,
+		"seccomp.security.alpha.kubernetes.io/pod":             unconfined,
+		"container.seccomp.security.alpha.kubernetes.io/agent": unconfined,
+		testAnnotationKey: testAnnotationValue,
+	}}
+	annotations := mustDesiredStatefulSet(t, treebind, testImage).Spec.Template.Annotations
+	if want := map[string]string{testAnnotationKey: testAnnotationValue}; !reflect.DeepEqual(annotations, want) {
+		t.Errorf("annotations = %v, want %v", annotations, want)
 	}
 }
 

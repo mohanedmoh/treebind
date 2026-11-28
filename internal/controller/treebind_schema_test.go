@@ -99,7 +99,7 @@ func newAgentSpec() *treebindv1alpha1.AgentSpec {
 		PriorityClassName: "background",
 		ImagePullSecrets:  []corev1.LocalObjectReference{{Name: "registry-credentials"}},
 		Labels:            map[string]string{testLabelKey: testLabelValue},
-		Annotations:       map[string]string{"owner": testAnnotationValue},
+		Annotations:       map[string]string{testAnnotationKey: testAnnotationValue},
 		RunAsUser:         &runAsUser,
 		RunAsGroup:        &runAsGroup,
 		FSGroup:           &fsGroup,

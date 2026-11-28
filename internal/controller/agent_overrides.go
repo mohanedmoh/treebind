@@ -19,6 +19,7 @@ package controller
 import (
 	"maps"
 	"slices"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -27,8 +28,12 @@ import (
 	treebindv1alpha1 "github.com/mohanedmoh/treebind/api/v1alpha1"
 )
 
-// imageUserID is the user that the agent image runs as, the one user that the image's /etc/passwd has an entry for.
-const imageUserID int64 = 65532
+// imageUserID is the user that the agent image runs as, the one user that the image's /etc/passwd has an entry for, and
+// imageGroupID its group, which the files of the claim are shared with (docs/pod-security.md).
+const (
+	imageUserID  int64 = 65532
+	imageGroupID int64 = 65532
+)
 
 // defaultAgentResources are the resources of the sync container that spec.agent.resources does not set.
 func defaultAgentResources() corev1.ResourceRequirements {
@@ -115,21 +120,44 @@ func withAgentPodSpec(template *corev1.PodTemplateSpec, agent *treebindv1alpha1.
 		user := *agent.RunAsUser
 		spec.SecurityContext.RunAsUser = &user
 	}
-	if agent.RunAsGroup != nil {
+	// A user without a group runs in group 0, the default of the runtime, and not in the group that the files of the
+	// claim are shared with, so a user that is set alone gets the image's group (docs/adr/0044).
+	switch {
+	case agent.RunAsGroup != nil:
 		group := *agent.RunAsGroup
+		spec.SecurityContext.RunAsGroup = &group
+	case agent.RunAsUser != nil:
+		group := imageGroupID
 		spec.SecurityContext.RunAsGroup = &group
 	}
 }
 
+// insecureAnnotationPrefixes are the annotations of the deprecated security fields, AppArmor and seccomp, which a
+// cluster that still reads them would take over the security context of the pod. spec.agent cannot set them, so that
+// the sync pod keeps its own profile (docs/adr/0044).
+var insecureAnnotationPrefixes = []string{
+	"container.apparmor.security.beta.kubernetes.io/",
+	"seccomp.security.alpha.kubernetes.io/",
+	"container.seccomp.security.alpha.kubernetes.io/",
+}
+
+// securityAnnotation says whether the key is one of insecureAnnotationPrefixes.
+func securityAnnotation(key string) bool {
+	return slices.ContainsFunc(insecureAnnotationPrefixes, func(prefix string) bool { return strings.HasPrefix(key, prefix) })
+}
+
 // withAgentMetadata adds the labels and the annotations of spec.agent to the template, after the operator has put its
 // own there: a key that the operator sets keeps the operator's value, so that the selector of the StatefulSet still
-// selects the pod, and a key that it does not set has the value of spec.agent.
+// selects the pod, and a key that it does not set has the value of spec.agent. The annotations of the deprecated security
+// fields are left out (insecureAnnotationPrefixes).
 func withAgentMetadata(meta *metav1.ObjectMeta, agent *treebindv1alpha1.AgentSpec) {
 	if agent == nil {
 		return
 	}
 	meta.Labels = withoutOverriding(meta.Labels, agent.Labels)
-	meta.Annotations = withoutOverriding(meta.Annotations, agent.Annotations)
+	annotations := maps.Clone(agent.Annotations)
+	maps.DeleteFunc(annotations, func(key, _ string) bool { return securityAnnotation(key) })
+	meta.Annotations = withoutOverriding(meta.Annotations, annotations)
 }
 
 // withoutOverriding adds to dst each entry of src whose key dst does not have. It makes dst only when there is
